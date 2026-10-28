@@ -20,6 +20,31 @@ target_include_directories(configqml_core PUBLIC
     $<INSTALL_INTERFACE:include/configqml>)
 target_compile_options(configqml_core PRIVATE -Wall -Wextra -Wpedantic)
 
+option(CONFIGQML_BUILD_QML "Build the ConfigQml QML facade" ON)
+if(CONFIGQML_BUILD_QML)
+    # QMetaObjectBuilder is a private ABI. Record and check its exact build identity.
+    set(CONFIGQML_PRIVATE_QT_VERSION "6.12.0")
+    find_package(Qt6 ${CONFIGQML_PRIVATE_QT_VERSION} EXACT REQUIRED COMPONENTS Core Qml)
+    find_package(Qt6CorePrivate ${CONFIGQML_PRIVATE_QT_VERSION} EXACT REQUIRED)
+    foreach(component Core CorePrivate Qml)
+        if(NOT Qt6${component}_VERSION VERSION_EQUAL CONFIGQML_PRIVATE_QT_VERSION)
+            message(FATAL_ERROR "Private adapter requires exact matching Qt ${component} ${CONFIGQML_PRIVATE_QT_VERSION}")
+        endif()
+    endforeach()
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/configqml-qt-build.txt"
+        "Core=${Qt6Core_VERSION}\nCorePrivate=${Qt6CorePrivate_VERSION}\nQml=${Qt6Qml_VERSION}\n")
+    qt_policy(SET QTP0001 NEW)
+    qt_add_qml_module(configqml SHARED URI ConfigQml VERSION 1.0
+        OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/ConfigQml"
+        SOURCES configqmldeclaration.h configqmldeclaration.cpp
+            configqmlstore.h configqmlstore.cpp configqmlvalue.h configqmlvalue.cpp
+            confignamespace.cpp configfacade.h configfacade.cpp)
+    add_library(configqml::configqml ALIAS configqml)
+    target_link_libraries(configqml PUBLIC configqml::core Qt6::Qml PRIVATE Qt6::CorePrivate)
+    target_include_directories(configqml PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+    target_compile_options(configqml PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 6.12 REQUIRED COMPONENTS Test)
@@ -47,6 +72,37 @@ if(BUILD_TESTING)
     add_executable(test_consumer_lifetime tests/test_consumer_lifetime.cpp)
     target_link_libraries(test_consumer_lifetime PRIVATE configqml::core Qt6::Test)
     add_test(NAME consumer_lifetime COMMAND test_consumer_lifetime)
+    if(CONFIGQML_BUILD_QML)
+        add_executable(test_qml tests/test_qml.cpp)
+        target_link_libraries(test_qml PRIVATE configqml::configqml Qt6::Test)
+        target_compile_definitions(test_qml PRIVATE
+            QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
+            QML_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_facade.qml")
+        add_test(NAME qml COMMAND test_qml)
+        set_tests_properties(qml PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+        add_executable(test_gate_lifetime tests/test_gate_lifetime.cpp)
+        target_link_libraries(test_gate_lifetime PRIVATE configqml::configqml Qt6::Test)
+        add_test(NAME gate_lifetime COMMAND test_gate_lifetime)
+        add_executable(test_qml_lifetime tests/test_qml_lifetime.cpp)
+        target_link_libraries(test_qml_lifetime PRIVATE configqml::configqml Qt6::Test)
+        target_compile_definitions(test_qml_lifetime PRIVATE
+            QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
+            QML_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_facade.qml")
+        add_test(NAME qml_lifetime COMMAND test_qml_lifetime)
+        add_executable(test_import tests/test_import.cpp)
+        target_link_libraries(test_import PRIVATE Qt6::Qml)
+        add_dependencies(test_import configqmlplugin)
+        target_compile_definitions(test_import PRIVATE
+            QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
+            QML_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_facade.qml")
+        add_test(NAME import_only COMMAND test_import)
+        add_test(NAME private_isolation COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/private_isolation.cmake)
+        add_test(NAME qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
+            -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_facade.qml)
+    endif()
     add_executable(test_core_link tests/test_core_link.cpp)
     target_link_libraries(test_core_link PRIVATE configqml::core)
     add_test(NAME core_link COMMAND ${CMAKE_COMMAND}
