@@ -7,6 +7,15 @@
 #include <cstdio>
 
 namespace configqml {
+void ConfigWorkerOwner::acknowledgeModels(const QMap<ConfigPath, quint64> &generations) {
+    QMutexLocker lock(&m_mutex);
+    if (m_terminalReceived || m_stopped || generations.isEmpty())
+        return;
+    auto *worker = m_worker;
+    QMetaObject::invokeMethod(
+        worker, [worker, generations] { worker->acknowledgeModels(generations); },
+        Qt::QueuedConnection);
+}
 namespace {
 bool persistence(const QString &operation) {
     return operation == "save" || operation == "flush" || operation == "close" ||

@@ -83,10 +83,14 @@ bool compatibleAncestors(const QVariantMap &base, const QVariantMap &fresh, cons
 } // namespace
 ConfigJsonBackend::ConfigJsonBackend(const QList<ConfigJsonFile> &files, FaultHook hook)
     : m_files(files), m_hook(std::move(hook)) {
-    for (auto &file : m_files)
+    for (auto &file : m_files) {
+        file.layerId = ownString(file.layerId);
+        file.sourceId = ownString(file.sourceId);
+        file.path = ownString(file.path);
         if (file.path.isEmpty())
             file.path = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) +
                         "/config.json";
+    }
 }
 ConfigBackendCapabilities ConfigJsonBackend::capabilities() const {
     ConfigBackendCapabilities c;
@@ -200,7 +204,7 @@ ConfigBackendResult ConfigJsonBackend::read(const QString &id, const QString &ex
         r.error = {"unsupported-file-identity", id, "read", name};
         return r;
     }
-    ++m_reads[id];
+    ++m_reads[ownString(id)];
     QByteArray bytes;
     char buffer[16384];
     for (;;) {
@@ -230,8 +234,8 @@ void ConfigJsonBackend::confirm(const QString &id, const ConfigRevision &revisio
     const auto fields = revision.token.split('|');
     if (fields.size() == 3) {
         const auto target = QFile::decodeName(QByteArray::fromHex(fields[0]));
-        m_sourceTargets[id] = target;
-        m_confirmed[target] = fields[1];
+        m_sourceTargets[ownString(id)] = target;
+        m_confirmed[ownString(target)] = fields[1];
     }
 }
 bool ConfigJsonBackend::changed(const QString &id) const {
@@ -314,9 +318,14 @@ ConfigBackendResult ConfigJsonBackend::publish(const ConfigBackendRequest &reque
     confirm(id, r.revision);
     return r;
 }
-quint64 ConfigJsonBackend::submit(const ConfigBackendRequest &request) {
+quint64 ConfigJsonBackend::submit(const ConfigBackendRequest &input) {
     if (QThread::currentThread() != m_owner)
         return 0;
+    auto request = input;
+    request.sourceId = ownString(input.sourceId);
+    request.bytes = QByteArray(input.bytes.constData(), input.bytes.size());
+    request.expected.token =
+        QByteArray(input.expected.token.constData(), input.expected.token.size());
     const auto sequence = ++m_next;
     ConfigBackendResult r;
     if (request.operation == ConfigBackendRequest::Operation::Read)
@@ -350,8 +359,10 @@ std::optional<ConfigBackendResult> ConfigJsonBackend::take(quint64 requestId) {
         return {};
     return m_results.take(requestId);
 }
-ConfigJsonTransaction ConfigJsonBackend::reconcile(const QString &id, const QVariantMap &baseline,
+ConfigJsonTransaction ConfigJsonBackend::reconcile(const QString &sourceId,
+                                                   const QVariantMap &baseline,
                                                    const QList<ConfigFileEdit> &edits) {
+    const auto id = ownString(sourceId);
     ConfigJsonTransaction t;
     auto &r = t.outcome;
     r.sourceId = id;

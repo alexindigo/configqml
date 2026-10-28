@@ -3,6 +3,7 @@
 // Internal protocol. No private Qt headers, no QML objects or engine callbacks.
 #include "configstore.h"
 #include "configmemorybackend.h"
+#include "configprojection_p.h"
 #include <QQueue>
 #include <QTimer>
 #include <QFileSystemWatcher>
@@ -20,6 +21,8 @@ struct ConfigWorkerPacket {
     std::optional<ConfigResult> result;
     bool autoSaveRequested = false;
     std::optional<ConfigError> sourceError;
+    QMap<ConfigPath, QMap<quint64, ConfigModelPlan>> models;
+    qint64 planningNanos = 0;
 };
 struct ConfigCommand {
     quint64 requestId = 0;
@@ -34,6 +37,7 @@ public:
     void initialize();
     void enqueue(const ConfigCommand &command);
     void abandon();
+    void acknowledgeModels(const QMap<ConfigPath, quint64> &generations);
     // Internal deterministic scheduling, accessible only through the test friend.
     void holdInputs(bool hold);
     void releaseInputs(int count);
@@ -91,6 +95,7 @@ private:
     QMap<ConfigPath, quint64> m_pathGenerations;
     QMap<ConfigPath, quint64> m_pathInputs;
     ConfigSnapshot m_previous;
+    QMap<ConfigPath, QMap<quint64, QList<ConfigModelRow>>> m_modelVersions;
     QMap<QString, ConfigRoute> m_routes;
     QMap<QString, ConfigRevision> m_revisions;
     QMap<QString, quint64> m_dirty;

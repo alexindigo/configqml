@@ -300,7 +300,7 @@ ConfigJsonEncodeResult encode(const QVariant &value, const ConfigPath &path) {
 
 ConfigValueResult decodeJsonValue(const QByteArray &bytes, const ConfigPath &path,
                                   ConfigJsonLayout *layout) {
-    return JsonReader(bytes, layout).run(path);
+    return JsonReader(bytes, layout).run(ownPath(path));
 }
 ConfigJsonEncodeResult encodeJsonValue(const QVariant &value, const ConfigPath &path) {
     const auto owned = ownValue(value, path);

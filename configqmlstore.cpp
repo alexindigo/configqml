@@ -2,6 +2,7 @@
 #include "configqmlstore.h"
 #include "configqmlvalue.h"
 #include "configconsumer_p.h"
+#include "configqmlmodel.h"
 #include <QQmlEngine>
 #include <QTimer>
 
@@ -22,6 +23,7 @@ void ConfigQmlStore::componentComplete() {
     QList<ConfigDiagnostic> errors;
     auto descriptor = m_schema ? m_schema->compile(errors) : ConfigDescriptor::group({});
     ConfigStoreOptions options;
+    options.modelNumbers = ConfigListModel::Numbers::DecimalStrings;
     options.autoSave = m_autoSave;
     options.autoSaveInterval = m_autoSaveInterval;
     options.schema = ConfigSchema(descriptor);
@@ -84,7 +86,7 @@ void ConfigQmlStore::componentComplete() {
         return;
     }
     m_core = new ConfigStore(options, this);
-    m_values = createConfigNamespace(this, descriptor, {}, this);
+    m_values = createConfigNamespace(this, *m_core->schema().descriptor({}), {}, this);
     connect(m_core, &ConfigStore::statusChanged, this,
             [this] { ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); }); });
     connect(m_core, &ConfigStore::completed, this, [this](const auto &result) {
@@ -108,10 +110,11 @@ void ConfigQmlStore::reject(const ConfigPath &path, const QString &code) {
     ConfigConsumerGuard boundary(this);
     if (!boundary.invoke([&] { emit inputRejected(path, code); }))
         return;
-    boundary.invoke([&] {
-        if (auto *engine = qjsEngine(this))
-            engine->throwError(QJSValue::TypeError, QStringLiteral("configqml: ") + code);
-    });
+    boundary.invoke([&] { raise(code); });
+}
+void ConfigQmlStore::raise(const QString &code) {
+    if (auto *engine = qjsEngine(this))
+        engine->throwError(QJSValue::TypeError, QStringLiteral("configqml: ") + code);
 }
 ConfigStore::Callback ConfigQmlStore::callback(const QJSValue &function) {
     if (!function.isCallable())
@@ -134,8 +137,7 @@ ConfigStore::Callback ConfigQmlStore::callback(const QJSValue &function) {
 QVariant ConfigQmlStore::read(const ConfigPath &path) const {
     if (!m_core)
         return {};
-    const auto descriptor = m_core->schema().descriptor(path);
-    return descriptor ? qmlValue(*descriptor, m_core->value(path)) : QVariant();
+    return m_core->presentation(path);
 }
 ConfigRequestHandle ConfigQmlStore::write(const ConfigPath &path, const QVariant &value,
                                           const QJSValue &function) {
@@ -144,20 +146,12 @@ ConfigRequestHandle ConfigQmlStore::write(const ConfigPath &path, const QVariant
         reject(path, "not-ready");
         return {};
     }
-    const auto descriptor = m_core->schema().descriptor(path);
-    ConfigValueResult checked;
-    if (descriptor) {
-        if (!boundary.invoke([&] { checked = admitQmlValue(*descriptor, value, path); }))
-            return {};
-    } else
-        checked.errors.append(ConfigDiagnostic{path, "undeclared-path"});
-    if (!checked.ok()) {
-        reject(path, checked.errors.first().code);
-        return {0, 0, false, checked.errors};
-    }
+    const auto schema = m_core->schema();
+    ConfigAdmission checked;
+    if (!boundary.invoke([&] { checked = admitQmlInput(schema, path, value); }))
+        return {};
     ConfigRequestHandle handle;
-    if (!boundary.invoke(
-            [&] { handle = m_core->setUser(path, checked.value, this, callback(function)); }))
+    if (!boundary.invoke([&] { handle = m_core->setUser(checked, this, callback(function)); }))
         return handle;
     if (!handle.accepted)
         boundary.invoke([&] {
@@ -176,22 +170,15 @@ QString ConfigQmlStore::setRuntime(const QStringList &p, const QVariant &v, cons
         reject(p, "not-ready");
         return {};
     }
-    const auto d = m_core->schema().descriptor(p);
-    ConfigValueResult value;
-    if (d) {
-        if (!boundary.invoke([&] { value = admitQmlValue(*d, v, p); }))
-            return {};
-    } else
-        value.errors.append(ConfigDiagnostic{p, "undeclared-path"});
-    if (!value.ok()) {
-        reject(p, value.errors.first().code);
+    const auto schema = m_core->schema();
+    ConfigAdmission value;
+    if (!boundary.invoke([&] { value = admitQmlInput(schema, p, v); }))
         return {};
-    }
     ConfigRequestHandle result;
-    if (!boundary.invoke([&] { result = m_core->setRuntime(p, value.value, this, callback(f)); }))
+    if (!boundary.invoke([&] { result = m_core->setRuntime(value, this, callback(f)); }))
         return QString::number(result.requestId);
     if (!result.accepted)
-        reject(p, result.errors.first().code);
+        boundary.invoke([&] { raise(result.errors.first().code); });
     return QString::number(result.requestId);
 }
 QString ConfigQmlStore::reset(const QStringList &p, const QString &t, const QJSValue &f) {
@@ -238,6 +225,36 @@ QVariantMap ConfigQmlStore::info(const QStringList &p) const {
             {"route", QVariantMap{{"layerId", info.provenance.route.layerId},
                                   {"sourceId", info.provenance.route.sourceId}}}};
 }
+QAbstractItemModel *ConfigQmlStore::listModel(const QStringList &queryPath) {
+    const auto path = ownPath(queryPath);
+    auto *source = m_core ? m_core->listModel(path) : nullptr;
+    if (!source) {
+        reject(path, "not-a-list-setting");
+        return nullptr;
+    }
+    if (m_models.value(path))
+        return m_models.value(path);
+    QQmlEngine::setObjectOwnership(source, QQmlEngine::CppOwnership);
+    m_models[path] = source;
+    connect(source, &ConfigListModel::writeRejected, this,
+            [this, path] { reject(path, "read-only-model"); });
+    return source;
+}
+QAbstractItemModel *ConfigQmlStore::keyedModel(const QStringList &queryPath) {
+    const auto path = ownPath(queryPath);
+    auto *source = m_core ? m_core->keyedModel(path) : nullptr;
+    if (!source) {
+        reject(path, "not-a-map-setting");
+        return nullptr;
+    }
+    if (!m_models.value(path)) {
+        QQmlEngine::setObjectOwnership(source, QQmlEngine::CppOwnership);
+        m_models[path] = source;
+        connect(source, &ConfigListModel::writeRejected, this,
+                [this, path] { reject(path, "read-only-model"); });
+    }
+    return m_models.value(path);
+}
 QString ConfigQmlStore::save(const QJSValue &f) {
     if (!m_core) {
         reject({}, "not-ready");
@@ -262,24 +279,16 @@ QString ConfigQmlStore::initializeIfMissing(const QStringList &p, const QVariant
         reject(p, "not-ready");
         return {};
     }
-    const auto descriptor = m_core->schema().descriptor(p);
-    ConfigValueResult checked;
+    const auto schema = m_core->schema();
+    ConfigAdmission checked;
     ConfigConsumerGuard boundary(this);
-    if (descriptor) {
-        if (!boundary.invoke([&] { checked = admitQmlValue(*descriptor, v, p); }))
-            return {};
-    } else
-        checked.errors.append(ConfigDiagnostic{p, "undeclared-path"});
-    if (!checked.ok()) {
-        reject(p, checked.errors.first().code);
+    if (!boundary.invoke([&] { checked = admitQmlInput(schema, p, v); }))
         return {};
-    }
     ConfigRequestHandle handle;
-    if (!boundary.invoke(
-            [&] { handle = m_core->initializeIfMissing(p, checked.value, this, callback(f)); }))
+    if (!boundary.invoke([&] { handle = m_core->initializeIfMissing(checked, this, callback(f)); }))
         return QString::number(handle.requestId);
     if (!handle.accepted)
-        reject(p, handle.errors.first().code);
+        boundary.invoke([&] { raise(handle.errors.first().code); });
     return QString::number(handle.requestId);
 }
 QString ConfigQmlStore::flush(const QJSValue &f) {

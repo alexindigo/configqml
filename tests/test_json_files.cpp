@@ -28,6 +28,34 @@ static QByteArray readFile(const QString &path) {
 class JsonFilesTest : public QObject {
     Q_OBJECT
 private slots:
+    void borrowedBackendKeys() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto canonical = dir.filePath("config.json");
+        QVERIFY(writeFile(canonical, "{}"));
+        QString mutablePath = canonical;
+        auto *pathData = mutablePath.data();
+        QChar id[] = {QChar('f'), QChar('i'), QChar('l'), QChar('e')};
+        ConfigJsonBackend backend({{"user", QString::fromRawData(id, 4),
+                                    QString::fromRawData(pathData, mutablePath.size())}});
+        id[0] = QChar('m');
+        pathData[1] = QChar('x');
+        QCOMPARE(backend.path("file"), canonical);
+        id[0] = QChar('f');
+        ConfigBackendRequest request;
+        request.sourceId = QString::fromRawData(id, 4);
+        auto sequence = backend.submit(request);
+        id[0] = QChar('m');
+        auto result = backend.take(sequence);
+        QVERIFY(result && result->success);
+        QCOMPARE(result->sourceId, QString("file"));
+        QCOMPARE(backend.reads("file"), quint64(1));
+        QCOMPARE(backend.reads("mile"), quint64(0));
+        id[0] = QChar('f');
+        backend.confirm(QString::fromRawData(id, 4), result->revision);
+        id[0] = QChar('m');
+        QVERIFY(!backend.changed("file"));
+    }
     void codec() {
         ConfigJsonCodec codec;
         auto input =

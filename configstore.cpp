@@ -3,6 +3,7 @@
 #include "configworker_p.h"
 #include "configshutdown_p.h"
 #include "configconsumer_p.h"
+#include "configlistmodel.h"
 #include <QThread>
 #include <QUuid>
 #include <QElapsedTimer>
@@ -15,6 +16,15 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
     m_storeId = QString(m_storeId.constData(), m_storeId.size());
     qRegisterMetaType<ConfigResult>();
     qRegisterMetaType<ConfigInput>();
+    if (m_schema.valid())
+        for (const auto &path : m_schema.leaves()) {
+            const auto descriptor = *m_schema.descriptor(path);
+            if (descriptor.type == ConfigDescriptor::Type::List ||
+                descriptor.type == ConfigDescriptor::Type::Map) {
+                m_models[path] = std::shared_ptr<ConfigListModel>(
+                    new ConfigListModel(descriptor, options.modelNumbers));
+            }
+        }
     auto owned = options;
     for (auto &file : owned.jsonFiles) {
         file.layerId = QString(file.layerId.constData(), file.layerId.size());
@@ -80,9 +90,29 @@ QVariant ConfigStore::value(const ConfigPath &path) const {
     Q_ASSERT(QThread::currentThread() == thread());
     return m_cache.values.value(path);
 }
+QVariant ConfigStore::presentation(const ConfigPath &path) const {
+    Q_ASSERT(QThread::currentThread() == thread());
+    auto cached = m_presentations.constFind(path);
+    if (cached != m_presentations.cend())
+        return cached.value();
+    const auto descriptor = m_schema.descriptor(path);
+    const auto result = descriptor ? collectionPresentation(*descriptor, value(path)) : QVariant();
+    m_presentations.insert(ownPath(path), result);
+    return result;
+}
 ConfigPathState ConfigStore::info(const ConfigPath &path) const {
     Q_ASSERT(QThread::currentThread() == thread());
     return m_cache.information.value(path);
+}
+ConfigListModel *ConfigStore::listModel(const ConfigPath &path) const {
+    Q_ASSERT(QThread::currentThread() == thread());
+    auto *model = m_models.value(path).get();
+    return model && model->descriptor().type == ConfigDescriptor::Type::List ? model : nullptr;
+}
+ConfigListModel *ConfigStore::keyedModel(const ConfigPath &path) const {
+    Q_ASSERT(QThread::currentThread() == thread());
+    auto *model = m_models.value(path).get();
+    return model && model->descriptor().type == ConfigDescriptor::Type::Map ? model : nullptr;
 }
 bool ConfigStore::canWriteUser(const ConfigPath &path) const {
     for (qsizetype size = path.size(); size >= 0; --size)
@@ -95,15 +125,19 @@ quint64 ConfigStore::registerRequest(QObject *context, Callback callback) {
     m_pending.insert(id, {context ? context : this, std::move(callback)});
     return id;
 }
-ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath &path,
+ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath &queryPath,
                                        const QVariant &value, const QString &target,
-                                       QObject *context, Callback callback) {
+                                       QObject *context, Callback callback,
+                                       ConfigDescriptor::Format format,
+                                       const ConfigAdmission *admission) {
     Q_ASSERT(QThread::currentThread() == thread());
+    const auto path = ownPath(queryPath);
     ConfigRequestHandle handle;
     ConfigConsumerGuard boundary(this);
-    auto checked = (kind == ConfigInput::Kind::User || kind == ConfigInput::Kind::Runtime ||
-                    kind == ConfigInput::Kind::Initialize)
-                       ? m_schema.validate(path, value)
+    auto checked = admission ? m_schema.admitted(*admission)
+                   : (kind == ConfigInput::Kind::User || kind == ConfigInput::Kind::Runtime ||
+                      kind == ConfigInput::Kind::Initialize)
+                       ? m_schema.validate(path, value, format)
                        : ConfigValueResult{};
     if (!m_accepting || !m_owner->accepting() || m_status != Status::Ready)
         checked.errors = {
@@ -180,23 +214,41 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
     if (kind == ConfigInput::Kind::User && info(path).provenance.maskedBy.isEmpty()) {
         changed = m_cache.values.value(path) != checked.value;
         m_cache.values[path] = checked.value;
+        if (changed)
+            m_presentations.remove(path);
     }
     // Owned input, sequence, queueing and cache installation all precede consumer reentry.
     if (changed)
         boundary.invoke([&] { emit valuesChanged({path}); });
     return handle;
 }
+ConfigRequestHandle ConfigStore::setUser(const ConfigAdmission &value, QObject *context,
+                                         Callback callback) {
+    return write(ConfigInput::Kind::User, value.path(), {}, {}, context, std::move(callback),
+                 ConfigDescriptor::Format::Native, &value);
+}
+ConfigRequestHandle ConfigStore::setRuntime(const ConfigAdmission &value, QObject *context,
+                                            Callback callback) {
+    return write(ConfigInput::Kind::Runtime, value.path(), {}, {}, context, std::move(callback),
+                 ConfigDescriptor::Format::Native, &value);
+}
+ConfigRequestHandle ConfigStore::initializeIfMissing(const ConfigAdmission &value, QObject *context,
+                                                     Callback callback) {
+    return write(ConfigInput::Kind::Initialize, value.path(), {}, {}, context, std::move(callback),
+                 ConfigDescriptor::Format::Native, &value);
+}
 ConfigRequestHandle ConfigStore::setUser(const ConfigPath &p, const QVariant &v, QObject *c,
-                                         Callback f) {
-    return write(ConfigInput::Kind::User, p, v, {}, c, std::move(f));
+                                         Callback f, ConfigDescriptor::Format format) {
+    return write(ConfigInput::Kind::User, p, v, {}, c, std::move(f), format);
 }
 ConfigRequestHandle ConfigStore::initializeIfMissing(const ConfigPath &p, const QVariant &v,
-                                                     QObject *c, Callback f) {
-    return write(ConfigInput::Kind::Initialize, p, v, {}, c, std::move(f));
+                                                     QObject *c, Callback f,
+                                                     ConfigDescriptor::Format format) {
+    return write(ConfigInput::Kind::Initialize, p, v, {}, c, std::move(f), format);
 }
 ConfigRequestHandle ConfigStore::setRuntime(const ConfigPath &p, const QVariant &v, QObject *c,
-                                            Callback f) {
-    return write(ConfigInput::Kind::Runtime, p, v, {}, c, std::move(f));
+                                            Callback f, ConfigDescriptor::Format format) {
+    return write(ConfigInput::Kind::Runtime, p, v, {}, c, std::move(f), format);
 }
 ConfigRequestHandle ConfigStore::reset(const ConfigPath &p, const QString &t, QObject *c,
                                        Callback f) {
@@ -235,9 +287,16 @@ quint64 ConfigStore::flush(QObject *c, Callback f) { return request("flush", c, 
 quint64 ConfigStore::close(QObject *c, Callback f) { return request("close", c, std::move(f)); }
 void ConfigStore::receive(const ConfigWorkerPacket &packet) {
     Q_ASSERT(QThread::currentThread() == thread());
+    if (m_publishingModels) {
+        QMetaObject::invokeMethod(this, [this, packet] { receive(packet); }, Qt::QueuedConnection);
+        return;
+    }
     QElapsedTimer publicationTimer;
     publicationTimer.start();
+    if (!packet.models.isEmpty())
+        m_lastPlanningNanos = packet.planningNanos;
     QList<ConfigPath> changed;
+    QMap<ConfigPath, ConfigModelPlan> modelPlans;
     if (packet.snapshot.topology == m_cache.topology) {
         if (packet.admitted &&
             (!m_admittedSnapshot || packet.admitted->generation > m_admittedSnapshot->generation)) {
@@ -257,12 +316,20 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
                 it->publicationGeneration <= state.publicationGeneration)
                 continue;
             const auto next = packet.snapshot.values.value(it.key());
-            if (m_cache.values.value(it.key()) != next)
+            if (m_cache.values.value(it.key()) != next) {
                 changed.append(it.key());
+                m_presentations.remove(it.key());
+            }
             m_cache.values[it.key()] = next;
             const auto latest = state.latestInput;
             state = it.value();
             state.latestInput = latest;
+            if (auto *model = m_models.value(it.key()).get()) {
+                const auto plans = packet.models.value(it.key());
+                const auto base = model->m_generation;
+                if (plans.contains(base))
+                    modelPlans[it.key()] = plans.value(base);
+            }
         }
         m_cache.generation = qMax(m_cache.generation, packet.snapshot.generation);
     }
@@ -280,6 +347,20 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
     }
     // Complete generation is installed before the first property notification.
     ConfigConsumerGuard boundary(this);
+    m_publishingModels = true;
+    QMap<ConfigPath, quint64> acknowledgements;
+    qint64 modelNotifications = 0;
+    for (auto it = modelPlans.cbegin(); it != modelPlans.cend(); ++it) {
+        const auto native = m_models.value(it.key());
+        if (native) {
+            if (!boundary.invoke([&] { native->apply(it.value(), this); }))
+                return;
+            modelNotifications += native->m_lastNotificationNanos;
+            acknowledgements[it.key()] = it->generation;
+        }
+    }
+    m_publishingModels = false;
+    m_owner->acknowledgeModels(acknowledgements);
     if (!changed.isEmpty() && !boundary.invoke([&] { emit valuesChanged(changed); }))
         return;
     if (statusChange && !boundary.invoke([&] { emit statusChanged(); }))
@@ -296,6 +377,8 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
     if (packet.autoSaveRequested && m_accepting && m_status == Status::Ready)
         request("autosave", this, {});
     m_worstPublicationNanos = qMax(m_worstPublicationNanos, publicationTimer.nsecsElapsed());
+    if (!packet.models.isEmpty())
+        m_lastLibraryPublicationNanos = publicationTimer.nsecsElapsed() - modelNotifications;
 }
 void ConfigStore::receiveResult(const ConfigResult &result) {
     if (result.requestId < m_nextCompletion || !m_pending.contains(result.requestId))

@@ -18,26 +18,22 @@ QVariant ConfigFacade::readSetting(const ConfigPath &relativePath) const {
     if (!m_store)
         return {};
     const auto path = m_prefix + relativePath;
-    const auto d = m_store->schema().descriptor(path);
-    return d ? qmlValue(*d, m_store->value(path)) : QVariant();
+    return m_store->presentation(path);
 }
 ConfigRequestHandle ConfigFacade::writeSetting(const ConfigPath &relativePath,
                                                const QVariant &value) {
     ConfigConsumerGuard boundary(this, m_store);
     const auto path = m_prefix + relativePath;
-    const auto d = m_store ? m_store->schema().descriptor(path) : std::nullopt;
-    ConfigValueResult checked;
-    if (d) {
-        if (!boundary.invoke([&] { checked = admitQmlValue(*d, value, path); }))
-            return {};
-    } else
-        checked.errors.append(ConfigDiagnostic{path, "detached-or-undeclared"});
     ConfigRequestHandle handle;
-    if (checked.ok()) {
-        if (!boundary.invoke([&] { handle = m_store->setUser(path, checked.value); }))
+    if (m_store) {
+        const auto schema = m_store->schema();
+        ConfigAdmission checked;
+        if (!boundary.invoke([&] { checked = admitQmlInput(schema, path, value); }))
+            return {};
+        if (!boundary.invoke([&] { handle = m_store->setUser(checked); }))
             return handle;
     } else
-        handle.errors = checked.errors;
+        handle.errors = {{path, "detached-or-undeclared"}};
     if (!handle.accepted) {
         if (!boundary.invoke([&] { emit inputRejected(relativePath, handle.errors.first().code); }))
             return handle;

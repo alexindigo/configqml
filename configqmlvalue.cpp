@@ -1,181 +1,122 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configqmlvalue.h"
-#include "confignumber.h"
+#include "configprojection_p.h"
 #include <QJSValue>
 #include <QJSValueIterator>
-#include <QRegularExpression>
-#include <cmath>
 
 namespace configqml {
-static ConfigValueResult capture(const QVariant &input, const ConfigPath &path,
-                                 QList<QJSValue> ancestors, int depth) {
-    auto fail = [&](const char *code) {
-        return ConfigValueResult{{}, {{path, QString::fromLatin1(code)}}};
-    };
-    if (depth > 64)
-        return fail("value-depth");
-    QVariant value = input;
-    if (value.metaType() == QMetaType::fromType<QJSValue>()) {
-        const auto js = value.value<QJSValue>();
-        if (js.isQObject() || js.isQMetaObject() || js.isCallable() || js.isDate() ||
-            js.isRegExp() || js.isError())
-            return fail("engine-bound-value");
-        if (js.isObject()) {
-            for (const auto &ancestor : ancestors)
-                if (js.strictlyEquals(ancestor))
-                    return fail("cyclic-value");
-            ancestors.append(js);
-        }
-        value = js.toVariant(QJSValue::RetainJSObjects);
-        if (value.metaType() == QMetaType::fromType<QJSValue>()) {
-            if (js.isArray()) {
-                QVariantList list;
-                const auto length = js.property("length").toUInt();
-                for (quint32 i = 0; i < length; ++i) {
-                    auto child =
-                        capture(QVariant::fromValue(js.property(i)),
-                                path + ConfigPath{QString::number(i)}, ancestors, depth + 1);
-                    if (!child.ok())
-                        return child;
-                    list.append(child.value);
-                }
-                return {list, {}};
+namespace {
+class QmlInput final : public ConfigValueInput {
+public:
+    QmlInput(const QVariant &input, QList<QJSValue> &ancestors)
+        : m_value(input), m_ancestors(ancestors) {
+        if (m_value.metaType() == QMetaType::fromType<QJSValue>()) {
+            m_js = m_value.value<QJSValue>();
+            if (m_js.isQObject() || m_js.isQMetaObject() || m_js.isCallable() || m_js.isDate() ||
+                m_js.isRegExp() || m_js.isError())
+                m_error = "engine-bound-value";
+            if (m_js.isObject())
+                for (const auto &ancestor : ancestors)
+                    if (m_js.strictlyEquals(ancestor))
+                        m_error = "cyclic-value";
+            if (!m_error.isEmpty())
+                return;
+            if (m_js.isArray())
+                m_kind = Kind::List;
+            else if (m_js.isObject()) {
+                // Native Qt value wrappers expose their QVariant directly; plain
+                // JS records stay engine views until the Core owning traversal.
+                auto native = m_js.toVariant(QJSValue::RetainJSObjects);
+                if (native.metaType() != QMetaType::fromType<QJSValue>()) {
+                    m_value = native;
+                    m_js = {};
+                } else
+                    m_kind = Kind::Map;
+            } else {
+                m_value = m_js.toVariant();
+                m_js = {};
             }
-            if (!js.isObject())
-                return fail("unsupported-value");
-            QVariantMap map;
-            QJSValueIterator it(js);
+        }
+        if (!m_js.isObject()) {
+            const auto id = m_value.metaType().id();
+            if (id == QMetaType::QVariantList || id == QMetaType::QStringList) {
+                m_kind = Kind::List;
+                m_list = m_value.toList();
+            } else if (id == QMetaType::QVariantMap) {
+                m_kind = Kind::Map;
+                m_map = m_value.toMap();
+            }
+        }
+    }
+    Kind kind() const override { return m_kind; }
+    QVariant scalar() const override { return m_value; }
+    qsizetype count() const override {
+        if (m_js.isArray())
+            return m_js.property("length").toUInt();
+        return m_kind == Kind::List ? m_list.size() : m_map.size();
+    }
+    QString error() const override { return m_error; }
+    void visit(const Visitor &visitor) const override {
+        if (m_js.isObject())
+            m_ancestors.append(m_js);
+        if (m_js.isArray()) {
+            const quint32 length = m_js.property("length").toUInt();
+            for (quint32 i = 0; i < length; ++i) {
+                QmlInput child(QVariant::fromValue(m_js.property(i)), m_ancestors);
+                visitor(QString::number(i), child);
+            }
+        } else if (m_js.isObject()) {
+            QJSValueIterator it(m_js);
             while (it.hasNext()) {
                 it.next();
-                auto child = capture(QVariant::fromValue(it.value()), path + ConfigPath{it.name()},
-                                     ancestors, depth + 1);
-                if (!child.ok())
-                    return child;
-                map.insert(it.name(), child.value);
+                QmlInput child(QVariant::fromValue(it.value()), m_ancestors);
+                visitor(it.name(), child);
             }
-            return {map, {}};
+        } else if (m_kind == Kind::List) {
+            for (int i = 0; i < m_list.size(); ++i) {
+                QmlInput child(m_list[i], m_ancestors);
+                visitor(QString::number(i), child);
+            }
+        } else {
+            for (auto it = m_map.cbegin(); it != m_map.cend(); ++it) {
+                QmlInput child(it.value(), m_ancestors);
+                visitor(it.key(), child);
+            }
         }
+        if (m_js.isObject())
+            m_ancestors.removeLast();
     }
-    if (value.metaType().id() == QMetaType::QVariantList ||
-        value.metaType().id() == QMetaType::QStringList) {
-        QVariantList list;
-        const auto source = value.toList();
-        for (qsizetype i = 0; i < source.size(); ++i) {
-            auto child =
-                capture(source[i], path + ConfigPath{QString::number(i)}, ancestors, depth + 1);
-            if (!child.ok())
-                return child;
-            list.append(child.value);
-        }
-        return {list, {}};
-    }
-    if (value.metaType().id() == QMetaType::QVariantMap) {
-        auto map = value.toMap();
-        for (auto it = map.begin(); it != map.end(); ++it) {
-            auto child = capture(it.value(), path + ConfigPath{it.key()}, ancestors, depth + 1);
-            if (!child.ok())
-                return child;
-            it.value() = child.value;
-        }
-        return {map, {}};
-    }
-    return ownValue(value, path);
-}
+
+private:
+    QVariant m_value;
+    QJSValue m_js;
+    Kind m_kind = Kind::Scalar;
+    QVariantList m_list;
+    QVariantMap m_map;
+    QString m_error;
+    QList<QJSValue> &m_ancestors;
+};
+} // namespace
 ConfigValueResult captureQmlValue(const QVariant &value, const ConfigPath &path) {
-    return capture(value, path, {}, 0);
+    QList<QJSValue> ancestors;
+    QmlInput input(value, ancestors);
+    return captureValue(input, path);
 }
-static ConfigValueResult normalize(const ConfigDescriptor &d, const QVariant &v,
-                                   const ConfigPath &path) {
-    using T = ConfigDescriptor::Type;
-    auto fail = [&](const char *code) {
-        return ConfigValueResult{{}, {{path, QString::fromLatin1(code)}}};
-    };
-    if (isNull(v))
-        return {v, {}};
-    if ((d.type == T::List || d.type == T::Map) && d.element.size() != 1)
-        return fail("element-descriptor");
-    if (d.type == T::Integer || d.type == T::UnsignedInteger) {
-        if (v.metaType().id() != QMetaType::QString)
-            return fail("integer64-requires-decimal-string");
-        const auto text = v.toString();
-        static const QRegularExpression decimal("^-?(0|[1-9][0-9]*)$");
-        if (!decimal.match(text).hasMatch() ||
-            (d.type == T::UnsignedInteger && text.startsWith('-')))
-            return fail("integer64-decimal-syntax");
-        const auto token = ConfigNumber::fromJson(text);
-        return token ? token->integer(d.type == T::UnsignedInteger, path)
-                     : fail("integer64-decimal-syntax");
-    }
-    if (d.type == T::SafeInteger && v.metaType().id() == QMetaType::Double) {
-        const double n = v.toDouble();
-        if (std::trunc(n) != n)
-            return fail("fractional-integer");
-        if (n < -9007199254740991.0 || n > 9007199254740991.0)
-            return fail("unsafe-integer");
-        return {QVariant::fromValue(qint64(n)), {}};
-    }
-    if (d.type == T::Real &&
-        (v.metaType().id() == QMetaType::LongLong || v.metaType().id() == QMetaType::Int))
-        return {v.toDouble(), {}};
-    if ((d.type == T::List && v.metaType().id() == QMetaType::QVariantList) ||
-        ((d.type == T::Map || d.type == T::Record) &&
-         v.metaType().id() == QMetaType::QVariantMap)) {
-        if (d.type == T::List) {
-            auto list = v.toList();
-            for (qsizetype i = 0; i < list.size(); ++i) {
-                auto child =
-                    normalize(d.element.first(), list[i], path + ConfigPath{QString::number(i)});
-                if (!child.ok())
-                    return child;
-                list[i] = child.value;
-            }
-            return {list, {}};
-        }
-        auto map = v.toMap();
-        for (auto it = map.begin(); it != map.end(); ++it) {
-            if (d.type == T::Record && !d.fields.contains(it.key()))
-                continue;
-            const auto childDescriptor =
-                d.type == T::Map ? d.element.first() : d.fields.value(it.key());
-            auto child = normalize(childDescriptor, it.value(), path + ConfigPath{it.key()});
-            if (!child.ok())
-                return child;
-            it.value() = child.value;
-        }
-        return {map, {}};
-    }
-    return {v, {}};
+ConfigAdmission admitQmlInput(const ConfigSchema &schema, const ConfigPath &path,
+                              const QVariant &value) {
+    const auto ownedPath = ownPath(path);
+    QList<QJSValue> ancestors;
+    QmlInput input(value, ancestors);
+    return schema.admit(ownedPath, input, ConfigDescriptor::Format::Qml);
 }
 ConfigValueResult admitQmlValue(const ConfigDescriptor &d, const QVariant &input,
                                 const ConfigPath &path) {
-    auto owned = captureQmlValue(input, path);
-    if (!owned.ok())
-        return owned;
-    auto value = normalize(d, owned.value, path);
-    return value.ok() ? d.validate(value.value, path) : value;
+    QList<QJSValue> ancestors;
+    QmlInput reader(input, ancestors);
+    return d.validate(reader, path, ConfigDescriptor::Format::Qml);
 }
 QVariant qmlValue(const ConfigDescriptor &d, const QVariant &v) {
-    using T = ConfigDescriptor::Type;
-    if (!v.isValid() || isNull(v))
-        return v;
-    if (d.type == T::Integer || d.type == T::UnsignedInteger)
-        return v.toString();
-    if (d.type == T::List) {
-        auto list = v.toList();
-        for (auto &item : list)
-            item = qmlValue(d.element.first(), item);
-        return list;
-    }
-    if (d.type == T::Record || d.type == T::Map) {
-        auto map = v.toMap();
-        for (auto it = map.begin(); it != map.end(); ++it)
-            if (d.type == T::Map)
-                it.value() = qmlValue(d.element.first(), it.value());
-            else if (d.fields.contains(it.key()))
-                it.value() = qmlValue(d.fields.value(it.key()), it.value());
-        return map;
-    }
-    return v;
+    return collectionPresentation(d, v);
 }
 QVariantMap qmlResult(const ConfigResult &r) {
     QVariantMap covered;
