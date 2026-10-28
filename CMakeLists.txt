@@ -7,7 +7,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(Qt6 6.12 REQUIRED COMPONENTS Core)
 
 add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp configschema.h
-    confignumber.cpp confignumber.h)
+    confignumber.cpp confignumber.h
+    configlayers.cpp configlayers.h)
 add_library(configqml::core ALIAS configqml_core)
 set_target_properties(configqml_core PROPERTIES EXPORT_NAME core)
 target_link_libraries(configqml_core PUBLIC Qt6::Core)
@@ -22,6 +23,9 @@ if(BUILD_TESTING)
     add_executable(test_schema tests/test_schema.cpp)
     target_link_libraries(test_schema PRIVATE configqml::core Qt6::Test)
     add_test(NAME schema COMMAND test_schema)
+    add_executable(test_layers tests/test_layers.cpp)
+    target_link_libraries(test_layers PRIVATE configqml::core Qt6::Test)
+    add_test(NAME layers COMMAND test_layers)
     add_executable(test_core_link tests/test_core_link.cpp)
     target_link_libraries(test_core_link PRIVATE configqml::core)
     add_test(NAME core_link COMMAND ${CMAKE_COMMAND}
