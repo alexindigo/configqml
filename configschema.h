@@ -14,7 +14,8 @@ struct ConfigDescriptor {
         Url,
         List,
         Record,
-        Map
+        Map,
+        SafeInteger
     };
     Type type = Type::String;
     bool optional = false;

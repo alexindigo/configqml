@@ -54,6 +54,7 @@ static ConfigValueResult parse(const QString &text, const ConfigDescriptor &d,
         value = text == "true";
         break;
     case T::Integer:
+    case T::SafeInteger:
         if (!integer.match(text).hasMatch())
             return fail();
         value = QVariant::fromValue(*ConfigNumber::fromJson(text));

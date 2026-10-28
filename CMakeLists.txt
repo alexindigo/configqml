@@ -10,7 +10,8 @@ add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp
     confignumber.cpp confignumber.h
     configlayers.cpp configlayers.h configscope.cpp configscope.h
     configenvironment.cpp configenvironment.h configbackend.h configcodec.h
-    configmemorybackend.cpp configmemorybackend.h)
+    configmemorybackend.cpp configmemorybackend.h
+    configconsumer_p.h configresult.h configstore.h configstore.cpp configworker_p.h configworker.cpp)
 add_library(configqml::core ALIAS configqml_core)
 set_target_properties(configqml_core PROPERTIES EXPORT_NAME core)
 target_link_libraries(configqml_core PUBLIC Qt6::Core)
@@ -40,6 +41,12 @@ if(BUILD_TESTING)
     add_executable(test_contract_edges tests/test_contract_edges.cpp)
     target_link_libraries(test_contract_edges PRIVATE configqml::core Qt6::Test)
     add_test(NAME contract_edges COMMAND test_contract_edges)
+    add_executable(test_worker tests/test_worker.cpp)
+    target_link_libraries(test_worker PRIVATE configqml::core Qt6::Test)
+    add_test(NAME worker COMMAND test_worker)
+    add_executable(test_consumer_lifetime tests/test_consumer_lifetime.cpp)
+    target_link_libraries(test_consumer_lifetime PRIVATE configqml::core Qt6::Test)
+    add_test(NAME consumer_lifetime COMMAND test_consumer_lifetime)
     add_executable(test_core_link tests/test_core_link.cpp)
     target_link_libraries(test_core_link PRIVATE configqml::core)
     add_test(NAME core_link COMMAND ${CMAKE_COMMAND}

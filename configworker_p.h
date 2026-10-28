@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+#pragma once
+// Internal protocol. No private Qt headers, no QML objects or engine callbacks.
+#include "configstore.h"
+#include "configmemorybackend.h"
+#include <QQueue>
+#include <memory>
+
+namespace configqml {
+QByteArray encodeMemoryValue(const QVariantMap &raw);
+QVariantMap decodeMemoryValue(const QByteArray &bytes);
+struct ConfigWorkerPacket {
+    ConfigSnapshot snapshot;
+    std::shared_ptr<const ConfigSnapshot> admitted;
+    bool initial = false;
+    bool terminal = false;
+    QString error;
+    std::optional<ConfigResult> result;
+};
+struct ConfigCommand {
+    quint64 requestId = 0;
+    quint64 prefix = 0;
+    QString operation;
+    std::optional<ConfigInput> input;
+};
+class ConfigWorker : public QObject {
+    Q_OBJECT
+public:
+    explicit ConfigWorker(ConfigStoreOptions options, QString initializationError);
+    void initialize();
+    void enqueue(const ConfigCommand &command);
+    void abandon();
+    // Internal deterministic scheduling, accessible only through the test friend.
+    void holdInputs(bool hold);
+    void releaseInputs(int count);
+    void holdReplies(bool hold);
+    void releaseReplies(int count);
+    void releaseBackend();
+    void scheduleBackend(ConfigMemoryBackend::Schedule schedule);
+    void fail(const QString &code);
+    ConfigMemoryBackend *backend() const { return m_backend.get(); }
+    ConfigLayers *layers() const { return m_layers.get(); }
+    void setAdmission(std::function<QString(const ConfigInput &)> admission) {
+        m_options.admission = std::move(admission);
+    }
+signals:
+    void packetReady(const configqml::ConfigWorkerPacket &packet);
+
+private:
+    void drain();
+    void process(const ConfigCommand &command);
+    void coverInput(const ConfigCommand &command);
+    ConfigWorkerPacket publish(const std::optional<ConfigResult> &result = {},
+                               bool initial = false);
+    void post(const ConfigWorkerPacket &packet);
+    ConfigResult resultFor(const ConfigCommand &command) const;
+    bool inheritFailures(ConfigResult &result) const;
+    void beginSave(const ConfigCommand &command);
+    void continueSave();
+    void finishSave();
+    ConfigStoreOptions m_options;
+    QString m_initializationError;
+    std::unique_ptr<ConfigLayers> m_layers;
+    std::unique_ptr<ConfigMemoryBackend> m_backend;
+    QQueue<ConfigCommand> m_queue;
+    QQueue<ConfigWorkerPacket> m_replies;
+    bool m_holdInputs = false;
+    bool m_holdReplies = false;
+    bool m_busy = false;
+    bool m_failed = false;
+    bool m_closed = false;
+    bool m_draining = false;
+    quint64 m_prefix = 0;
+    quint64 m_generation = 0;
+    QMap<ConfigPath, quint64> m_pathGenerations;
+    QMap<ConfigPath, quint64> m_pathInputs;
+    ConfigSnapshot m_previous;
+    QMap<QString, ConfigRoute> m_routes;
+    QMap<QString, ConfigRevision> m_revisions;
+    QMap<QString, quint64> m_dirty;
+    QList<ConfigResult> m_failures;
+    ConfigCommand m_save;
+    ConfigResult m_saveResult;
+    bool m_saveRetainedFailure = false;
+    QStringList m_saveSources;
+    QString m_activeSource;
+    QByteArray m_activeBytes;
+    quint64 m_activeBackend = 0;
+};
+} // namespace configqml

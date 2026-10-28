@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### M2 — native ordered owner
+
+Added a per-store ordered background owner, immediate checked unmasked reads,
+sequence/generation-fenced authoritative publications, ordered asynchronous
+save/flush/close receipts and deterministic memory fault/lifetime coverage.
+Consumer emissions and callbacks share a lifetime guard, pending terminal
+rejections publish covering authoritative rollback, and immutable write-route
+capability rejects read-only ingress before local exposure. SafeInteger adds the
+JavaScript-exact domain without changing native exact 64-bit descriptors.
+Persistence remains memory-only.
+
 ### Added
 
 - QtCore-only C++17 foundation targeting Qt 6.12, with native dependency checks,
