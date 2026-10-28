@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 #include <QByteArray>
+#include <QMetaType>
 #include <QString>
+#include <QStringList>
 #include <QtGlobal>
 #include <optional>
 
 namespace configqml {
 struct ConfigError {
+    ConfigError() = default;
+    ConfigError(QString code, QString sourceId, QString operation, QString file = {},
+                QStringList path = {}, qsizetype line = 0)
+        : code(std::move(code)), sourceId(std::move(sourceId)), operation(std::move(operation)),
+          file(std::move(file)), path(std::move(path)), line(line) {}
     QString code;
     QString sourceId;
     QString operation;
+    QString file;
+    QStringList path;
+    qsizetype line = 0;
     bool empty() const { return code.isEmpty(); }
 };
 struct ConfigBackendCapabilities {
@@ -58,3 +68,4 @@ public:
     virtual std::optional<ConfigBackendResult> take(quint64 requestId) = 0;
 };
 } // namespace configqml
+Q_DECLARE_METATYPE(configqml::ConfigError)

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 #include "configschema.h"
+#include "configjsonbackend.h"
 #include <QObject>
 #include <QQmlListProperty>
 #include <QtQml/qqmlregistration.h>
@@ -91,5 +92,25 @@ public:
     QVariantMap data;
     bool writable = true, exists = true;
     Kind kind = File;
+};
+class ConfigJsonFileSource : public ConfigMemorySource {
+    Q_OBJECT
+    QML_NAMED_ELEMENT(JsonFileSource)
+    Q_PROPERTY(QString path MEMBER path)
+    Q_PROPERTY(bool optional MEMBER optional)
+    Q_PROPERTY(WatchMode watchMode MEMBER watchMode)
+    Q_PROPERTY(AdmissionPolicy admissionPolicy MEMBER admissionPolicy)
+public:
+    enum WatchMode { Off, StartupSnapshot, Live };
+    Q_ENUM(WatchMode)
+    enum AdmissionPolicy { RejectInput, FieldFallback, RetainLastGood };
+    Q_ENUM(AdmissionPolicy)
+    explicit ConfigJsonFileSource(QObject *parent = nullptr) : ConfigMemorySource(parent) {
+        sourceId = "json";
+    }
+    QString path;
+    bool optional = true;
+    WatchMode watchMode = StartupSnapshot;
+    AdmissionPolicy admissionPolicy = FieldFallback;
 };
 } // namespace configqml

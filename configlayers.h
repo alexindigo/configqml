@@ -13,6 +13,7 @@ struct ConfigSource {
     QByteArray bytes;
     QByteArray revision;
     bool exists = true;
+    bool json = false; // Raw JSON URL strings are decoded only for admitted projections.
 };
 struct ConfigLayer {
     QString id;
@@ -43,6 +44,12 @@ struct ConfigContribution {
     QString maskedBy;
     QByteArray rawRevision;
     quint64 localIntentRevision = 0;
+    bool operator==(const ConfigContribution &o) const {
+        return layerId == o.layerId && sourceId == o.sourceId && revision == o.revision &&
+               sourceExists == o.sourceExists && rawPresent == o.rawPresent &&
+               admitted == o.admitted && valid == o.valid && maskedBy == o.maskedBy &&
+               rawRevision == o.rawRevision && localIntentRevision == o.localIntentRevision;
+    }
 };
 struct ConfigInfo {
     bool declared = false;

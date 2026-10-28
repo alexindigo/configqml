@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configlayers.h"
+#include "configjsoncodec.h"
 #include <QSet>
 
 namespace configqml {
@@ -95,7 +96,8 @@ ConfigOperation ConfigLayers::admit(LayerState &layer, SourceState &state,
                     admitted.insert(path, state.admitted.value(path));
                 continue;
             }
-            const auto checked = m_schema.validate(path, node);
+            const auto checked = m_schema.validate(
+                path, source.json ? jsonSettingValue(node, *m_schema.descriptor(path)) : node);
             if (checked.ok())
                 admitted.insert(path, {checked.value, source.revision, 0});
             else {

@@ -4,6 +4,8 @@
 #include "configstore.h"
 #include "configmemorybackend.h"
 #include <QQueue>
+#include <QTimer>
+#include <QFileSystemWatcher>
 #include <memory>
 
 namespace configqml {
@@ -16,6 +18,8 @@ struct ConfigWorkerPacket {
     bool terminal = false;
     QString error;
     std::optional<ConfigResult> result;
+    bool autoSaveRequested = false;
+    std::optional<ConfigError> sourceError;
 };
 struct ConfigCommand {
     quint64 requestId = 0;
@@ -40,6 +44,7 @@ public:
     void fail(const QString &code);
     ConfigMemoryBackend *backend() const { return m_backend.get(); }
     ConfigLayers *layers() const { return m_layers.get(); }
+    ConfigJsonBackend *jsonBackend() const { return m_json.get(); }
     void setAdmission(std::function<QString(const ConfigInput &)> admission) {
         m_options.admission = std::move(admission);
     }
@@ -58,10 +63,21 @@ private:
     void beginSave(const ConfigCommand &command);
     void continueSave();
     void finishSave();
+    void reloadFiles(const std::optional<ConfigCommand> &command = {});
+    void armWatches();
+    void scheduleAutoSave();
     ConfigStoreOptions m_options;
     QString m_initializationError;
     std::unique_ptr<ConfigLayers> m_layers;
     std::unique_ptr<ConfigMemoryBackend> m_backend;
+    std::unique_ptr<ConfigJsonBackend> m_json;
+    QMap<QString, ConfigJsonFile> m_files;
+    QMap<QString, ConfigRoute> m_fileRoutes;
+    QMap<QString, QVariantMap> m_baselines;
+    QMap<QString, QList<ConfigFileEdit>> m_edits;
+    QFileSystemWatcher *m_watcher = nullptr;
+    QTimer *m_watchTimer = nullptr;
+    QTimer *m_autoTimer = nullptr;
     QQueue<ConfigCommand> m_queue;
     QQueue<ConfigWorkerPacket> m_replies;
     bool m_holdInputs = false;

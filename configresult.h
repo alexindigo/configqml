@@ -5,7 +5,7 @@
 
 namespace configqml {
 struct ConfigInput {
-    enum class Kind { User, Reset, Runtime, ClearRuntime };
+    enum class Kind { User, Reset, Runtime, ClearRuntime, Initialize };
     Kind kind = Kind::User;
     quint64 sequence = 0;
     ConfigPath path;

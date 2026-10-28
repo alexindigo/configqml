@@ -4,6 +4,8 @@
 #include <QDataStream>
 #include <QIODevice>
 #include <QThread>
+#include <QFileInfo>
+#include <QDir>
 #include <exception>
 
 namespace configqml {
@@ -66,20 +68,108 @@ ConfigWorker::ConfigWorker(ConfigStoreOptions options, QString initializationErr
     : m_options(std::move(options)), m_initializationError(std::move(initializationError)) {}
 void ConfigWorker::initialize() {
     Q_ASSERT(QThread::currentThread() == thread());
-    m_layers = std::make_unique<ConfigLayers>(m_options.schema, m_options.layers);
     m_backend = std::make_unique<ConfigMemoryBackend>();
+    m_json = std::make_unique<ConfigJsonBackend>(m_options.jsonFiles, m_options.fileFault);
+    QSet<QString> paths;
+    QMap<QString, int> sourceIds;
+    for (const auto &layer : m_options.layers)
+        for (const auto &source : layer.sources)
+            ++sourceIds[source.id];
+    for (const auto &file : m_options.jsonFiles) {
+        bool found = false;
+        for (auto &layer : m_options.layers)
+            if (layer.id == file.layerId && layer.kind == ConfigLayerKind::File)
+                for (auto &source : layer.sources)
+                    if (source.id == file.sourceId) {
+                        found = true;
+                        if (sourceIds.value(file.sourceId) != 1 ||
+                            m_files.contains(file.sourceId) ||
+                            paths.contains(m_json->path(file.sourceId)))
+                            m_initializationError = "duplicate-file-identity";
+                        paths.insert(m_json->path(file.sourceId));
+                        m_files[file.sourceId] = file;
+                        m_fileRoutes[file.sourceId] = {layer.id, source.id, source.prefix};
+                        source.raw.clear();
+                        source.exists = false;
+                        source.json = true;
+                        if (file.watchMode == ConfigWatchMode::Off)
+                            continue;
+                        const auto id = m_json->submit(
+                            {ConfigBackendRequest::Operation::Read, file.sourceId, {}, {}});
+                        auto read = *m_json->take(id);
+                        ConfigJsonCodec codec;
+                        const auto decoded = read.revision.exists
+                                                 ? codec.decode(read.bytes, file.sourceId)
+                                                 : ConfigDecodeResult{};
+                        if (!read.success || !decoded.ok() ||
+                            (!read.revision.exists && !file.optional)) {
+                            m_initializationError = !read.success   ? read.error.code
+                                                    : !decoded.ok() ? decoded.error.code
+                                                                    : "required-file-missing";
+                            auto packet = ConfigWorkerPacket{};
+                            auto error = !read.success ? read.error : decoded.error;
+                            if (error.empty())
+                                error = {"required-file-missing", file.sourceId, "read"};
+                            error.file = m_json->path(file.sourceId);
+                            packet.sourceError = error;
+                            post(packet);
+                            continue;
+                        }
+                        source.raw = decoded.raw;
+                        source.exists = read.revision.exists;
+                        source.bytes = read.bytes;
+                        source.revision = read.revision.token;
+                        m_baselines[file.sourceId] = source.raw;
+                        m_revisions[file.sourceId] = read.revision;
+                        m_json->confirm(file.sourceId, read.revision);
+                    }
+        if (!found)
+            m_initializationError = "unknown-file-route";
+    }
+    m_layers = std::make_unique<ConfigLayers>(m_options.schema, m_options.layers);
+    for (const auto &layer : m_options.layers)
+        if (layer.policy == ConfigAdmissionPolicy::RejectInput)
+            for (const auto &source : layer.sources)
+                if (source.json && !m_layers->diagnostics(layer.id, source.id).isEmpty())
+                    m_initializationError = "strict-file-admission";
     for (const auto &layer : m_options.layers) {
         if (!layer.writable)
             continue;
         for (const auto &source : layer.sources) {
             // Backends are per logical store; source identity is unique within its user layer.
             m_routes[source.id] = {layer.id, source.id, source.prefix};
+            if (m_files.contains(source.id))
+                continue;
             m_backend->seed(source.id, encodeMemoryValue(source.raw), source.exists);
             auto id = m_backend->submit({ConfigBackendRequest::Operation::Read, source.id, {}, {}});
             m_revisions[source.id] = m_backend->take(id)->revision;
         }
     }
     m_options.layers.clear();
+    m_autoTimer = new QTimer(this);
+    m_autoTimer->setSingleShot(true);
+    connect(m_autoTimer, &QTimer::timeout, this, [this] {
+        if (m_closed || m_failed || m_dirty.isEmpty())
+            return;
+        ConfigWorkerPacket packet;
+        packet.autoSaveRequested = true;
+        post(packet);
+    });
+    m_watcher = new QFileSystemWatcher(this);
+    m_watchTimer = new QTimer(this);
+    m_watchTimer->setSingleShot(true);
+    connect(m_watcher, &QFileSystemWatcher::fileChanged, this, [this] { m_watchTimer->start(20); });
+    connect(m_watcher, &QFileSystemWatcher::directoryChanged, this,
+            [this] { m_watchTimer->start(20); });
+    connect(m_watchTimer, &QTimer::timeout, this, [this] {
+        if (m_busy || m_holdInputs) {
+            m_watchTimer->start(20);
+            return;
+        }
+        if (!m_closed && !m_failed)
+            reloadFiles();
+    });
+    armWatches();
     auto packet = publish({}, true);
     if (!m_layers->valid() || !m_initializationError.isEmpty()) {
         m_failed = true;
@@ -134,7 +224,8 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
         if (initial || next != m_previous.values.value(path) ||
             state.pathGeneration != before.pathGeneration ||
             state.provenance.layerId != before.provenance.layerId ||
-            state.provenance.maskedBy != before.provenance.maskedBy) {
+            state.provenance.maskedBy != before.provenance.maskedBy ||
+            state.provenance.contributions != before.provenance.contributions) {
             packet.snapshot.values[path] = next;
             packet.snapshot.information[path] = state;
         }
@@ -207,6 +298,17 @@ void ConfigWorker::process(const ConfigCommand &command) {
         return;
     }
     if (!command.input) {
+        if (command.operation == "retire") {
+            auto result = resultFor(command);
+            result.status = "nothing_to_save";
+            m_closed = true;
+            post(publish(result));
+            return;
+        }
+        if (command.operation == "reload") {
+            reloadFiles(command);
+            return;
+        }
         beginSave(command);
         return;
     }
@@ -221,6 +323,15 @@ void ConfigWorker::process(const ConfigCommand &command) {
         case ConfigInput::Kind::User:
             write = m_layers->setUser(input.path, input.value);
             break;
+        case ConfigInput::Kind::Initialize: {
+            const auto route = m_layers->info(input.path).route;
+            const auto source = m_layers->source(route.layerId, route.sourceId);
+            if (!source || valueAt(source->raw, input.path.mid(route.prefix.size())))
+                write.accepted = bool(source);
+            else
+                write = m_layers->setUser(input.path, input.value);
+            break;
+        }
         case ConfigInput::Kind::Runtime:
             write = m_layers->setRuntime(input.path, input.value);
             break;
@@ -237,14 +348,26 @@ void ConfigWorker::process(const ConfigCommand &command) {
         result.error = {
             write.errors.isEmpty() ? QString("admission") : write.errors.first().code, {}, "write"};
         m_failures.append(result);
-    } else if (input.kind == ConfigInput::Kind::User || input.kind == ConfigInput::Kind::Reset) {
+    } else if (input.kind == ConfigInput::Kind::User || input.kind == ConfigInput::Kind::Reset ||
+               input.kind == ConfigInput::Kind::Initialize) {
         for (auto it = m_routes.cbegin(); it != m_routes.cend(); ++it)
-            if (startsWith(input.path, it->prefix) || startsWith(it->prefix, input.path))
+            if (startsWith(input.path, it->prefix) || startsWith(it->prefix, input.path)) {
                 m_dirty[it.key()] = input.sequence;
+                if (m_files.contains(it.key())) {
+                    const auto relative = input.path.mid(it->prefix.size());
+                    m_edits[it.key()].append({relative,
+                                              input.kind == ConfigInput::Kind::Reset
+                                                  ? std::optional<QVariant>()
+                                                  : input.value,
+                                              input.kind == ConfigInput::Kind::Initialize});
+                }
+            }
+        scheduleAutoSave();
     }
     post(publish(result));
 }
 void ConfigWorker::beginSave(const ConfigCommand &command) {
+    m_autoTimer->stop();
     m_save = command;
     m_saveResult = resultFor(command);
     m_saveRetainedFailure = inheritFailures(m_saveResult);
@@ -294,6 +417,38 @@ void ConfigWorker::continueSave() {
     }
     m_activeSource = m_saveSources.takeFirst();
     const auto route = m_routes.value(m_activeSource);
+    if (m_files.contains(m_activeSource)) {
+        auto transaction = m_json->reconcile(m_activeSource, m_baselines.value(m_activeSource),
+                                             m_edits.value(m_activeSource));
+        const auto &outcome = transaction.outcome;
+        const QString state =
+            outcome.publicationState == ConfigBackendResult::PublicationState::Known ? "known"
+                                                                                     : "uncertain";
+        if (transaction.published || !outcome.success)
+            m_saveResult.publications.append(
+                {m_activeSource, outcome.success, outcome.revision, state, outcome.error});
+        if (outcome.success) {
+            auto source = *m_layers->source(route.layerId, route.sourceId);
+            source.raw = transaction.raw;
+            source.bytes = outcome.bytes;
+            source.revision = outcome.revision.token;
+            source.exists = outcome.revision.exists;
+            m_layers->replaceSource(route.layerId, source);
+            m_baselines[m_activeSource] = transaction.raw;
+            m_revisions[m_activeSource] = outcome.revision;
+            m_saveResult.coveredRevisions[m_activeSource] = outcome.revision;
+            m_dirty.remove(m_activeSource);
+            m_edits.remove(m_activeSource);
+        } else {
+            m_saveResult.status = "failed";
+            m_saveResult.error = outcome.error;
+            if (state == "uncertain")
+                m_saveResult.publicationState = state;
+        }
+        armWatches();
+        continueSave();
+        return;
+    }
     m_activeBytes = encodeMemoryValue(m_layers->source(route.layerId, route.sourceId)->raw);
     m_activeBackend = m_backend->submit({ConfigBackendRequest::Operation::Publish, m_activeSource,
                                          m_activeBytes, m_revisions.value(m_activeSource)});
@@ -301,7 +456,7 @@ void ConfigWorker::continueSave() {
 }
 void ConfigWorker::finishSave() {
     if (m_saveResult.status.isEmpty())
-        m_saveResult.status = "saved";
+        m_saveResult.status = m_saveResult.publications.isEmpty() ? "nothing_to_save" : "saved";
     if (m_saveResult.status != "failed")
         m_saveResult.coveredRevisions = m_revisions;
     if (m_saveResult.status == "failed") {
@@ -380,8 +535,98 @@ void ConfigWorker::fail(const QString &code) {
     drain();
 }
 void ConfigWorker::abandon() {
-    // Destructor never waits on a worker or starts an implicit save. Explicit
-    // close is the asynchronous persistence/lifetime fence for short-lived writers.
+    // Only the process-owned worker owner retires a settled terminal command.
     thread()->quit();
+}
+void ConfigWorker::scheduleAutoSave() {
+    if (m_options.autoSave && !m_closed && !m_failed)
+        m_autoTimer->start(qMax(0, m_options.autoSaveInterval));
+}
+void ConfigWorker::armWatches() {
+    QSet<QString> wanted;
+    for (auto it = m_files.cbegin(); it != m_files.cend(); ++it) {
+        if (it->watchMode != ConfigWatchMode::Live)
+            continue;
+        for (const auto &path : m_json->watchPaths(it.key())) {
+            if (QFileInfo::exists(path))
+                wanted.insert(path);
+            auto parent = QFileInfo(path).absolutePath();
+            while (!QFileInfo::exists(parent) && parent != "/")
+                parent = QFileInfo(parent).absolutePath();
+            wanted.insert(parent);
+        }
+    }
+    const auto watched = m_watcher->files() + m_watcher->directories();
+    for (const auto &path : watched)
+        if (!wanted.contains(path))
+            m_watcher->removePath(path);
+    for (const auto &path : wanted)
+        if (!watched.contains(path))
+            m_watcher->addPath(path);
+}
+void ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
+    std::optional<ConfigResult> result;
+    if (command) {
+        result = resultFor(*command);
+        result->status = "reloaded";
+    }
+    QList<ConfigError> errors;
+    bool changed = false;
+    for (auto it = m_files.cbegin(); it != m_files.cend(); ++it) {
+        if (!command && (it->watchMode != ConfigWatchMode::Live || !m_json->changed(it.key())))
+            continue;
+        auto id = m_json->submit({ConfigBackendRequest::Operation::Read, it.key(), {}, {}});
+        const auto read = *m_json->take(id);
+        ConfigJsonCodec codec;
+        auto decoded =
+            read.revision.exists ? codec.decode(read.bytes, it.key()) : ConfigDecodeResult{};
+        ConfigError error = !read.success ? read.error : decoded.error;
+        if (!read.revision.exists && !it->optional && error.empty())
+            error = {"required-file-missing", it.key(), "read"};
+        if (!error.empty()) {
+            error.file = m_json->path(it.key());
+            errors.append(error);
+            continue; // Parse/IO failures never destroy last-good layer state.
+        }
+        const auto route = m_fileRoutes.value(it.key());
+        auto source = *m_layers->source(route.layerId, route.sourceId);
+        source.raw = decoded.raw;
+        source.bytes = read.bytes;
+        source.revision = read.revision.token;
+        source.exists = read.revision.exists;
+        m_json->confirm(it.key(), read.revision);
+        if (!m_dirty.contains(it.key()))
+            m_baselines[it.key()] = decoded.raw;
+        for (const auto &edit : m_edits.value(it.key())) {
+            if (edit.ifMissing && valueAt(source.raw, edit.path))
+                continue;
+            if (edit.value)
+                putValue(source.raw, edit.path, *edit.value);
+            else if (edit.path.isEmpty())
+                source.raw.clear();
+            else
+                removeValue(source.raw, edit.path);
+        }
+        if (!m_edits.value(it.key()).isEmpty())
+            source.exists = true;
+        const auto admission = m_layers->replaceSource(route.layerId, source);
+        if (!admission.accepted && !admission.errors.isEmpty())
+            errors.append({admission.errors.first().code, it.key(), "admission",
+                           m_json->path(it.key()), admission.errors.first().path});
+        m_revisions[it.key()] = read.revision;
+        changed = true;
+    }
+    armWatches();
+    if (result && !errors.isEmpty()) {
+        result->status = "failed";
+        result->error = errors.first();
+    }
+    if (changed || result)
+        post(publish(result));
+    for (const auto &error : errors) {
+        ConfigWorkerPacket packet;
+        packet.sourceError = error;
+        post(packet);
+    }
 }
 } // namespace configqml
