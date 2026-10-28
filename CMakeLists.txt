@@ -8,7 +8,8 @@ find_package(Qt6 6.12 REQUIRED COMPONENTS Core)
 
 add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp configschema.h
     confignumber.cpp confignumber.h
-    configlayers.cpp configlayers.h)
+    configlayers.cpp configlayers.h configscope.cpp configscope.h
+    configenvironment.cpp configenvironment.h)
 add_library(configqml::core ALIAS configqml_core)
 set_target_properties(configqml_core PROPERTIES EXPORT_NAME core)
 target_link_libraries(configqml_core PUBLIC Qt6::Core)
@@ -29,6 +30,9 @@ if(BUILD_TESTING)
     add_executable(test_routing tests/test_routing.cpp)
     target_link_libraries(test_routing PRIVATE configqml::core Qt6::Test)
     add_test(NAME routing COMMAND test_routing)
+    add_executable(test_scopes_env tests/test_scopes_env.cpp)
+    target_link_libraries(test_scopes_env PRIVATE configqml::core Qt6::Test)
+    add_test(NAME scopes_env COMMAND test_scopes_env)
     add_executable(test_core_link tests/test_core_link.cpp)
     target_link_libraries(test_core_link PRIVATE configqml::core)
     add_test(NAME core_link COMMAND ${CMAKE_COMMAND}
