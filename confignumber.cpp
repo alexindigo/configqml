@@ -92,17 +92,19 @@ ConfigValueResult ConfigNumber::real(const ConfigPath &path) const {
 namespace {
 class JsonReader {
 public:
-    explicit JsonReader(const QByteArray &bytes) : bytes(bytes) {}
+    explicit JsonReader(const QByteArray &bytes, ConfigJsonLayout *layout)
+        : bytes(bytes), layout(layout) {}
     ConfigValueResult run(const ConfigPath &path) {
         auto value = read(path, 0);
         space();
         if (offset != bytes.size() && errors.isEmpty())
-            errors.append({path, "json-syntax"});
+            fail(path);
         return {errors.isEmpty() ? value : QVariant(), errors};
     }
 
 private:
     const QByteArray &bytes;
+    ConfigJsonLayout *layout;
     qsizetype offset = 0;
     QList<ConfigDiagnostic> errors;
     void space() {
@@ -119,8 +121,11 @@ private:
         return false;
     }
     QVariant fail(const ConfigPath &path, const char *code = "json-syntax") {
-        if (errors.isEmpty())
+        if (errors.isEmpty()) {
             errors.append({path, QString::fromLatin1(code)});
+            if (layout)
+                layout->errorOffset = offset;
+        }
         return {};
     }
     std::optional<QString> string(const ConfigPath &path) {
@@ -211,6 +216,8 @@ private:
                 const auto child = path + ConfigPath{*key};
                 if (out.contains(*key))
                     return fail(child, "json-duplicate-key");
+                if (layout)
+                    layout->keys[path].append(*key);
                 out.insert(*key, read(child, depth + 1));
                 if (!errors.isEmpty())
                     return {};
@@ -291,8 +298,9 @@ ConfigJsonEncodeResult encode(const QVariant &value, const ConfigPath &path) {
 }
 } // namespace
 
-ConfigValueResult decodeJsonValue(const QByteArray &bytes, const ConfigPath &path) {
-    return JsonReader(bytes).run(path);
+ConfigValueResult decodeJsonValue(const QByteArray &bytes, const ConfigPath &path,
+                                  ConfigJsonLayout *layout) {
+    return JsonReader(bytes, layout).run(path);
 }
 ConfigJsonEncodeResult encodeJsonValue(const QVariant &value, const ConfigPath &path) {
     const auto owned = ownValue(value, path);

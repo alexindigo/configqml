@@ -1,18 +1,25 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 #include "configresult.h"
+#include "configjsonbackend.h"
 #include <QObject>
 #include <QPointer>
+#include <QThread>
 #include <functional>
 #include <memory>
 
 namespace configqml {
 class ConfigWorker;
+class ConfigWorkerOwner;
 struct ConfigWorkerPacket;
 class ConfigStoreTestAccess;
 struct ConfigStoreOptions {
     ConfigSchema schema{ConfigDescriptor::group({})};
     QList<ConfigLayer> layers;
+    QList<ConfigJsonFile> jsonFiles;
+    bool autoSave = true;
+    int autoSaveInterval = 300;
+    ConfigJsonBackend::FaultHook fileFault;
     QString storeId;
     // Native, worker-only admission. Never pass an engine-bound callback here.
     std::function<QString(const ConfigInput &)> admission;
@@ -45,6 +52,9 @@ public:
     ConfigRequestHandle clearRuntime(const ConfigPath &path, QObject *context = nullptr,
                                      Callback callback = {});
     quint64 save(QObject *context = nullptr, Callback callback = {});
+    quint64 reload(QObject *context = nullptr, Callback callback = {});
+    ConfigRequestHandle initializeIfMissing(const ConfigPath &path, const QVariant &value,
+                                            QObject *context = nullptr, Callback callback = {});
     quint64 flush(QObject *context = nullptr, Callback callback = {});
     quint64 close(QObject *context = nullptr, Callback callback = {});
 signals:
@@ -52,6 +62,8 @@ signals:
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
     void inputRejected(const configqml::ConfigPath &path, const QString &code);
     void completed(const configqml::ConfigResult &result);
+    void autoSaved(const configqml::ConfigResult &result);
+    void sourceError(const configqml::ConfigError &error);
 
 private:
     friend class ConfigWorker;
@@ -63,11 +75,15 @@ private:
     void receive(const ConfigWorkerPacket &packet);
     void receiveResult(const ConfigResult &result);
     void deliver();
+    void finishThread();
     struct Pending {
         QPointer<QObject> context;
         Callback callback;
     };
     ConfigWorker *m_worker = nullptr;
+    std::shared_ptr<ConfigWorkerOwner> m_owner;
+    std::optional<ConfigResult> m_closeResult;
+    bool m_threadStopped = false;
     ConfigSchema m_schema;
     QMap<ConfigPath, ConfigRoute> m_userRoutes;
     QString m_userLayerId;
@@ -79,7 +95,6 @@ private:
     bool m_accepting = true;
     bool m_delivering = false;
     quint64 m_sequence = 0;
-    quint64 m_requestId = 0;
     quint64 m_nextCompletion = 1;
     QMap<quint64, Pending> m_pending;
     QMap<quint64, ConfigResult> m_results;

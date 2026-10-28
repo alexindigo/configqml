@@ -11,7 +11,9 @@ add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp
     configlayers.cpp configlayers.h configscope.cpp configscope.h
     configenvironment.cpp configenvironment.h configbackend.h configcodec.h
     configmemorybackend.cpp configmemorybackend.h
-    configconsumer_p.h configresult.h configstore.h configstore.cpp configworker_p.h configworker.cpp)
+    configjsoncodec.cpp configjsoncodec.h configjsonbackend.cpp configjsonbackend.h
+    configconsumer_p.h configresult.h configstore.h configstore.cpp configworker_p.h configworker.cpp
+    configshutdown_p.h configshutdown.cpp)
 add_library(configqml::core ALIAS configqml_core)
 set_target_properties(configqml_core PROPERTIES EXPORT_NAME core)
 target_link_libraries(configqml_core PUBLIC Qt6::Core)
@@ -69,6 +71,12 @@ if(BUILD_TESTING)
     add_executable(test_worker tests/test_worker.cpp)
     target_link_libraries(test_worker PRIVATE configqml::core Qt6::Test)
     add_test(NAME worker COMMAND test_worker)
+    add_executable(file_writer tests/file_writer.cpp)
+    target_link_libraries(file_writer PRIVATE configqml::core)
+    add_executable(test_json_files tests/test_json_files.cpp)
+    target_link_libraries(test_json_files PRIVATE configqml::core Qt6::Test)
+    add_dependencies(test_json_files file_writer)
+    add_test(NAME json_files COMMAND test_json_files)
     add_executable(test_consumer_lifetime tests/test_consumer_lifetime.cpp)
     target_link_libraries(test_consumer_lifetime PRIVATE configqml::core Qt6::Test)
     add_test(NAME consumer_lifetime COMMAND test_consumer_lifetime)
@@ -96,6 +104,15 @@ if(BUILD_TESTING)
             QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
             QML_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_facade.qml")
         add_test(NAME import_only COMMAND test_import)
+        add_executable(test_import_files tests/test_import_files.cpp)
+        target_link_libraries(test_import_files PRIVATE Qt6::Qml)
+        add_dependencies(test_import_files configqmlplugin)
+        target_compile_definitions(test_import_files PRIVATE
+            QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
+            QML_FILE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_json_files.qml")
+        add_test(NAME import_files COMMAND test_import_files)
+        add_test(NAME json_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
+            -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_json_files.qml)
         add_test(NAME private_isolation COMMAND ${CMAKE_COMMAND}
             -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
             -DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configstore.h"
 #include "configworker_p.h"
+#include "configshutdown_p.h"
 #include "configconsumer_p.h"
 #include <QThread>
 #include <QUuid>
 #include <QElapsedTimer>
+#include <QCoreApplication>
 
 namespace configqml {
 ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
@@ -13,8 +15,12 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
     m_storeId = QString(m_storeId.constData(), m_storeId.size());
     qRegisterMetaType<ConfigResult>();
     qRegisterMetaType<ConfigInput>();
-    auto *thread = new QThread;
     auto owned = options;
+    for (auto &file : owned.jsonFiles) {
+        file.layerId = QString(file.layerId.constData(), file.layerId.size());
+        file.sourceId = QString(file.sourceId.constData(), file.sourceId.size());
+        file.path = QString(file.path.constData(), file.path.size());
+    }
     owned.storeId = QString(m_storeId.constData(), m_storeId.size());
     // Capture borrowed storage before crossing threads. Admission/merging stays in worker.
     for (auto &layer : owned.layers) {
@@ -37,18 +43,38 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
             }
         }
     }
-    m_worker = new ConfigWorker(std::move(owned), m_error);
-    m_worker->moveToThread(thread);
-    connect(m_worker, &ConfigWorker::packetReady, this, &ConfigStore::receive,
-            Qt::QueuedConnection);
-    connect(thread, &QThread::started, m_worker, &ConfigWorker::initialize);
-    connect(thread, &QThread::finished, m_worker, &QObject::deleteLater);
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
+    m_owner = std::shared_ptr<ConfigWorkerOwner>(
+        new ConfigWorkerOwner(std::move(owned), m_error), [](ConfigWorkerOwner *owner) {
+            if (owner->thread() == QThread::currentThread())
+                delete owner;
+            else
+                owner->deleteLater();
+        });
+    m_worker = m_owner->workerForTest();
+    connect(m_owner.get(), &ConfigWorkerOwner::packetReady, this, &ConfigStore::receive);
+    connect(m_owner.get(), &ConfigWorkerOwner::joined, this, &ConfigStore::finishThread);
+    connect(m_owner.get(), &ConfigWorkerOwner::implicitClose, this,
+            [this](const ConfigCommand &command) {
+                m_pending.insert(command.requestId, {this, {}});
+                m_accepting = false;
+                m_status = Status::Closing;
+                ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); });
+            });
+    m_owner->start();
 }
 ConfigStore::~ConfigStore() {
-    if (m_worker)
-        QMetaObject::invokeMethod(m_worker, &ConfigWorker::abandon, Qt::QueuedConnection);
+    // Accepted work belongs to the process-owned worker. Only consumer delivery
+    // ends here; no nested drain, abandonment or cancellation of persistence.
+    m_owner->detach();
+}
+void ConfigStore::finishThread() {
+    m_threadStopped = true;
+    m_worker = nullptr;
+    if (m_closeResult) {
+        const auto result = *m_closeResult;
+        m_closeResult.reset();
+        receiveResult(result);
+    }
 }
 QVariant ConfigStore::value(const ConfigPath &path) const {
     Q_ASSERT(QThread::currentThread() == thread());
@@ -65,7 +91,7 @@ bool ConfigStore::canWriteUser(const ConfigPath &path) const {
     return false;
 }
 quint64 ConfigStore::registerRequest(QObject *context, Callback callback) {
-    const auto id = ++m_requestId;
+    const auto id = m_owner->reserveRequest();
     m_pending.insert(id, {context ? context : this, std::move(callback)});
     return id;
 }
@@ -75,17 +101,21 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
     Q_ASSERT(QThread::currentThread() == thread());
     ConfigRequestHandle handle;
     ConfigConsumerGuard boundary(this);
-    auto checked = (kind == ConfigInput::Kind::User || kind == ConfigInput::Kind::Runtime)
+    auto checked = (kind == ConfigInput::Kind::User || kind == ConfigInput::Kind::Runtime ||
+                    kind == ConfigInput::Kind::Initialize)
                        ? m_schema.validate(path, value)
                        : ConfigValueResult{};
-    if (!m_accepting || m_status != Status::Ready)
-        checked.errors = {{path, m_accepting ? "not-ready" : "store-closed"}};
+    if (!m_accepting || !m_owner->accepting() || m_status != Status::Ready)
+        checked.errors = {
+            {path, m_accepting && m_owner->accepting() ? "not-ready" : "store-closed"}};
     if (!m_error.isEmpty())
         checked.errors = {{path, m_error}};
     if ((kind == ConfigInput::Kind::Reset || kind == ConfigInput::Kind::ClearRuntime) &&
         !m_schema.descriptor(path))
         checked.errors = {{path, "undeclared-path"}};
-    if (checked.ok() && kind == ConfigInput::Kind::User && !canWriteUser(path))
+    if (checked.ok() &&
+        (kind == ConfigInput::Kind::User || kind == ConfigInput::Kind::Initialize) &&
+        !canWriteUser(path))
         checked.errors = {{path, "read-only-path"}};
     if (checked.ok() && kind == ConfigInput::Kind::Reset) {
         const auto route = m_userRoutes.lowerBound(path);
@@ -110,25 +140,42 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
     }
     ConfigInput input;
     input.kind = kind;
-    input.sequence = ++m_sequence;
+    input.sequence = m_sequence + 1;
     input.path = ownPath(path);
     input.value = checked.value;
     input.target = QString(target.constData(), target.size());
-    const auto affected = kind == ConfigInput::Kind::User || kind == ConfigInput::Kind::Runtime
+    const auto affected = kind == ConfigInput::Kind::User || kind == ConfigInput::Kind::Runtime ||
+                                  kind == ConfigInput::Kind::Initialize
                               ? QList<ConfigPath>{path}
                               : m_schema.leaves();
     for (const auto &leaf : affected)
         if (startsWith(leaf, path)) {
-            auto &state = m_cache.information[leaf];
-            state.latestInput = input.sequence;
-            input.pathGenerations[leaf] = ++state.pathGeneration;
+            input.pathGenerations[leaf] = m_cache.information.value(leaf).pathGeneration + 1;
         }
+    ConfigCommand command{handle.requestId, input.sequence, "write", input};
+    if (!m_owner->dispatch(command)) {
+        handle.errors = {{path, "store-closed"}};
+        ConfigResult result;
+        result.requestId = handle.requestId;
+        result.storeId = m_storeId;
+        result.operation = "write";
+        result.status = "failed";
+        result.inputPrefix = m_sequence;
+        result.error = {"store-closed", {}, "ingress"};
+        QMetaObject::invokeMethod(
+            this, [this, result] { receiveResult(result); }, Qt::QueuedConnection);
+        boundary.invoke([&] { emit inputRejected(path, result.error.code); });
+        return handle;
+    }
+    m_sequence = input.sequence;
+    for (auto it = input.pathGenerations.cbegin(); it != input.pathGenerations.cend(); ++it) {
+        auto &state = m_cache.information[it.key()];
+        state.latestInput = input.sequence;
+        state.pathGeneration = it.value();
+    }
     m_inputs.append(input);
     handle.inputSequence = input.sequence;
     handle.accepted = true;
-    ConfigCommand command{handle.requestId, input.sequence, "write", input};
-    QMetaObject::invokeMethod(
-        m_worker, [worker = m_worker, command] { worker->enqueue(command); }, Qt::QueuedConnection);
     bool changed = false;
     if (kind == ConfigInput::Kind::User && info(path).provenance.maskedBy.isEmpty()) {
         changed = m_cache.values.value(path) != checked.value;
@@ -142,6 +189,10 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
 ConfigRequestHandle ConfigStore::setUser(const ConfigPath &p, const QVariant &v, QObject *c,
                                          Callback f) {
     return write(ConfigInput::Kind::User, p, v, {}, c, std::move(f));
+}
+ConfigRequestHandle ConfigStore::initializeIfMissing(const ConfigPath &p, const QVariant &v,
+                                                     QObject *c, Callback f) {
+    return write(ConfigInput::Kind::Initialize, p, v, {}, c, std::move(f));
 }
 ConfigRequestHandle ConfigStore::setRuntime(const ConfigPath &p, const QVariant &v, QObject *c,
                                             Callback f) {
@@ -158,7 +209,7 @@ quint64 ConfigStore::request(const QString &operation, QObject *context, Callbac
     Q_ASSERT(QThread::currentThread() == thread());
     const auto id = registerRequest(context, std::move(callback));
     ConfigCommand command{id, m_sequence, operation, {}};
-    if (!m_accepting || !m_worker) {
+    if (!m_accepting || !m_owner->dispatch(command)) {
         ConfigResult result;
         result.requestId = id;
         result.storeId = m_storeId;
@@ -173,15 +224,13 @@ quint64 ConfigStore::request(const QString &operation, QObject *context, Callbac
             m_accepting = false;
             m_status = Status::Closing;
         }
-        QMetaObject::invokeMethod(
-            m_worker, [worker = m_worker, command] { worker->enqueue(command); },
-            Qt::QueuedConnection);
         if (operation == "close")
             ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); });
     }
     return id;
 }
 quint64 ConfigStore::save(QObject *c, Callback f) { return request("save", c, std::move(f)); }
+quint64 ConfigStore::reload(QObject *c, Callback f) { return request("reload", c, std::move(f)); }
 quint64 ConfigStore::flush(QObject *c, Callback f) { return request("flush", c, std::move(f)); }
 quint64 ConfigStore::close(QObject *c, Callback f) { return request("close", c, std::move(f)); }
 void ConfigStore::receive(const ConfigWorkerPacket &packet) {
@@ -196,9 +245,8 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
             m_admittedSnapshot = packet.admitted;
             // Reclaim replaced full snapshots on their worker, not during a GUI
             // delta publication. Facade maps never share their mutable containers.
-            if (previous && m_worker)
-                QMetaObject::invokeMethod(
-                    m_worker, [previous = std::move(previous)] {}, Qt::QueuedConnection);
+            if (previous)
+                m_owner->reclaim(std::move(previous));
         }
         for (auto it = packet.snapshot.information.cbegin();
              it != packet.snapshot.information.cend(); ++it) {
@@ -236,8 +284,17 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
         return;
     if (statusChange && !boundary.invoke([&] { emit statusChanged(); }))
         return;
-    if (packet.result && !boundary.invoke([&] { receiveResult(*packet.result); }))
+    if (packet.result) {
+        if (packet.result->operation == "close" && !m_threadStopped) {
+            m_worker = nullptr;
+            m_closeResult = packet.result;
+        } else if (!boundary.invoke([&] { receiveResult(*packet.result); }))
+            return;
+    }
+    if (packet.sourceError && !boundary.invoke([&] { emit sourceError(*packet.sourceError); }))
         return;
+    if (packet.autoSaveRequested && m_accepting && m_status == Status::Ready)
+        request("autosave", this, {});
     m_worstPublicationNanos = qMax(m_worstPublicationNanos, publicationTimer.nsecsElapsed());
 }
 void ConfigStore::receiveResult(const ConfigResult &result) {
@@ -258,13 +315,13 @@ void ConfigStore::deliver() {
             m_failures.append(result);
         if (result.operation == "close") {
             m_status = Status::Closed;
-            if (m_worker)
-                QMetaObject::invokeMethod(m_worker, &ConfigWorker::abandon, Qt::QueuedConnection);
             m_worker = nullptr;
             if (!boundary.invoke([&] { emit statusChanged(); }))
                 return;
         }
         if (!boundary.invoke([&] { emit completed(result); }))
+            return;
+        if (result.operation == "autosave" && !boundary.invoke([&] { emit autoSaved(result); }))
             return;
         if (pending.context && pending.callback) {
             if (pending.context->thread() == QThread::currentThread())

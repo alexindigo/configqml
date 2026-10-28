@@ -165,6 +165,7 @@ private slots:
         QCOMPARE(atFailure, reject == 2 ? 4 : 5);
         QCOMPARE(f.store->core()->inputs().size(), 2);
         QVERIFY(!f.store->core()->failures().isEmpty());
+        Probe::run(*f.store->core(), [](auto &w) { w.holdInputs(false); });
     }
     void invalidAndCopyBoundaries() {
         Fixture f;
@@ -363,6 +364,7 @@ private slots:
         QCOMPARE(f.count(), 3);
         QCOMPARE(qvariant_cast<ConfigResult>(complete[2][0]).description(),
                  QString("masked by runtime"));
+        Probe::run(*f.store->core(), [](auto &w) { w.holdReplies(false); });
     }
     void topologyAndGenerationFences() {
         Fixture f;
@@ -391,6 +393,7 @@ private slots:
         Probe::inject(*core, packet);
         QCOMPARE(f.count(), 4);
         QCOMPARE(core->info(widgets).provenance.maskedBy, QString());
+        Probe::run(*core, [](auto &w) { w.holdInputs(false); });
     }
     void qmlReadyError() {
         QQmlEngine engine;

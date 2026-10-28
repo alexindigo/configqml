@@ -187,6 +187,8 @@ QVariantMap qmlResult(const ConfigResult &r) {
                                         {"success", p.success},
                                         {"revision", QString::fromLatin1(p.revision.token)},
                                         {"publicationState", p.state},
+                                        {"file", p.error.file},
+                                        {"phase", p.error.operation},
                                         {"error", p.error.code}});
     return {{"requestId", QString::number(r.requestId)},
             {"storeId", r.storeId},
@@ -198,6 +200,9 @@ QVariantMap qmlResult(const ConfigResult &r) {
             {"publicationState", r.publicationState},
             {"error", QVariantMap{{"code", r.error.code},
                                   {"sourceId", r.error.sourceId},
+                                  {"file", r.error.file},
+                                  {"path", r.error.path},
+                                  {"line", r.error.line},
                                   {"operation", r.error.operation}}},
             {"maskedBy", r.maskedBy},
             {"description", r.description()}};

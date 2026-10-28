@@ -16,6 +16,8 @@ class ConfigQmlStore : public QObject, public QQmlParserStatus {
     Q_PROPERTY(Status status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool ready READ ready NOTIFY statusChanged)
     Q_PROPERTY(QString error READ error NOTIFY statusChanged)
+    Q_PROPERTY(bool autoSave MEMBER m_autoSave)
+    Q_PROPERTY(int autoSaveInterval MEMBER m_autoSaveInterval)
 public:
     enum Status { Loading, Ready, Error, Closing, Closed };
     Q_ENUM(Status)
@@ -42,6 +44,9 @@ public:
     Q_INVOKABLE QString clearRuntime(const QStringList &path, const QJSValue &callback = {});
     Q_INVOKABLE QVariantMap info(const QStringList &path) const;
     Q_INVOKABLE QString save(const QJSValue &callback = {});
+    Q_INVOKABLE QString reload(const QJSValue &callback = {});
+    Q_INVOKABLE QString initializeIfMissing(const QStringList &path, const QVariant &value,
+                                            const QJSValue &callback = {});
     Q_INVOKABLE QString flush(const QJSValue &callback = {});
     Q_INVOKABLE QString close(const QJSValue &callback = {});
 signals:
@@ -49,6 +54,8 @@ signals:
     void valuesChanged();
     void statusChanged();
     void completed(const QVariantMap &result);
+    void autoSaved(const QVariantMap &result);
+    void sourceError(const QVariantMap &error);
     void inputRejected(const QStringList &path, const QString &code);
 
 private:
@@ -60,6 +67,8 @@ private:
     QPointer<QObject> m_values;
     QString m_error;
     bool m_complete = false;
+    bool m_autoSave = true;
+    int m_autoSaveInterval = 300;
 };
 QObject *createConfigNamespace(ConfigQmlStore *store, const ConfigDescriptor &descriptor,
                                const ConfigPath &path, QObject *parent);

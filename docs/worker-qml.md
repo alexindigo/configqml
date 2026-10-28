@@ -92,11 +92,17 @@ after a failed save returns failed and retains evidence. Memory backend delays
 hold the request queue without blocking the GUI. Unexpected worker exceptions or
 protocol failure stop persistence visibly; the owner is never recreated/replayed.
 
-Use explicit asynchronous `close()` before destroying a short-lived writer.
-Destruction without close disconnects the consumer and abandons the worker
-without blocking or initiating persistence; callbacks owned by the destroyed
-store/context are cancelled. Capture any desired retained evidence first. The
-library cannot persist in-memory work after its owner/process has been destroyed.
+Use asynchronous close when a caller needs a publication receipt before continuing.
+Its completion includes actual worker-thread teardown, so normal exit after the
+callback cannot race thread-local cleanup. Destroying the consumer cancels only
+its callbacks: accepted persistence with autoSave or a pending save/flush/close
+is handed to the detached worker, retained by the process shutdown registry.
+The one process-level event drain, registered for aboutToQuit and post-routine
+exit, is independent of store QPointers and handles deletion during shutdown.
+Its shared five-second budget and stderr error reporting are documented in
+[json-files.md](json-files.md). With autoSave false and no outstanding persistence
+request, manual unsaved edits are not implicitly saved. The process itself must
+remain alive long enough for settlement; abrupt process termination cannot flush.
 
 ## Import-only declarations
 

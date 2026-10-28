@@ -5,13 +5,16 @@ defaults and explicit persistent versus runtime intent.
 
 ## Status
 
-**M2: experimental ordered store and QML facade.** A Core-only background owner
+**M3: experimental JSON persistence, ordered store and QML facade.** A Core-only background owner
 provides checked ingress, sequence-fenced read-your-writes, immutable admitted
 snapshots, and asynchronous save/flush/close receipts. `ConfigQml 1.0` adds
 import-only schemas and real Qt properties; native `Q_PROPERTY` classes can
 forward to the same store. Read-only routes expose nonwritable dynamic leaves.
 The API is not stable.
-Persistence uses a deterministic per-store memory backend; files follow in M3.
+Persistence supports preserving JSON files and a deterministic per-store memory
+backend. See [JSON files and save policy](docs/json-files.md) for file/shard
+declarations, live watching, conditional initialization, cooperative writers and
+autoSave (enabled by default, 300ms). Persistence and reload stay worker-owned.
 
 ## Native core
 
@@ -97,11 +100,11 @@ surface and shared notification/reentry lifetime contract.
 
 All builds/tests for this project run in **agora VM 806 `dev-niri-configqml`**,
 accessed via `/home/user/.local/bin/agora-niri`, in the disk-backed workspace
-`/home/tester/Projects/cqm2/revision-qml`. If unavailable, stop rather than using a host.
+`/home/tester/Projects/cqm3`. If unavailable, stop rather than using a host.
 After delivering source to its `source/` subdirectory, from the laptop:
 
 ```sh
-timeout 240s /home/user/.local/bin/agora-niri ssh 806 -- 'timeout 210s env TMPDIR=/home/tester/Projects/cqm2/revision-qml/tmp QT_FATAL_WARNINGS=1 bash -lc "cmake -S /home/tester/Projects/cqm2/revision-qml/source -B /home/tester/Projects/cqm2/revision-qml/build -G Ninja -DCMAKE_BUILD_TYPE=Debug && cmake --build /home/tester/Projects/cqm2/revision-qml/build --parallel 4 && ctest --test-dir /home/tester/Projects/cqm2/revision-qml/build --output-on-failure --no-tests=error"'
+timeout 240s /home/user/.local/bin/agora-niri ssh 806 -- 'timeout 210s env TMPDIR=/home/tester/Projects/cqm3/tmp LANG=C.UTF-8 QT_FATAL_WARNINGS=1 bash -c "cmake -S /home/tester/Projects/cqm3/source -B /home/tester/Projects/cqm3/build -G Ninja -DCMAKE_BUILD_TYPE=Debug && cmake --build /home/tester/Projects/cqm3/build --parallel 4 && ctest --test-dir /home/tester/Projects/cqm3/build --output-on-failure --no-tests=error"'
 ```
 
 Enable the tracked hook with `git config core.hooksPath .githooks`. It runs only

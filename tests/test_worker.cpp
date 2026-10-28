@@ -70,6 +70,7 @@ private slots:
         QTRY_COMPARE(complete.size(), 2);
         QCOMPARE(store.info(widgets).workerCovered, quint64(2));
         QCOMPARE(store.inputs().size(), 2); // Publications never echo as input.
+        Probe::run(store, [](auto &w) { w.holdInputs(false); });
     }
     void rejections_data() {
         QTest::addColumn<int>("rejected");
@@ -449,10 +450,26 @@ private slots:
                    [](auto &w) { w.scheduleBackend({true, ConfigMemoryBackend::Fault::None}); });
         temporary->setUser(number, 2);
         temporary->save();
+        // The consumer no longer owns cancellation. Release the deterministic
+        // backend after deletion through an independent context, then prove settlement.
+        QPointer<ConfigWorker> detachedWorker;
+        bool captured = false;
+        Probe::run(
+            *temporary, [&](auto &w) { detachedWorker = &w; }, this, [&] { captured = true; });
+        QTRY_VERIFY(captured);
         QElapsedTimer timer;
         timer.start();
         delete temporary;
         QVERIFY(timer.elapsed() < 100);
+        QVERIFY(detachedWorker);
+        QMetaObject::invokeMethod(
+            detachedWorker,
+            [detachedWorker] {
+                if (detachedWorker)
+                    detachedWorker->releaseBackend();
+            },
+            Qt::QueuedConnection);
+        QTRY_VERIFY(!detachedWorker);
     }
     void equalIntentAndSaveBoundaries() {
         ConfigStore store(options());

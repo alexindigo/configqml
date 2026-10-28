@@ -25,7 +25,12 @@ struct ConfigJsonEncodeResult {
 };
 // Shared value boundary for structured inputs and codecs. Numeric tokens are
 // never passed through QJsonValue/double. This is not a storage backend.
-ConfigValueResult decodeJsonValue(const QByteArray &bytes, const ConfigPath &path = {});
+struct ConfigJsonLayout {
+    QMap<ConfigPath, QStringList> keys;
+    qsizetype errorOffset = 0;
+};
+ConfigValueResult decodeJsonValue(const QByteArray &bytes, const ConfigPath &path = {},
+                                  ConfigJsonLayout *layout = nullptr);
 ConfigJsonEncodeResult encodeJsonValue(const QVariant &value, const ConfigPath &path = {});
 } // namespace configqml
 Q_DECLARE_METATYPE(configqml::ConfigNumber)

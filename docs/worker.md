@@ -45,9 +45,21 @@ Flush requests publication and waits for earlier work. Close seals ingress,
 flushes, settles and releases the worker. Read-only stores do not publish on
 flush/close. Unexpected worker failure stops persistence and still settles queued
 inputs authoritatively. There is no hidden owner recreation or replay.
-Destruction without close abandons the consumer without an implicit save or GUI
-wait. Destroyed callback contexts cancel delivery; capture retained evidence
-before destroying an owner if needed.
+Close completion follows actual worker-thread teardown (including thread-local
+destructors), with nonblocking join polling by an independently retained lifetime
+owner. Destroying the store drops consumer delivery, not accepted persistence:
+autoSave or an outstanding save/flush/close hands its reported prefix to the
+detached worker for settlement. There is no destructor event drain or cancellation.
+Without autoSave or an outstanding persistence request, manual unsaved edits do
+not gain implicit saving. Destroyed callback contexts cancel delivery.
+
+A process-wide registry retains live worker owners, dispatching only owned
+commands and tracking their prefixes/requests. AboutToQuit and qAddPostRoutine
+drain all owners within one shared five-second budget, independent of any store
+QObject. Post-routine cleanup covers returning from main without exec/quit;
+unsettled work and detached failure are reported on stderr. This registry owns
+lifetimes, never raw merging or shared store values. See [json-files.md](json-files.md)
+for policy, timeout and receipt details.
 
 `snapshot()` returns the most recent immutable worker-admitted generation and
 input prefix; `value()` is the separately fenced local read-your-writes getter.
