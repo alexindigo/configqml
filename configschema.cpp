@@ -27,7 +27,7 @@ ConfigDescriptor ConfigDescriptor::list(const ConfigDescriptor &element,
 
 // Compare normalized numeric values in their declared domain, never via double for integers.
 static bool less(const QVariant &a, const QVariant &b, Type type) {
-    if (type == Type::Integer)
+    if (type == Type::Integer || type == Type::SafeInteger)
         return a.toLongLong() < b.toLongLong();
     if (type == Type::UnsignedInteger)
         return a.toULongLong() < b.toULongLong();
@@ -35,10 +35,10 @@ static bool less(const QVariant &a, const QVariant &b, Type type) {
 }
 
 static bool supportedConstraints(const ConfigDescriptor &d) {
-    if (d.type < Type::Group || d.type > Type::Map)
+    if (d.type < Type::Group || d.type > Type::SafeInteger)
         return false;
-    const bool numeric =
-        d.type == Type::Integer || d.type == Type::UnsignedInteger || d.type == Type::Real;
+    const bool numeric = d.type == Type::Integer || d.type == Type::SafeInteger ||
+                         d.type == Type::UnsignedInteger || d.type == Type::Real;
     const bool collection = d.type == Type::List || d.type == Type::Map;
     return !((!numeric && (d.minimum || d.maximum)) ||
              (collection ? d.element.size() != 1 : !d.element.isEmpty()) ||
@@ -51,7 +51,7 @@ static ConfigValueResult numericValue(const QVariant &input, Type type, const Co
     auto result = ownValue(input, path);
     if (result.ok() && result.value.metaType() == QMetaType::fromType<ConfigNumber>()) {
         const auto number = result.value.value<ConfigNumber>();
-        if (type == Type::Integer || type == Type::UnsignedInteger)
+        if (type == Type::Integer || type == Type::SafeInteger || type == Type::UnsignedInteger)
             return number.integer(type == Type::UnsignedInteger, path);
         if (type == Type::Real)
             return number.real(path);
@@ -81,6 +81,7 @@ ConfigValueResult ConfigDescriptor::validate(const QVariant &input, const Config
         matches = id == QMetaType::Bool;
         break;
     case Type::Integer:
+    case Type::SafeInteger:
         matches = id == QMetaType::LongLong;
         break;
     case Type::UnsignedInteger:
@@ -106,6 +107,9 @@ ConfigValueResult ConfigDescriptor::validate(const QVariant &input, const Config
     }
     if (!matches && !null)
         return fail("type");
+    if (!null && type == Type::SafeInteger &&
+        (v.toLongLong() < -9007199254740991LL || v.toLongLong() > 9007199254740991LL))
+        return fail("unsafe-integer");
     ConfigValueResult result = owned;
     if (!null && (type == Type::List || type == Type::Map)) {
         if (type == Type::List) {
@@ -216,8 +220,8 @@ ConfigSchema::ConfigSchema(const ConfigDescriptor &root) {
             m_errors.append({path, "schema-depth"});
             return;
         }
-        const bool numeric =
-            d.type == Type::Integer || d.type == Type::UnsignedInteger || d.type == Type::Real;
+        const bool numeric = d.type == Type::Integer || d.type == Type::SafeInteger ||
+                             d.type == Type::UnsignedInteger || d.type == Type::Real;
         if (!supportedConstraints(d))
             m_errors.append({path, "descriptor"});
         auto unconstrained = d;

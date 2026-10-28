@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### M2 — QML integration
+
+ConfigQml 1.0 adds import-only typed schemas, dynamic real meta-properties and
+native property forwarding. Shared consumer guards stop grouped notifications,
+rejections and callbacks after emitter destruction. Read-only dynamic leaves
+are nonwritable and explicit writes fail before local exposure. QML safe
+integers and exact decimal-string 64-bit values share native admission; the
+private metadata adapter is isolated and exact-Qt-version checked.
+
+### M2 — native ordered owner
+
+Added a per-store ordered background owner, immediate checked unmasked reads,
+sequence/generation-fenced authoritative publications, ordered asynchronous
+save/flush/close receipts and deterministic memory fault/lifetime coverage.
+Consumer emissions and callbacks share a lifetime guard, pending terminal
+rejections publish covering authoritative rollback, and immutable write-route
+capability rejects read-only ingress before local exposure. SafeInteger adds the
+JavaScript-exact domain without changing native exact 64-bit descriptors.
+Persistence remains memory-only.
+
 ### Added
 
 - QtCore-only C++17 foundation targeting Qt 6.12, with native dependency checks,
