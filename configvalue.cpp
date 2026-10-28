@@ -9,6 +9,13 @@ const char *version() { return "0.1.0"; }
 
 bool isNull(const QVariant &value) { return value.metaType().id() == QMetaType::Nullptr; }
 
+ConfigPath ownPath(const ConfigPath &path) {
+    ConfigPath out;
+    for (const auto &key : path)
+        out.append(QString(key.constData(), key.size()));
+    return out;
+}
+
 static ConfigValueResult capture(const QVariant &in, const ConfigPath &path, int depth) {
     auto fail = [&](const char *code) {
         return ConfigValueResult{{}, {{path, QString::fromLatin1(code)}}};

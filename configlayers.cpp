@@ -20,6 +20,7 @@ ConfigLayers::ConfigLayers(const ConfigSchema &schema, const QList<ConfigLayer> 
         ids.insert(layer.id);
         writable += layer.writable;
         LayerState state{layer, {}};
+        state.descriptor.id = QString(layer.id.constData(), layer.id.size());
         state.descriptor.sources.clear(); // Only one owned raw copy, in SourceState.
         QSet<QString> sourceIds;
         for (const auto &source : layer.sources) {
@@ -53,10 +54,12 @@ ConfigOperation ConfigLayers::admit(LayerState &layer, SourceState &state,
     if (!captured.ok())
         return {false, captured.errors};
     ConfigSource source = input;
+    source.id = QString(input.id.constData(), input.id.size());
+    source.prefix = ownPath(input.prefix);
     source.raw = captured.value.toMap();
     source.bytes = QByteArray(input.bytes.constData(), input.bytes.size());
     source.revision = QByteArray(input.revision.constData(), input.revision.size());
-    QMap<ConfigPath, QVariant> admitted;
+    QMap<ConfigPath, AdmittedValue> admitted;
     QList<ConfigDiagnostic> errors;
     if (source.exists) {
         for (const auto &path : m_schema.leaves()) {
@@ -94,7 +97,7 @@ ConfigOperation ConfigLayers::admit(LayerState &layer, SourceState &state,
             }
             const auto checked = m_schema.validate(path, node);
             if (checked.ok())
-                admitted.insert(path, checked.value);
+                admitted.insert(path, {checked.value, source.revision, 0});
             else {
                 errors.append(checked.errors);
                 if (layer.descriptor.policy == ConfigAdmissionPolicy::RetainLastGood &&
@@ -132,10 +135,12 @@ QVariantMap ConfigLayers::effective() const {
     for (const auto &layer : m_layers)
         for (const auto &source : layer.sources)
             for (auto it = source.admitted.cbegin(); it != source.admitted.cend(); ++it)
-                putValue(out, it.key(), it.value());
+                putValue(out, it.key(), it.value().value);
     return out;
 }
 std::optional<QVariant> ConfigLayers::value(const ConfigPath &path) const {
+    if (!valid() || !m_schema.descriptor(path))
+        return std::nullopt;
     return valueAt(effective(), path);
 }
 std::optional<ConfigSource> ConfigLayers::source(const QString &layerId,
@@ -176,7 +181,7 @@ ConfigInfo ConfigLayers::info(const ConfigPath &path) const {
     int winner = -1;
     int writable = -1;
     if (valueAt(m_schema.defaults(), path)) {
-        out.contributions.append({"defaults", "schema", {}, true, true, true, true, {}});
+        out.contributions.append({"defaults", "schema", {}, true, true, true, true, {}, {}, 0});
         out.layerId = "defaults";
         out.sourceId = "schema";
         out.present = true;
@@ -198,13 +203,15 @@ ConfigInfo ConfigLayers::info(const ConfigPath &path) const {
             out.contributions.append(
                 {layer.descriptor.id,
                  source.source.id,
-                 source.source.revision,
+                 source.admitted.value(path).revision,
                  source.source.exists,
                  source.source.exists &&
                      bool(valueAt(source.source.raw, path.mid(source.source.prefix.size()))),
                  admitted,
                  checked,
-                 {}});
+                 {},
+                 source.source.revision,
+                 source.admitted.value(path).localIntentRevision});
             if (admitted) {
                 out.layerId = layer.descriptor.id;
                 out.sourceId = source.source.id;
@@ -238,7 +245,7 @@ ConfigWriteResult ConfigLayers::write(const ConfigPath &path, const QVariant &va
             if (source.source.id == target.sourceId) {
                 putValue(source.source.raw, path.mid(target.prefix.size()), checked.value);
                 source.source.exists = true;
-                source.admitted.insert(path, checked.value);
+                source.admitted.insert(path, {checked.value, {}, m_intentRevision + 1});
                 for (auto it = source.errors.begin(); it != source.errors.end();)
                     if (startsWith(it->path, path) || startsWith(path, it->path))
                         it = source.errors.erase(it);
@@ -297,18 +304,18 @@ ConfigWriteResult ConfigLayers::erase(const ConfigPath &path, const QString &lay
 }
 
 ConfigWriteResult ConfigLayers::setUser(const ConfigPath &path, const QVariant &value) {
-    return write(path, value, false);
+    return write(ownPath(path), value, false);
 }
 ConfigWriteResult ConfigLayers::setRuntime(const ConfigPath &path, const QVariant &value) {
-    return write(path, value, true);
+    return write(ownPath(path), value, true);
 }
 ConfigWriteResult ConfigLayers::reset(const ConfigPath &path, const QString &targetLayer) {
-    return erase(path, targetLayer, false);
+    return erase(ownPath(path), targetLayer, false);
 }
 ConfigWriteResult ConfigLayers::clearRuntime(const ConfigPath &path) {
     for (const auto &layer : m_layers)
         if (layer.descriptor.kind == ConfigLayerKind::Runtime)
-            return erase(path, layer.descriptor.id, true);
+            return erase(ownPath(path), layer.descriptor.id, true);
     return {false, {{path, "no-runtime-target"}}, {}, {}, m_intentRevision};
 }
 } // namespace configqml

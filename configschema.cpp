@@ -172,7 +172,40 @@ ConfigValueResult ConfigDescriptor::validate(const QVariant &input, const Config
     return result;
 }
 
-ConfigSchema::ConfigSchema(const ConfigDescriptor &root) : m_root(root) {
+static ConfigDescriptor ownDescriptor(const ConfigDescriptor &input, const ConfigPath &path,
+                                      QList<ConfigDiagnostic> &errors) {
+    auto out = input;
+    out.fields.clear();
+    out.element.clear();
+    out.choices.clear();
+    if (path.size() > 64) {
+        errors.append(ConfigDiagnostic{path, "schema-depth"});
+        return out;
+    }
+    auto capture = [&](const QVariant &v) {
+        auto result = ownValue(v, path);
+        errors.append(result.errors);
+        return result.value;
+    };
+    if (input.defaultValue)
+        out.defaultValue = capture(*input.defaultValue);
+    if (input.minimum)
+        out.minimum = capture(*input.minimum);
+    if (input.maximum)
+        out.maximum = capture(*input.maximum);
+    for (const auto &choice : input.choices)
+        out.choices.append(capture(choice));
+    for (auto it = input.fields.cbegin(); it != input.fields.cend(); ++it) {
+        const QString key(it.key().constData(), it.key().size());
+        out.fields.insert(key, ownDescriptor(it.value(), path + ConfigPath{key}, errors));
+    }
+    for (const auto &element : input.element)
+        out.element.append(ownDescriptor(element, path + ConfigPath{"*"}, errors));
+    return out;
+}
+
+ConfigSchema::ConfigSchema(const ConfigDescriptor &root) {
+    m_root = ownDescriptor(root, {}, m_errors);
     if (root.type != Type::Group) {
         m_errors.append(ConfigDiagnostic{{}, "root-group"});
         return;
@@ -227,7 +260,7 @@ ConfigSchema::ConfigSchema(const ConfigDescriptor &root) : m_root(root) {
             inspect(item, path + ConfigPath{"*"}, false);
         }
     };
-    inspect(root, {}, true);
+    inspect(m_root, {}, true);
     if (!valid())
         m_defaults.clear();
 }

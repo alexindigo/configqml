@@ -110,11 +110,11 @@ ConfigEnvironmentResult mapEnvironment(const ConfigSchema &schema,
     for (const auto &mapping : mappings) {
         if (!environment.contains(mapping.name))
             continue;
-        const auto result =
-            parse(environment.value(mapping.name), *schema.descriptor(mapping.path), mapping.path);
+        const auto result = parse(environment.value(mapping.name), *schema.descriptor(mapping.path),
+                                  ownPath(mapping.path));
         out.errors.append(result.errors);
         if (result.ok())
-            putValue(out.values, mapping.path, result.value);
+            putValue(out.values, ownPath(mapping.path), result.value);
     }
     return out;
 }
@@ -133,7 +133,7 @@ std::optional<QList<ConfigEnvironmentMapping>> environmentMappings(const ConfigS
         for (const auto &key : path)
             if (!simple.match(key).hasMatch())
                 return std::nullopt;
-        mappings.append({prefix + "_" + path.join('_').toUpper(), path});
+        mappings.append({prefix + "_" + path.join('_').toUpper(), ownPath(path)});
     }
     return mapEnvironment(schema, mappings, {}).ok() ? std::optional(mappings) : std::nullopt;
 }

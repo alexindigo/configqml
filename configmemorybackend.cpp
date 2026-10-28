@@ -19,8 +19,9 @@ bool ConfigMemoryBackend::schedule(const Schedule &schedule) {
 bool ConfigMemoryBackend::seed(const QString &sourceId, const QByteArray &bytes, bool exists) {
     if (!onOwner() || sourceId.isEmpty())
         return false;
-    m_entries.insert(sourceId, {exists ? copy(bytes) : QByteArray(),
-                                {exists, QByteArray::number(++m_nextRevision)}});
+    m_entries.insert(
+        QString(sourceId.constData(), sourceId.size()),
+        {exists ? copy(bytes) : QByteArray(), {exists, QByteArray::number(++m_nextRevision)}});
     return true;
 }
 quint64 ConfigMemoryBackend::submit(const ConfigBackendRequest &input) {

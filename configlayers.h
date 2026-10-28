@@ -41,6 +41,8 @@ struct ConfigContribution {
     bool admitted = false;
     bool valid = true;
     QString maskedBy;
+    QByteArray rawRevision;
+    quint64 localIntentRevision = 0;
 };
 struct ConfigInfo {
     bool declared = false;
@@ -82,9 +84,14 @@ public:
     ConfigWriteResult clearRuntime(const ConfigPath &path);
 
 private:
+    struct AdmittedValue {
+        QVariant value;
+        QByteArray revision;
+        quint64 localIntentRevision = 0;
+    };
     struct SourceState {
         ConfigSource source;
-        QMap<ConfigPath, QVariant> admitted;
+        QMap<ConfigPath, AdmittedValue> admitted;
         QList<ConfigDiagnostic> errors;
     };
     struct LayerState {

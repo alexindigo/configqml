@@ -4,7 +4,7 @@
 
 namespace configqml {
 ConfigScope::ConfigScope(std::shared_ptr<ConfigLayers> owner, ConfigPath prefix, bool writable)
-    : m_owner(std::move(owner)), m_prefix(std::move(prefix)), m_writable(writable) {
+    : m_owner(std::move(owner)), m_prefix(ownPath(prefix)), m_writable(writable) {
     const auto d = m_owner ? m_owner->schema().descriptor(m_prefix) : std::nullopt;
     if (!m_owner || !m_owner->valid() || !d || d->type != ConfigDescriptor::Type::Group)
         m_owner.reset();
