@@ -1,0 +1,8 @@
+BasedOnStyle: LLVM
+IndentWidth: 4
+AccessModifierOffset: -4
+ColumnLimit: 100
+PointerAlignment: Right
+ReferenceAlignment: Right
+SortIncludes: Never
+Standard: c++17

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(git rev-parse --show-toplevel)
+image=localhost/configqml-checks:local
+if ! podman image inspect "$image" >/dev/null 2>&1; then
+    podman build --memory=2g --memory-swap=2g --cpu-period=100000 --cpu-quota=200000 \
+        -t "$image" "$root/.devcontainer"
+fi
+podman run --rm --network=none --memory=2g --memory-swap=2g \
+    --pids-limit=128 --cpus=2 --userns=keep-id \
+    -v "$root:$root:ro" -w "$root" "$image" \
+    bash .devcontainer/precommit-check.sh
