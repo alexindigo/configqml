@@ -1,6 +1,6 @@
 # Core conventions
 
-This is the M1 native contract, targeting C++17/Qt 6.12 on Linux. Production
+This is the native core contract, targeting C++17/Qt 6.12 on Linux. Production
 sources are at the repository root. `configqml::core` links Qt Core only;
 test binaries link that production library rather than compiling its sources.
 
@@ -40,8 +40,8 @@ Values, descriptor constraints, source bytes, path segments and opaque identitie
 are captured as owned data, including when input QString/QByteArray values use
 borrowed storage. `effective()`, `source()` and descriptor queries return detached
 value snapshots. `ConfigLayers` is a synchronous single-owner engine: the caller
-serializes access, and snapshots can be passed as immutable values. M2 will own
-this engine on the ordered worker and publish separate facade caches; do not put
+serializes access, and snapshots can be passed as immutable values. ConfigStore owns
+this engine on the ordered worker and publishes separate facade caches; do not put
 this engine's merge work in a GUI setter.
 
 ## Layers, raw data and merge
@@ -56,7 +56,8 @@ this engine's merge work in a GUI setter.
 Layer identities are unique and `defaults` is reserved. Out-of-order descriptors,
 overlapping shard prefixes, duplicate source IDs and multiple writable logical
 layers are invalid. A writable layer must be a file-kind layer; zero writable
-layers is the read-only case. File-kind is an engine designation in M1, not file I/O.
+layers is the read-only case. File-kind is an engine designation; ConfigStore's
+explicit JSON source descriptors select file I/O.
 
 The engine keeps **raw source data**, original bytes/revision identity, diagnostic
 outcomes and admitted leaf projections separately. Unknown keys and invalid
@@ -115,8 +116,8 @@ is read/replaced at its setting path, not by addressing its internal members.
 Reset is distinct from assigning null/empty/default. Sparse user state is the raw
 override tree, not an effective-tree diff: removing values merely because they
 equal today's defaults would lose explicit intent. Editing a leaf does not
-re-admit unrelated fields from a previously rejected raw input. M1 returns native
-admission results only; it makes no save/completion or GUI notification claim.
+re-admit unrelated fields from a previously rejected raw input. ConfigLayers returns
+native admission results only; ConfigStore owns async persistence and notifications.
 
 ## Scopes and plugin sub-stores
 
@@ -132,8 +133,8 @@ cross-store transaction.
 
 `encodeScopeKey()` produces canonical `k-<lowercase UTF-8 hex>` names.
 `decodeScopeKey()` accepts only canonical, reversible, valid UTF-8 encodings.
-This avoids traversal and encoding collisions; it is not yet a filesystem path
-policy (path length, roots and symlink handling belong to the file backend).
+This avoids traversal and encoding collisions; it is not a filesystem path
+policy (roots and symlink handling are documented in [JSON files](json-files.md)).
 Handles are host-owned conveniences, not an in-process security sandbox.
 
 ## Injected environment
@@ -195,7 +196,7 @@ bytes and revision. Publish compares the expected existence/token pair; mismatch
 fails without mutation. Successful publication returns confirmed readback bytes
 and a new revision. `schedule()` assigns delays/faults to subsequent requests;
 `release(id)` explicitly executes a delayed request. There are no sleeps or timer
-races. Tests can release in a chosen order; the later worker supplies production
+races. Tests can release in a chosen order; ConfigStore's worker supplies production
 request ordering. `seed()` models external changes/deletion, including revision
 changes for missing entries. Foreign-thread controls fail without mutation;
 foreign-thread submit returns reserved invalid ID 0.
@@ -207,7 +208,7 @@ foreign-thread submit returns reserved invalid ID 0.
 | 3 | Readback | Publish changes memory but readback is faulted; failed/uncertain. A later explicit read sees the actual new bytes. |
 
 Memory effects are not file durability, cooperative filesystem locking, watching,
-multi-file atomicity or real storage-fault evidence. M3 supplies the first JSON
-codec/file backend; M2 supplies the worker, sequence-fenced caches and ordered
-three-status save protocol. The M0 native/QML read-your-writes, masked-write,
-detached-copy and private-Qt contracts remain downstream obligations.
+multi-file atomicity or real storage-fault evidence. [JSON files](json-files.md)
+documents the codec/file backend; [the worker](worker.md) supplies sequence-fenced
+caches and ordered three-status receipts. [QML integration](worker-qml.md) documents
+read-your-writes, masks, detached copies and the private-Qt build contract.

@@ -1,4 +1,4 @@
-# Ordered store and QML facade (M2)
+# Ordered store and QML facade
 
 The Core-only owner/protocol contract is also documented independently in
 [worker.md](worker.md).
@@ -69,7 +69,7 @@ Save/flush/close results have exactly three statuses:
 
 | # | Status | Meaning |
 |---|---|---|
-| 1 | `saved` | Required memory publications and readback completed for the captured prefix. |
+| 1 | `saved` | Required source publications and readback completed for the captured prefix. |
 | 2 | `nothing_to_save` | The worker found no covered pending persistent work; still asynchronous. |
 | 3 | `failed` | Correlated admission/publication/readback/worker error; failure and intent remain retained. |
 
@@ -132,7 +132,7 @@ convenience for a list of strings. No application schema plugin is needed.
 
 M1 native `Integer` remains exact signed 64-bit; native callers select
 `SafeInteger` for the safe-number domain. JSON numeric tokens retain exact syntax
-until schema admission. M2 uses memory bytes, not a JSON/file codec.
+until schema admission. Memory transport is separate from the JSON/file codec.
 
 Persistent write capability is compiled from immutable source prefixes. A leaf
 without a writable user route is a nonwritable dynamic meta-property. Direct QML
@@ -203,4 +203,4 @@ File/watcher conflict behavior and collection models are documented in
 [json-files.md](json-files.md) and [models.md](models.md). Drafts/profiles are
 documented in [editors-profiles.md](editors-profiles.md), and migrations/admission/
 secrets in [evolution-secrets.md](evolution-secrets.md). Installed-package
-compatibility remains the distribution milestone.
+compatibility and exact Qt coupling are documented in [distribution](distribution.md).

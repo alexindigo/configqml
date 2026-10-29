@@ -5,21 +5,66 @@ on:
   pull_request:
     branches: [master]
 jobs:
-  core:
+  build-and-test:
     runs-on: ubuntu-24.04
+    env:
+      TMPDIR: ${{ github.workspace }}/scratch
+      QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++
+        run: |
+          mkdir -p "$TMPDIR"
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ libgl1-mesa-dev libxkbcommon-dev
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.12.0'
           cache: true
-          # Retain private headers for the later isolated facade adapter.
+          # The isolated metadata adapter requires matching private headers.
           archives: 'qtbase qtdeclarative icu'
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
       - name: Build
         run: cmake --build build --parallel 4
-      - name: Test
+      # CTest owns the shared default / GNU dirs / relative QML / absolute QML /
+      # absolute GNU dirs matrix, including both installed functional examples.
+      - name: Test including install-layout matrix
         run: ctest --test-dir build --output-on-failure --no-tests=error
+      - name: Core-only installed consumer
+        run: |
+          cmake -S . -B build-core -G Ninja -DCMAKE_BUILD_TYPE=Release -DCONFIGQML_BUILD_QML=OFF -DCMAKE_INSTALL_PREFIX="$PWD/core-prefix"
+          cmake --build build-core --parallel 4
+          cmake --install build-core
+          cmake -S examples/native -B native-core -G Ninja -DCMAKE_PREFIX_PATH="$PWD/core-prefix;$QT_ROOT_DIR"
+          cmake --build native-core --parallel 2
+          native-core/configqml-native
+  sanitizers:
+    runs-on: ubuntu-24.04
+    env:
+      TMPDIR: ${{ github.workspace }}/scratch
+      QT_QPA_PLATFORM: offscreen
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          mkdir -p "$TMPDIR"
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ libgl1-mesa-dev libxkbcommon-dev
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.12.0'
+          cache: true
+          archives: 'qtbase qtdeclarative icu'
+      - name: Configure ASan and UBSan
+        run: |
+          cmake -S . -B build-san -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build
+        run: cmake --build build-san --parallel 4
+      - name: Test including install-layout matrix and installed consumers
+        run: ctest --test-dir build-san --output-on-failure --no-tests=error

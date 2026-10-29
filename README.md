@@ -5,7 +5,7 @@ defaults and explicit persistent versus runtime intent.
 
 ## Status
 
-**M5: experimental drafts, scoped handles, profiles and schema evolution.** A Core-only background owner
+**Pre-1.0: the API/ABI may change before 1.0.** A Core-only background owner
 provides checked ingress, sequence-fenced read-your-writes, immutable admitted
 snapshots, and asynchronous save/flush/close receipts. `ConfigQml 1.0` adds
 import-only schemas and real Qt properties; native `Q_PROPERTY` classes can
@@ -24,13 +24,32 @@ owner. [Editors and profiles](docs/editors-profiles.md) describes portable raw
 exports/imports, and [evolution and secrets](docs/evolution-secrets.md) documents
 worker-only raw migrations, per-node admission, redaction and keyring references.
 
+## Install
+
+Arch Linux package: `qt6-configqml` (AUR; publication follows the first release).
+It depends on `qt6-base` and `qt6-declarative`, with CMake/Ninja for building.
+Rebuild on Qt minor bumps: the isolated QML metadata adapter uses private QtCore
+API and currently requires exact Qt **6.12.0**. See
+[distribution](docs/distribution.md) for package layout and compatibility.
+
+From a source archive, inside your build VM:
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+cmake --build build --parallel 4
+sudo cmake --install build
+```
+
+Tests default off. `-DCONFIGQML_BUILD_QML=OFF` installs the QtCore-only library.
+The packaged module can be imported without application C++ or a custom plugin.
+
 ## Native core
 
 Use C++17 and Qt **6.12** on Linux. The production target links only Qt Core;
-Qt Test is used by the test executables. With this checkout as a CMake subdirectory:
+Qt Test is used by the test executables. With an installed package:
 
 ```cmake
-add_subdirectory(configqml)
+find_package(configqml 0.1 REQUIRED COMPONENTS Core)
 target_link_libraries(myapp PRIVATE configqml::core)
 ```
 
@@ -56,7 +75,7 @@ Paths are segment arrays, not dotted strings. The conventions are
 lists/records replace, missing inherits, and reset explicitly removes an override.
 Equal-to-default assignments remain explicit choices. Environment/runtime masks
 are reported without rewriting the stored fallback. See
-[docs/conventions.md](docs/conventions.md) for the complete M1 contract.
+[docs/conventions.md](docs/conventions.md) for the complete contract.
 
 ## Native asynchronous store
 
@@ -104,15 +123,21 @@ back. Integer is a safe JS number; Int64/UInt64 are decimal strings throughout
 nested collections. See [docs/worker-qml.md](docs/worker-qml.md) for the full QML
 surface and shared notification/reentry lifetime contract.
 
+Run the installed QML example with
+`/usr/lib/qt6/bin/qml -a core examples/qml/Settings.qml` on Arch.
+The [independent examples](examples/README.md) include a headless C++ consumer
+linking only `configqml::core`. The [documentation index](docs/README.md) covers
+the shipped native/QML API, persistence, collections, drafts and evolution.
+
 ## Development
 
 All builds/tests for this project run in **agora VM 806 `dev-niri-configqml`**,
 accessed via `/home/user/.local/bin/agora-niri`, in the disk-backed workspace
-`/home/tester/Projects/cqm5`. If unavailable, stop rather than using a host.
+`/home/tester/Projects/cqm8`. If unavailable, stop rather than using a host.
 After delivering source to its `source/` subdirectory, from the laptop:
 
 ```sh
-timeout 300s /home/user/.local/bin/agora-niri ssh 806 -- 'timeout 260s env TMPDIR=/home/tester/Projects/cqm5/tmp XDG_CACHE_HOME=/home/tester/Projects/cqm5/cache LANG=C.UTF-8 QT_FATAL_WARNINGS=1 bash -c "cmake -S /home/tester/Projects/cqm5/source -B /home/tester/Projects/cqm5/build -G Ninja -DCMAKE_BUILD_TYPE=Debug && cmake --build /home/tester/Projects/cqm5/build --parallel 4 && ctest --test-dir /home/tester/Projects/cqm5/build --output-on-failure --no-tests=error"'
+timeout 600s /home/user/.local/bin/agora-niri ssh 806 -- 'timeout 560s env TMPDIR=/home/tester/Projects/cqm8/tmp XDG_CACHE_HOME=/home/tester/Projects/cqm8/cache LANG=C.UTF-8 bash -c "cmake -S /home/tester/Projects/cqm8/source -B /home/tester/Projects/cqm8/build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON && cmake --build /home/tester/Projects/cqm8/build-release --parallel 4 && ctest --test-dir /home/tester/Projects/cqm8/build-release --output-on-failure --no-tests=error"'
 ```
 
 Enable the tracked hook with `git config core.hooksPath .githooks`. It runs only
@@ -124,6 +149,7 @@ official SDK's matching ICU runtime. The native owner uses no private Qt API and
 does not require Qt Qml (`CONFIGQML_BUILD_QML=OFF`). The dynamic facade's private
 metadata adapter records/checks exact Core/CorePrivate/Qml 6.12.0 at configure
 time and must be rebuilt with matching Qt.
+See [RELEASING.md](RELEASING.md) for sanitizer, fresh-prefix and Arch package gates.
 
 ## License
 
