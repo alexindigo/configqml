@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configworker_p.h"
+#include "configevidence_p.h"
 #include <QElapsedTimer>
 #include "confignumber.h"
 #include <QDataStream>
@@ -69,7 +70,50 @@ ConfigWorker::ConfigWorker(ConfigStoreOptions options, QString initializationErr
     : m_options(std::move(options)), m_initializationError(std::move(initializationError)) {}
 void ConfigWorker::initialize() {
     Q_ASSERT(QThread::currentThread() == thread());
+    auto topology = m_options.layers;
+    for (auto &layer : topology)
+        for (auto &source : layer.sources) {
+            source.raw.clear();
+            source.exists = false;
+            source.localIntent = false;
+        }
+    const ConfigLayers declarations(m_options.schema, topology, m_options.projections);
+    if (!declarations.valid() && m_initializationError.isEmpty())
+        m_initializationError = declarations.errors().first().code;
     m_backend = std::make_unique<ConfigMemoryBackend>();
+    if (!m_options.evidenceDirectory.isEmpty() &&
+        (!QDir::isAbsolutePath(m_options.evidenceDirectory) ||
+         QDir::cleanPath(m_options.evidenceDirectory) != m_options.evidenceDirectory))
+        m_initializationError = "evidence-directory";
+    QSet<ConfigPath> observed;
+    for (const auto &path : m_options.observedPaths) {
+        const auto descriptor = m_options.schema.descriptor(path);
+        if (!descriptor || descriptor->type == ConfigDescriptor::Type::Group ||
+            observed.contains(path))
+            m_initializationError = "observed-path";
+        observed.insert(path);
+    }
+    for (const auto &policy : m_options.recordListPolicies) {
+        auto error = validateRecordListPolicy(m_options.schema, policy);
+        if (m_listPolicies.contains(policy.policyId))
+            error = "list-policy-declaration";
+        for (const auto &other : m_listPolicies) {
+            if (other.path != policy.path)
+                continue;
+            bool overlap = true;
+            for (qsizetype i = 0; i < qMin(other.listPath.size(), policy.listPath.size()); ++i) {
+                const auto a = other.listPath[i], b = policy.listPath[i];
+                if (!(a == b) && a.kind != ConfigValueSelector::Kind::Each &&
+                    b.kind != ConfigValueSelector::Kind::Each)
+                    overlap = false;
+            }
+            if (overlap)
+                error = "list-policy-declaration";
+        }
+        if (!error.isEmpty())
+            m_initializationError = error;
+        m_listPolicies.insert(policy.policyId, policy);
+    }
     QMap<QString, ConfigDiagnosticBuilder> diagnostics;
     for (const auto &layer : m_options.layers)
         for (const auto &source : layer.sources)
@@ -82,6 +126,13 @@ void ConfigWorker::initialize() {
         for (const auto &source : layer.sources)
             ++sourceIds[source.id];
     for (const auto &file : m_options.jsonFiles) {
+        ConfigSourceState state;
+        state.sourceId = file.sourceId;
+        state.path = file.path;
+        m_sourceStates.append(state);
+        if (file.startupErrorPolicy == ConfigStartupErrorPolicy::SkipProjectionRetainError &&
+            m_options.evidenceDirectory.isEmpty())
+            m_initializationError = "evidence-directory";
         bool found = false;
         for (auto &layer : m_options.layers)
             if (layer.id == file.layerId && layer.kind == ConfigLayerKind::File)
@@ -95,6 +146,8 @@ void ConfigWorker::initialize() {
                         paths.insert(m_json->path(file.sourceId));
                         m_files[file.sourceId] = file;
                         m_fileRoutes[file.sourceId] = {layer.id, source.id, source.prefix};
+                        m_sourceStates.last().prefix = source.prefix;
+                        m_sourceStates.last().fallbackFor = source.fallbackFor;
                         source.raw.clear();
                         source.exists = false;
                         source.json = true;
@@ -107,11 +160,23 @@ void ConfigWorker::initialize() {
                         const auto decoded = read.revision.exists
                                                  ? codec.decode(read.bytes, file.sourceId)
                                                  : ConfigDecodeResult{};
+                        auto sourceFailure = !read.success ? read.error : decoded.error;
+                        if (read.success && !read.revision.exists && !file.optional)
+                            sourceFailure = {"required-file-missing", file.sourceId, "read"};
+                        observeSource(file.sourceId, read, sourceFailure, true);
                         if (!read.success || !decoded.ok() ||
                             (!read.revision.exists && !file.optional)) {
-                            m_initializationError = !read.success   ? read.error.code
-                                                    : !decoded.ok() ? decoded.error.code
-                                                                    : "required-file-missing";
+                            const auto failure = !read.success   ? read.error.code
+                                                 : !decoded.ok() ? decoded.error.code
+                                                                 : "required-file-missing";
+                            if (file.startupErrorPolicy == ConfigStartupErrorPolicy::FailReady ||
+                                (read.success && decoded.ok()))
+                                if (m_initializationError.isEmpty())
+                                    m_initializationError = failure;
+                            source.available = false;
+                            m_sourceStates.last().quarantined =
+                                file.startupErrorPolicy ==
+                                ConfigStartupErrorPolicy::SkipProjectionRetainError;
                             auto packet = ConfigWorkerPacket{};
                             auto error = !read.success ? read.error : decoded.error;
                             if (error.empty())
@@ -125,6 +190,7 @@ void ConfigWorker::initialize() {
                         source.exists = read.revision.exists;
                         source.bytes = read.bytes;
                         source.revision = read.revision.token;
+                        source.diskExists = read.revision.exists;
                         m_baselines[file.sourceId] = source.raw;
                         m_revisions[file.sourceId] = read.revision;
                         m_json->confirm(file.sourceId, read.revision);
@@ -133,9 +199,19 @@ void ConfigWorker::initialize() {
             m_initializationError = "unknown-file-route";
     }
     migrateSources();
-    m_layers = std::make_unique<ConfigLayers>(m_options.schema, m_options.layers);
-    if (m_initializationError.isEmpty() && !m_layers->rejectedDiagnostics().isEmpty())
-        m_initializationError = "strict-file-admission";
+    m_layers =
+        std::make_unique<ConfigLayers>(m_options.schema, m_options.layers, m_options.projections);
+    m_diskLayers = std::make_unique<ConfigLayers>(*m_layers);
+    m_diskLayers->removeTransientLayers();
+    m_diskLayers->takeProjectionEffects();
+    m_diskLayers->takeProjectionDiagnostics();
+    m_acceptOrigin = "startup";
+    m_acceptCause = "startup";
+    if (m_initializationError.isEmpty() && !m_layers->rejectedDiagnostics().isEmpty()) {
+        const auto code = m_layers->rejectedDiagnostics().first().code;
+        m_initializationError =
+            code.startsWith("projection-") ? code : QString("strict-file-admission");
+    }
     for (const auto &layer : m_options.layers) {
         if (!layer.writable)
             continue;
@@ -215,7 +291,45 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
     packet.result = result;
     packet.snapshot.generation = ++m_generation;
     packet.snapshot.inputPrefix = m_prefix;
-    const auto effective = m_layers->effective(); // One full-tree owner, never the GUI.
+    auto effective = m_layers->effective(); // One full-tree owner, never the GUI.
+    QSet<ConfigPath> listPaths;
+    for (const auto &policy : m_listPolicies)
+        listPaths.insert(policy.path);
+    for (const auto &path : listPaths) {
+        const auto value = m_layers->unmaskedValue(path);
+        if (!value)
+            continue;
+        QStringList revisions;
+        for (const auto &policy : m_listPolicies)
+            if (policy.path == path)
+                revisions.append(QString::number(m_listRevisions.value(policy.policyId)));
+        if (!m_listInputs.contains(path) || m_listInputs.value(path) != *value ||
+            m_listMetadataKeys.value(path) != revisions) {
+            QVariant projectedValue = *value;
+            QString error;
+            for (const auto &policy : m_listPolicies) {
+                if (policy.path != path)
+                    continue;
+                const auto projected = projectRecordLists(
+                    policy, m_listMetadata.value(policy.policyId), projectedValue);
+                if (!projected.error.isEmpty()) {
+                    error = projected.error;
+                    break;
+                }
+                projectedValue = projected.value;
+            }
+            if (!error.isEmpty()) {
+                packet.error = error;
+                packet.terminal = !initial;
+            } else {
+                m_listInputs[path] = *value;
+                m_listMetadataKeys[path] = revisions;
+                m_listOutputs[path] = projectedValue;
+            }
+        }
+        if (m_layers->info(path).maskedBy.isEmpty() && m_listOutputs.contains(path))
+            putValue(effective, path, m_listOutputs.value(path));
+    }
     for (const auto &path : m_options.schema.leaves()) {
         const auto next = valueAt(effective, path).value_or(QVariant());
         ConfigPathState state;
@@ -224,6 +338,9 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
         state.latestInput = m_pathInputs.value(path);
         state.intentRevision = m_pathIntents.value(path);
         QVariantList content{next, QString::number(state.intentRevision)};
+        for (const auto &policy : m_listPolicies)
+            if (policy.path == path)
+                content.append(QString::number(m_listRevisions.value(policy.policyId)));
         for (const auto &contribution : state.provenance.contributions) {
             const auto source = m_layers->source(contribution.layerId, contribution.sourceId);
             if (!source)
@@ -266,14 +383,107 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
                 versions[packet.snapshot.generation] = rows;
                 packet.planningNanos += planningTimer.nsecsElapsed();
             }
-        }
+        } else
+            state.publicationGeneration = before.publicationGeneration;
         m_previous.values[path] = next;
         m_previous.information[path] = state;
     }
     m_previous.generation = m_generation;
     m_previous.inputPrefix = m_prefix;
     packet.admitted = std::make_shared<const ConfigSnapshot>(m_previous);
+    packet.sourceStates = m_sourceStates;
+    for (auto &state : *packet.sourceStates)
+        state.fallbackState = m_layers->fallbackState(state.sourceId);
+    packet.projectionEffects = m_layers->takeProjectionEffects();
+    for (const auto &diagnostic : m_layers->takeProjectionDiagnostics())
+        packet.projectionDiagnostics.append(m_options.schema.diagnostics().error(
+            diagnostic.second, diagnostic.first, "projection-warning"));
+    if (!m_acceptOrigin.isEmpty() && m_diskLayers) {
+        ConfigSourceAccepted event;
+        event.eventId = QString::number(++m_sourceEventId);
+        event.publicationGeneration = m_generation;
+        event.inputPrefix = m_prefix;
+        event.origin = std::move(m_acceptOrigin);
+        event.cause = std::move(m_acceptCause);
+        m_acceptOrigin.clear();
+        m_acceptCause.clear();
+        for (const auto &state : m_sourceStates)
+            event.sources.append({state.sourceId, state.revision});
+        for (const auto &path : m_options.schema.leaves()) {
+            const auto value = m_diskLayers->value(path);
+            const auto info = m_diskLayers->info(path);
+            QByteArray revision;
+            for (const auto &contribution : info.contributions)
+                if (contribution.admitted && contribution.maskedBy.isEmpty())
+                    revision = contribution.revision;
+            const QVariantList fact{bool(value), value.value_or(QVariant()), info.layerId,
+                                    info.sourceId, revision};
+            if (!m_diskFacts.contains(path) || m_diskFacts.value(path) != fact ||
+                (event.origin == "projection" && packet.snapshot.information.contains(path)))
+                event.changedPaths.append(path);
+            m_diskFacts[path] = fact;
+            if (m_options.observedPaths.contains(path))
+                event.facts.append(
+                    {path,
+                     bool(value),
+                     value.value_or(QVariant()),
+                     value ? (info.layerId == "defaults" ? QString("defaults") : info.sourceId)
+                           : QString(),
+                     {bool(value), revision}});
+        }
+        if (initial || !event.changedPaths.isEmpty() || event.origin == "projection")
+            packet.sourceAccepted = event;
+    }
     return packet;
+}
+QString ConfigWorker::quarantined(const ConfigPath &path) const {
+    for (const auto &state : m_sourceStates)
+        if (state.quarantined && m_routes.contains(state.sourceId) &&
+            (startsWith(path, state.prefix) || startsWith(state.prefix, path)))
+            return "source-quarantined";
+    return {};
+}
+QString ConfigWorker::observeSource(const QString &id, const ConfigBackendResult &read,
+                                    const ConfigError &error, bool startup) {
+    QString retentionError;
+    for (auto &state : m_sourceStates) {
+        if (state.sourceId != id)
+            continue;
+        state.presence = read.success ? (read.revision.exists ? "present" : "absent")
+                         : QFileInfo::exists(m_json->path(id)) ? "present"
+                                                               : "unknown";
+        state.load = !read.success           ? "io_error"
+                     : !read.revision.exists ? "missing"
+                     : !error.empty()        ? "parse_error"
+                                             : "loaded";
+        state.diagnostic = error;
+        if (error.empty() && read.success) {
+            state.revision = read.revision;
+            state.quarantined = false;
+        }
+        if (!m_options.evidenceDirectory.isEmpty()) {
+            ConfigEvidenceObservation observation;
+            observation.storeId = m_options.storeId;
+            observation.sourceId = id;
+            observation.phase = "read";
+            observation.presence = state.presence;
+            observation.bytesState =
+                read.success ? (read.revision.exists ? "available" : "absent") : "unavailable";
+            observation.role = startup ? "startup" : "foreign";
+            observation.bytes = read.bytes;
+            observation.revision = read.revision;
+            observation.observationOrder = ++m_observationOrder;
+            const auto evidence = retainEvidence(m_options.evidenceDirectory, observation);
+            if (evidence)
+                state.evidence.append(*evidence);
+            else {
+                if (m_initializationError.isEmpty())
+                    m_initializationError = "evidence-retention";
+                retentionError = "evidence-retention";
+            }
+        }
+    }
+    return retentionError;
 }
 void ConfigWorker::acknowledgeModels(const QMap<ConfigPath, quint64> &generations) {
     Q_ASSERT(QThread::currentThread() == thread());
@@ -363,6 +573,10 @@ void ConfigWorker::process(const ConfigCommand &command) {
         return;
     }
     if (!command.input) {
+        if (command.operation == "updateRecordListPolicy") {
+            recordListCommand(command);
+            return;
+        }
         if (command.operation == "exportProfile" || command.operation == "importProfile") {
             profile(command);
             return;
@@ -382,12 +596,19 @@ void ConfigWorker::process(const ConfigCommand &command) {
         return;
     }
     const auto &input = *command.input;
+    if (command.operation == "editRecordList") {
+        recordListCommand(command);
+        return;
+    }
     if (input.kind == ConfigInput::Kind::Group) {
         processGroup(command);
         return;
     }
     auto result = resultFor(command);
-    const auto rejection = m_options.admission ? m_options.admission(input) : QString();
+    auto rejection = m_options.admission ? m_options.admission(input) : QString();
+    if (input.kind != ConfigInput::Kind::Runtime && input.kind != ConfigInput::Kind::ClearRuntime &&
+        rejection.isEmpty())
+        rejection = quarantined(input.path);
     ConfigWriteResult write;
     if (!rejection.isEmpty())
         write.errors = {m_options.schema.diagnostics().make(input.path, rejection)};
@@ -524,6 +745,16 @@ void ConfigWorker::continueSave() {
             source.revision = outcome.revision.token;
             source.exists = outcome.revision.exists;
             m_layers->replaceSource(route.layerId, source);
+            source.localIntent = false;
+            source.diskExists = source.exists;
+            m_diskLayers->replaceSource(route.layerId, source);
+            const auto retention = observeSource(m_activeSource, outcome, {}, false);
+            if (!retention.isEmpty()) {
+                m_saveResult.status = "failed";
+                m_saveResult.error = {retention, m_activeSource, "readback"};
+            }
+            m_acceptOrigin = "own_save";
+            m_acceptCause = "save";
             m_baselines[m_activeSource] = transaction.raw;
             m_revisions[m_activeSource] = outcome.revision;
             m_saveResult.coveredRevisions[m_activeSource] = outcome.revision;
@@ -662,6 +893,7 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
     }
     QList<ConfigError> errors;
     QMap<QString, QList<ConfigSource>> replacements;
+    QMap<QString, QList<ConfigSource>> diskReplacements;
     bool changed = false;
     for (auto it = m_files.cbegin(); it != m_files.cend(); ++it) {
         if (!command && (it->watchMode != ConfigWatchMode::Live || !m_json->changed(it.key())))
@@ -673,6 +905,9 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
         auto decoded =
             read.revision.exists ? codec.decode(read.bytes, it.key()) : ConfigDecodeResult{};
         ConfigError error = !read.success ? read.error : decoded.error;
+        const auto retention = observeSource(it.key(), read, error, false);
+        if (!retention.isEmpty())
+            error = {retention, it.key(), "read"};
         if (!read.revision.exists && !it->optional && error.empty())
             error = {"required-file-missing", it.key(), "read"};
         if (!error.empty()) {
@@ -685,6 +920,9 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
         source.bytes = read.bytes;
         source.revision = read.revision.token;
         source.exists = read.revision.exists;
+        source.diskExists = read.revision.exists;
+        source.available = true;
+        source.localIntent = false;
         if (m_options.schema.version() > 0 && source.exists) {
             const auto version = ConfigDescriptor::leaf(ConfigDescriptor::Type::SafeInteger, 0)
                                      .validate(source.raw.value("_configqmlVersion", 0));
@@ -716,6 +954,7 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
         m_json->confirm(it.key(), admittedRevision);
         if (!m_dirty.contains(it.key()))
             m_baselines[it.key()] = source.raw;
+        diskReplacements[route.layerId].append(source);
         for (const auto &edit : m_edits.value(it.key())) {
             if (edit.ifMissing && valueAt(source.raw, edit.path))
                 continue;
@@ -728,18 +967,21 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
         }
         if (!m_edits.value(it.key()).isEmpty())
             source.exists = true;
+        source.localIntent = !m_edits.value(it.key()).isEmpty();
         replacements[route.layerId].append(source);
         m_revisions[it.key()] = admittedRevision;
         changed = true;
     }
-    for (auto it = replacements.cbegin(); it != replacements.cend(); ++it) {
-        const auto admission = m_layers->replaceSources(it.key(), it.value());
+    m_diskLayers->replaceAllSources(diskReplacements);
+    if (!replacements.isEmpty()) {
+        const auto admission = m_layers->replaceAllSources(replacements);
         if (!admission.accepted && !admission.errors.isEmpty()) {
             const auto diagnostic = admission.errors.first();
             QString id;
-            for (const auto &source : it.value())
-                if (startsWith(diagnostic.path, source.prefix))
-                    id = source.id;
+            for (const auto &sources : replacements)
+                for (const auto &source : sources)
+                    if (startsWith(diagnostic.path, source.prefix))
+                        id = source.id;
             errors.append(m_options.schema.diagnostics().error(diagnostic, id, "admission",
                                                                m_json->path(id)));
         }
@@ -749,8 +991,13 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
         result->status = "failed";
         result->error = errors.first();
     }
-    if (changed || result)
+    if (changed || result) {
+        if (changed) {
+            m_acceptOrigin = "external";
+            m_acceptCause = command ? "reload" : "watch";
+        }
         post(publish(result));
+    }
     for (const auto &error : errors) {
         ConfigWorkerPacket packet;
         packet.sourceError = error;

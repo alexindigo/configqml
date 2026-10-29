@@ -2,6 +2,8 @@
 #pragma once
 #include "configschema.h"
 #include "configjsonbackend.h"
+#include "configprojection.h"
+#include "configrecordlistpolicy.h"
 #include <QObject>
 #include <QQmlListProperty>
 #include <QtQml/qqmlregistration.h>
@@ -122,14 +124,58 @@ class ConfigJsonFileSource : public ConfigMemorySource {
     Q_PROPERTY(QString path MEMBER path)
     Q_PROPERTY(bool optional MEMBER optional)
     Q_PROPERTY(WatchMode watchMode MEMBER watchMode)
+    Q_PROPERTY(QString fallbackFor MEMBER fallbackFor)
+    Q_PROPERTY(StartupErrorPolicy startupErrorPolicy MEMBER startupErrorPolicy)
 public:
     enum WatchMode { Off, StartupSnapshot, Live };
     Q_ENUM(WatchMode)
+    enum StartupErrorPolicy { FailReady, SkipProjectionRetainError };
+    Q_ENUM(StartupErrorPolicy)
     explicit ConfigJsonFileSource(QObject *parent = nullptr) : ConfigMemorySource(parent) {
         sourceId = "json";
     }
     QString path;
     bool optional = true;
     WatchMode watchMode = StartupSnapshot;
+    QString fallbackFor;
+    StartupErrorPolicy startupErrorPolicy = FailReady;
+};
+class ConfigQmlProjection : public QObject {
+    Q_OBJECT
+    QML_NAMED_ELEMENT(ConfigProjection)
+    Q_PROPERTY(QString projectionId MEMBER projectionId)
+    Q_PROPERTY(QStringList sourceIds MEMBER sourceIds)
+    Q_PROPERTY(QJSValue metadata READ metadataValue WRITE setMetadata)
+    Q_PROPERTY(QJSValue transform READ transformValue WRITE setTransform)
+public:
+    using QObject::QObject;
+    QString projectionId;
+    QStringList sourceIds;
+    QJSValue metadata, transform;
+    QJSValue metadataValue() const { return metadata; }
+    void setMetadata(const QJSValue &value) { metadata = value; }
+    QJSValue transformValue() const { return transform; }
+    void setTransform(const QJSValue &value) { transform = value; }
+    ConfigProjectionSpec compile(QList<ConfigDiagnostic> &errors) const;
+};
+class ConfigQmlRecordListPolicy : public QObject {
+    Q_OBJECT
+    QML_NAMED_ELEMENT(ConfigRecordListPolicy)
+    Q_PROPERTY(QString policyId MEMBER policyId)
+    Q_PROPERTY(QStringList path MEMBER path)
+    Q_PROPERTY(QJSValue listPath READ listPathValue WRITE setListPath)
+    Q_PROPERTY(QString keyField MEMBER keyField)
+    Q_PROPERTY(QStringList preservedFields MEMBER preservedFields)
+    Q_PROPERTY(bool pruneUnknown MEMBER pruneUnknown)
+    Q_PROPERTY(bool normalizeFields MEMBER normalizeFields)
+public:
+    using QObject::QObject;
+    QString policyId, keyField;
+    QStringList path, preservedFields;
+    QJSValue listPath;
+    QJSValue listPathValue() const { return listPath; }
+    void setListPath(const QJSValue &value) { listPath = value; }
+    bool pruneUnknown = false, normalizeFields = false;
+    ConfigRecordListPolicySpec compile(QList<ConfigDiagnostic> &errors) const;
 };
 } // namespace configqml

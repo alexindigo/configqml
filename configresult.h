@@ -31,6 +31,40 @@ struct ConfigPublication {
     QString state = "known";
     ConfigError error;
 };
+struct ConfigEvidenceReference {
+    QString evidenceId, directory, sourceId, phase, role;
+    quint64 observationOrder = 0;
+};
+struct ConfigSourceState {
+    QString sourceId;
+    ConfigPath prefix;
+    QString path, presence = "unknown", load = "not_read";
+    ConfigRevision revision;
+    bool quarantined = false;
+    QString fallbackFor, fallbackState = "ordinary";
+    ConfigError diagnostic;
+    QList<ConfigEvidenceReference> evidence;
+};
+struct ConfigSourceFact {
+    ConfigPath path;
+    bool present = false;
+    QVariant value;
+    QString sourceId;
+    ConfigRevision revision;
+};
+struct ConfigSourceAccepted {
+    QString eventId;
+    quint64 publicationGeneration = 0, inputPrefix = 0;
+    QList<QPair<QString, ConfigRevision>> sources;
+    QList<ConfigPath> changedPaths;
+    QString origin, cause;
+    QList<ConfigSourceFact> facts;
+};
+struct ConfigCoverage {
+    ConfigPath path;
+    QString sourceId;
+    quint64 inputThrough = 0, intentRevision = 0;
+};
 struct ConfigResult {
     quint64 requestId = 0;
     QString storeId;
@@ -45,6 +79,10 @@ struct ConfigResult {
     QMap<ConfigPath, QString> masks; // Grouped paths, never setting values.
     // Only an unaccepted group can release its own covered ingress fence.
     QMap<ConfigPath, quint64> rejectedPathGenerations;
+    QList<ConfigEvidenceReference> evidence;
+    QString policyId;
+    quint64 metadataRevision = 0;
+    QList<ConfigCoverage> coverage;
     QString description() const {
         return maskedBy.isEmpty() ? QString() : QStringLiteral("masked by ") + maskedBy;
     }

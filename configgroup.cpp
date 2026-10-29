@@ -86,6 +86,9 @@ void ConfigWorker::processGroup(const ConfigCommand &command) {
     coverInput(command); // Rejection also settles its path generations.
     auto candidate = *m_layers;
     for (auto it = input.edits.cbegin(); error.isEmpty() && it != input.edits.cend(); ++it) {
+        error = quarantined(it.key());
+        if (!error.isEmpty())
+            break;
         ConfigInput leaf;
         leaf.kind = it.value() ? ConfigInput::Kind::User : ConfigInput::Kind::Reset;
         leaf.path = it.key();
@@ -95,9 +98,9 @@ void ConfigWorker::processGroup(const ConfigCommand &command) {
             error = m_options.admission(leaf);
         if (!error.isEmpty())
             break;
-        const auto route = candidate.info(it.key()).route;
-        const auto outcome = it.value() ? candidate.setUser(it.key(), *it.value())
-                                        : candidate.reset(it.key(), route.layerId);
+    }
+    if (error.isEmpty()) {
+        const auto outcome = candidate.applyEdits(input.edits);
         if (!outcome.accepted)
             error = outcome.errors.isEmpty() ? QString("admission") : outcome.errors.first().code;
     }

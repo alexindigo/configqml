@@ -11,5 +11,6 @@
 | 7 | [Evolution and secrets](evolution-secrets.md) | Raw migrations, source admission, redaction and app-owned secret references |
 | 8 | [Ownership](ownership.md) | Shared capture, retention and validated ingress boundaries |
 | 9 | [Distribution](distribution.md) | Installed targets, compatibility and package layout |
+| 10 | [Compatibility views](compatibility-views.md) | Source transforms, conditional fallback, source observations and raw-directed record-list editing |
 
 The [examples](../examples/README.md) are executable installed consumers.

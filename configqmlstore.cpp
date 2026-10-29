@@ -35,6 +35,35 @@ void ConfigQmlStore::componentComplete() {
     if (!m_schema)
         errors.append(m_diagnostics.make({}, "missing-schema"));
     errors.append(options.schema.errors());
+    options.evidenceDirectory = ownString(m_evidenceDirectory);
+    for (auto *projection : m_projections)
+        options.projections.append(projection->compile(errors));
+    for (auto *policy : m_recordListPolicies) {
+        const auto spec = policy->compile(errors);
+        options.recordListPolicies.append(spec);
+        if (validateRecordListPolicy(options.schema, spec).isEmpty()) {
+            auto descriptor = *options.schema.descriptor(spec.path);
+            for (const auto &selector : spec.listPath)
+                descriptor = selector.kind == ConfigValueSelector::Kind::Key &&
+                                     descriptor.type != ConfigDescriptor::Type::Map
+                                 ? descriptor.fields.value(selector.key)
+                                 : descriptor.element.first();
+            m_policyRecords[spec.policyId] = descriptor.element.first();
+        }
+    }
+    for (const auto &rawPath : m_observedPaths) {
+        const auto captured = captureQmlValue(rawPath);
+        ConfigPath path;
+        if (!captured.ok() || captured.value.metaType().id() != QMetaType::QVariantList)
+            errors.append(m_diagnostics.make({}, "observed-path"));
+        else
+            for (const auto &segment : captured.value.toList()) {
+                if (segment.metaType().id() != QMetaType::QString)
+                    errors.append(m_diagnostics.make({}, "observed-path"));
+                path.append(segment.toString());
+            }
+        options.observedPaths.append(path);
+    }
     for (auto *source : m_sources) {
         const auto *file = qobject_cast<ConfigJsonFileSource *>(source);
         auto raw = captureQmlValue(source->data, source->prefix, m_diagnostics);
@@ -72,8 +101,19 @@ void ConfigQmlStore::componentComplete() {
                    options.layers[index].writable != source->writable ||
                    options.layers[index].policy != ConfigAdmissionPolicy(source->admissionPolicy))
             errors.append(m_diagnostics.make({}, "inconsistent-layer"));
-        options.layers[index].sources.append(
-            {source->sourceId, source->prefix, tree, {}, {}, source->exists});
+        options.layers[index].sources.append({source->sourceId,
+                                              source->prefix,
+                                              tree,
+                                              {},
+                                              {},
+                                              source->exists,
+                                              false,
+                                              {},
+                                              true,
+                                              {},
+                                              false});
+        if (file)
+            options.layers[index].sources.last().fallbackFor = ownString(file->fallbackFor);
         if (!options.layers[index].sources.isEmpty() && options.layers[index].sources.size() > 1 &&
             options.layers[index].shippedDefaults != source->shippedDefaults)
             errors.append(m_diagnostics.make(source->prefix, "inconsistent-layer"));
@@ -82,7 +122,8 @@ void ConfigQmlStore::componentComplete() {
             if (source->kind != ConfigMemorySource::File || !source->data.isEmpty())
                 errors.append(m_diagnostics.make(source->prefix, "invalid-json-source"));
             options.jsonFiles.append({source->layerId, source->sourceId, file->path, file->optional,
-                                      ConfigWatchMode(file->watchMode)});
+                                      ConfigWatchMode(file->watchMode),
+                                      ConfigStartupErrorPolicy(file->startupErrorPolicy)});
         }
     }
     if (!errors.isEmpty()) {
@@ -92,6 +133,7 @@ void ConfigQmlStore::componentComplete() {
         return;
     }
     m_core = new ConfigStore(options, this);
+    initializeCompatibilitySignals();
     connect(m_core, &ConfigStore::valuesChanged, this, &ConfigQmlStore::settingValuesChanged);
     m_values = createConfigNamespace(this, *m_core->schema().descriptor({}), {}, this);
     connect(m_core, &ConfigStore::statusChanged, this,
@@ -108,6 +150,13 @@ void ConfigQmlStore::componentComplete() {
                                 {"phase", error.operation}, {"file", error.file},
                                 {"path", error.path},       {"line", error.line}};
         ConfigConsumerGuard(this).invoke([&] { emit sourceError(value); });
+    });
+    connect(m_core, &ConfigStore::sourceWarning, this, [this](const auto &input) {
+        const auto warning = m_diagnostics.sanitize(input);
+        const QVariantMap value{{"code", warning.code},       {"sourceId", warning.sourceId},
+                                {"phase", warning.operation}, {"file", warning.file},
+                                {"path", warning.path},       {"line", warning.line}};
+        ConfigConsumerGuard(this).invoke([&] { emit sourceWarning(value); });
     });
     connect(m_core, &ConfigStore::migrationCompleted, this, [this](const auto &result) {
         ConfigConsumerGuard(this).invoke(
@@ -268,6 +317,7 @@ QVariantMap ConfigQmlStore::info(const QStringList &relative) const {
             {"pathGeneration", QString::number(info.pathGeneration)},
             {"contentRevision", QString::number(info.contentRevision)},
             {"intentRevision", QString::number(info.intentRevision)},
+            {"publicationGeneration", QString::number(info.publicationGeneration)},
             {"route", m_writable ? QVariantMap{{"layerId", info.provenance.route.layerId},
                                                {"sourceId", info.provenance.route.sourceId}}
                                  : QVariantMap{}}};

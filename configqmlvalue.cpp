@@ -126,6 +126,19 @@ QVariantMap qmlResult(const ConfigResult &input, const ConfigDiagnosticBuilder &
         covered[it.key()] = QString::fromLatin1(it->token);
     QVariantList publications;
     QVariantList masks;
+    QVariantList coverage, evidence;
+    for (const auto &item : r.coverage)
+        coverage.append(QVariantMap{{"path", item.path},
+                                    {"sourceId", item.sourceId},
+                                    {"inputThrough", QString::number(item.inputThrough)},
+                                    {"intentRevision", QString::number(item.intentRevision)}});
+    for (const auto &item : r.evidence)
+        evidence.append(QVariantMap{{"evidenceId", item.evidenceId},
+                                    {"directory", item.directory},
+                                    {"sourceId", item.sourceId},
+                                    {"phase", item.phase},
+                                    {"role", item.role},
+                                    {"observationOrder", QString::number(item.observationOrder)}});
     for (auto it = r.masks.cbegin(); it != r.masks.cend(); ++it)
         masks.append(QVariantMap{{"path", it.key()}, {"maskedBy", it.value()}});
     for (const auto &p : r.publications)
@@ -152,6 +165,10 @@ QVariantMap qmlResult(const ConfigResult &input, const ConfigDiagnosticBuilder &
                                   {"operation", r.error.operation}}},
             {"maskedBy", r.maskedBy},
             {"masks", masks},
+            {"coverage", coverage},
+            {"evidence", evidence},
+            {"policyId", r.policyId},
+            {"metadataRevision", QString::number(r.metadataRevision)},
             {"description", r.description()}};
 }
 } // namespace configqml

@@ -26,6 +26,28 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
             }
         }
     auto owned = options;
+    owned.evidenceDirectory = ownString(options.evidenceDirectory);
+    for (auto &path : owned.observedPaths)
+        path = ownPath(path);
+    for (auto &projection : owned.projections) {
+        projection.projectionId = ownString(projection.projectionId);
+        for (auto &id : projection.sourceIds)
+            id = ownString(id);
+        const auto metadata = ownValue(projection.metadata);
+        if (!metadata.ok())
+            m_error = "projection-declaration";
+        projection.metadata = metadata.value.toMap();
+    }
+    for (auto &policy : owned.recordListPolicies) {
+        policy.policyId = ownString(policy.policyId);
+        policy.path = ownPath(policy.path);
+        policy.keyField = ownString(policy.keyField);
+        for (auto &field : policy.preservedFields)
+            field = ownString(field);
+        for (auto &selector : policy.listPath)
+            selector.key = ownString(selector.key);
+        m_policyPaths[policy.policyId] = policy.path;
+    }
     for (auto &file : owned.jsonFiles) {
         file.layerId = QString(file.layerId.constData(), file.layerId.size());
         file.sourceId = QString(file.sourceId.constData(), file.sourceId.size());
@@ -37,6 +59,7 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
         layer.id = QString(layer.id.constData(), layer.id.size());
         for (auto &source : layer.sources) {
             source.id = QString(source.id.constData(), source.id.size());
+            source.fallbackFor = ownString(source.fallbackFor);
             source.prefix = ownPath(source.prefix);
             const auto raw = ownValue(source.raw, source.prefix, m_schema.diagnostics());
             if (raw.ok())
@@ -169,6 +192,16 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
         if (target != m_userLayerId || (!canWriteUser(path) && !coversSource))
             checked.errors = {diagnostics.make(path, "read-only-path")};
     }
+    if (checked.ok() && kind != ConfigInput::Kind::Runtime &&
+        kind != ConfigInput::Kind::ClearRuntime)
+        for (const auto &source : m_sourceStates) {
+            bool writable = false;
+            for (const auto &route : m_userRoutes)
+                writable |= route.sourceId == source.sourceId;
+            if (source.quarantined && writable &&
+                (startsWith(path, source.prefix) || startsWith(source.prefix, path)))
+                checked.errors = {diagnostics.make(path, "source-quarantined")};
+        }
     handle.requestId = registerRequest(context, std::move(callback));
     if (!checked.ok()) {
         handle.errors = checked.errors;
@@ -376,6 +409,21 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
     if (packet.admitted && !boundary.invoke([&] { emit published(); }))
         return;
     if (!changed.isEmpty() && !boundary.invoke([&] { emit valuesChanged(changed); }))
+        return;
+    if (packet.sourceStates) {
+        m_sourceStates = *packet.sourceStates;
+        if (!boundary.invoke([&] { emit sourceStatesChanged(); }))
+            return;
+    }
+    for (const auto &event : packet.projectionEffects)
+        if (!boundary.invoke([&] { emit projectionEffects(event); }))
+            return;
+    for (const auto &diagnostic : packet.projectionDiagnostics)
+        if (!boundary.invoke(
+                [&] { emit sourceWarning(m_schema.diagnostics().sanitize(diagnostic)); }))
+            return;
+    if (packet.sourceAccepted &&
+        !boundary.invoke([&] { emit sourceAccepted(*packet.sourceAccepted); }))
         return;
     if (statusChange && !boundary.invoke([&] { emit statusChanged(); }))
         return;

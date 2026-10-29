@@ -22,6 +22,10 @@ struct ConfigWorkerPacket {
     bool autoSaveRequested = false;
     std::optional<ConfigError> sourceError;
     std::optional<ConfigResult> migrationResult;
+    std::optional<QList<ConfigSourceState>> sourceStates;
+    std::optional<ConfigSourceAccepted> sourceAccepted;
+    QList<ConfigProjectionEffectsEvent> projectionEffects;
+    QList<ConfigError> projectionDiagnostics;
     QMap<ConfigPath, QMap<quint64, ConfigModelPlan>> models;
     qint64 planningNanos = 0;
 };
@@ -38,6 +42,10 @@ struct ConfigCommand {
     QString file;
     QString profileName;
     QList<ConfigPath> selection;
+    QString policyId;
+    std::optional<ConfigRecordListMetadata> policyMetadata;
+    std::optional<ConfigRecordListEditOptions> listEdits;
+    QString conversionError;
 };
 class ConfigWorker : public QObject {
     Q_OBJECT
@@ -83,9 +91,24 @@ private:
     void processGroup(const ConfigCommand &command);
     void profile(const ConfigCommand &command);
     bool migrateSources();
+    void recordListCommand(const ConfigCommand &command);
+    QString quarantined(const ConfigPath &path) const;
+    QString observeSource(const QString &id, const ConfigBackendResult &read,
+                          const ConfigError &error, bool startup);
     ConfigStoreOptions m_options;
     QString m_initializationError;
     std::unique_ptr<ConfigLayers> m_layers;
+    std::unique_ptr<ConfigLayers> m_diskLayers;
+    QList<ConfigSourceState> m_sourceStates;
+    QMap<QString, ConfigRecordListPolicySpec> m_listPolicies;
+    QMap<QString, ConfigRecordListMetadata> m_listMetadata;
+    QMap<QString, quint64> m_listRevisions;
+    QMap<ConfigPath, QVariant> m_listInputs, m_listOutputs;
+    QMap<ConfigPath, QStringList> m_listMetadataKeys;
+    QString m_acceptOrigin, m_acceptCause;
+    quint64 m_sourceEventId = 0;
+    QMap<ConfigPath, QVariantList> m_diskFacts;
+    quint64 m_observationOrder = 0;
     std::unique_ptr<ConfigMemoryBackend> m_backend;
     std::unique_ptr<ConfigJsonBackend> m_json;
     QMap<QString, ConfigJsonFile> m_files;

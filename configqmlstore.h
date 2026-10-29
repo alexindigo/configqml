@@ -20,6 +20,12 @@ class ConfigQmlStore : public QObject, public QQmlParserStatus {
     Q_PROPERTY(QString error READ error NOTIFY statusChanged)
     Q_PROPERTY(bool autoSave MEMBER m_autoSave)
     Q_PROPERTY(int autoSaveInterval MEMBER m_autoSaveInterval)
+    Q_PROPERTY(QQmlListProperty<configqml::ConfigQmlProjection> projections READ projections)
+    Q_PROPERTY(QQmlListProperty<configqml::ConfigQmlRecordListPolicy> recordListPolicies READ
+                   recordListPolicies)
+    Q_PROPERTY(QString evidenceDirectory MEMBER m_evidenceDirectory)
+    Q_PROPERTY(QVariantList observedPaths MEMBER m_observedPaths)
+    Q_PROPERTY(QVariantList sourceStates READ sourceStates NOTIFY sourceStatesChanged)
     Q_PROPERTY(bool dirty READ dirty NOTIFY draftStateChanged)
     Q_PROPERTY(bool conflicted READ conflicted NOTIFY draftStateChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY draftStateChanged)
@@ -32,6 +38,11 @@ public:
     ConfigQmlSchema *schema() const { return m_schema; }
     void setSchema(ConfigQmlSchema *schema);
     QQmlListProperty<ConfigMemorySource> sources() { return {this, &m_sources}; }
+    QQmlListProperty<ConfigQmlProjection> projections() { return {this, &m_projections}; }
+    QQmlListProperty<ConfigQmlRecordListPolicy> recordListPolicies() {
+        return {this, &m_recordListPolicies};
+    }
+    QVariantList sourceStates() const;
     QObject *values() const { return m_values; }
     Status status() const;
     bool ready() const { return status() == Ready; }
@@ -70,6 +81,10 @@ public:
                                       const QJSValue &callback = {});
     Q_INVOKABLE QString importProfile(const QString &file, const QVariantList &paths = {},
                                       const QJSValue &callback = {});
+    Q_INVOKABLE QString updateRecordListPolicy(const QString &policyId, const QJSValue &metadata,
+                                               const QJSValue &callback = {});
+    Q_INVOKABLE QString editRecordList(const QString &policyId, const QJSValue &options,
+                                       const QJSValue &callback = {});
 signals:
     void schemaChanged();
     void valuesChanged();
@@ -77,20 +92,30 @@ signals:
     void completed(const QVariantMap &result);
     void autoSaved(const QVariantMap &result);
     void sourceError(const QVariantMap &error);
+    void sourceWarning(const QVariantMap &warning);
     void inputRejected(const QStringList &path, const QString &code);
     void settingValuesChanged(const QList<configqml::ConfigPath> &paths);
     void draftStateChanged();
     void migrationCompleted(const QVariantMap &result);
+    void sourceStatesChanged();
+    void sourceAccepted(const QVariantMap &event);
+    void projectionEffects(const QVariantMap &event);
 
 private:
     ConfigStore::Callback callback(const QJSValue &function);
     void reject(const ConfigPath &path, const QString &code);
     void raise(const QString &code);
+    void initializeCompatibilitySignals();
     QList<ConfigPath> selectedPaths(const QVariantList &paths, bool *ok);
     void initializeHandle(ConfigStore *core, const ConfigPath &prefix, bool writable,
                           ConfigDraft *draft = nullptr);
     QPointer<ConfigQmlSchema> m_schema;
     QList<ConfigMemorySource *> m_sources;
+    QList<ConfigQmlProjection *> m_projections;
+    QList<ConfigQmlRecordListPolicy *> m_recordListPolicies;
+    QMap<QString, ConfigDescriptor> m_policyRecords;
+    QString m_evidenceDirectory;
+    QVariantList m_observedPaths;
     QPointer<ConfigStore> m_core;
     QPointer<QObject> m_values;
     QString m_error;

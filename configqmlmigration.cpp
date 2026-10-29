@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configqmldeclaration.h"
 #include "confignumber.h"
+#include "configqmlvalue.h"
+#include "configsourceprojection_p.h"
 #include <QJSEngine>
 #include <QJSValueIterator>
 #include <QUrl>
@@ -16,6 +18,7 @@ public:
     QList<QPair<QJSValue, QVariant>> atoms;
     QList<QJSValue> ancestors;
     QString error;
+    QString protocol = "migration";
     QJSValue dictionary() {
         // Null-prototype data dictionaries retain even __proto__ as an own key.
         return engine.globalObject().property("Object").property("create").call(
@@ -74,7 +77,9 @@ public:
     QVariant output(const QJSValue &value, int depth = 0) {
         if (depth > 64 || value.isUndefined() || value.isCallable() || value.isQObject() ||
             value.isQMetaObject() || value.isDate() || value.isRegExp() || value.isError()) {
-            error = "migration-value";
+            error = protocol == "projection"
+                        ? (depth > 64 ? "projection-depth" : "projection-result")
+                        : "migration-value";
             return {};
         }
         if (value.isObject()) {
@@ -83,7 +88,7 @@ public:
                     return atom.second;
             for (const auto &ancestor : ancestors)
                 if (value.strictlyEquals(ancestor)) {
-                    error = "migration-cycle";
+                    error = protocol + "-cycle";
                     return {};
                 }
             ancestors.append(value);
@@ -109,7 +114,7 @@ public:
         if (value.isNumber()) {
             const auto number = value.toNumber();
             if (!std::isfinite(number)) {
-                error = "migration-number";
+                error = protocol + "-number";
                 return {};
             }
             const auto decimal = number == 0 && std::signbit(number)
@@ -157,5 +162,135 @@ QList<ConfigMigration> ConfigQmlSchema::compileMigrations(QList<ConfigDiagnostic
                        }});
     }
     return result;
+}
+ConfigProjectionSpec ConfigQmlProjection::compile(QList<ConfigDiagnostic> &errors) const {
+    ConfigProjectionSpec spec;
+    spec.projectionId = ownString(projectionId);
+    for (const auto &id : sourceIds)
+        spec.sourceIds.append(ownString(id));
+    if (!transform.isString() || transform.toString().isEmpty()) {
+        errors.append(ConfigDiagnosticBuilder().make({}, "projection-declaration"));
+        return spec;
+    }
+    if (!metadata.isUndefined()) {
+        const auto captured = captureQmlValue(QVariant::fromValue(metadata));
+        if (!captured.ok() || captured.value.metaType().id() != QMetaType::QVariantMap) {
+            errors.append(ConfigDiagnosticBuilder().make({}, "projection-declaration"));
+            return spec;
+        }
+        spec.metadata = captured.value.toMap();
+    }
+    const auto source = ownString(transform.toString());
+    spec.transform = [source](const ConfigProjectionInput &input) {
+        MigrationEngine worker;
+        worker.protocol = "projection";
+        const auto function = worker.engine.evaluate("(" + source + ")");
+        if (!function.isCallable() || worker.engine.hasError())
+            throw ConfigProjectionFailure("projection-source");
+        auto record = worker.dictionary();
+        for (const auto &member :
+             {QString("raw"), QString("defaults"), QString("lowerValues"), QString("values"),
+              QString("compatibilityRaw"), QString("metadata")}) {
+            const auto value = member == "raw"                ? input.raw
+                               : member == "defaults"         ? input.defaults
+                               : member == "lowerValues"      ? input.lowerValues
+                               : member == "values"           ? input.values
+                               : member == "compatibilityRaw" ? input.compatibilityRaw
+                                                              : input.metadata;
+            worker.define(record, member, worker.input(value));
+        }
+        worker.define(record, "source",
+                      worker.input(QVariantMap{{"sourceId", input.source.sourceId},
+                                               {"layerId", input.source.layerId},
+                                               {"prefix", input.source.prefix},
+                                               {"presence", input.source.presence},
+                                               {"revision", input.source.revision}}));
+        worker.define(record, "schemaVersion", input.schemaVersion);
+        auto prior = worker.dictionary();
+        worker.define(prior, "present", bool(input.priorVersion));
+        if (input.priorVersion)
+            worker.define(prior, "value", QString::number(*input.priorVersion));
+        worker.define(record, "priorVersion", prior);
+        const auto output = function.call({record});
+        if (output.isError() || worker.engine.hasError())
+            throw ConfigProjectionFailure("projection-script");
+        auto exact = [](const QJSValue &object, const QStringList &keys) {
+            if (!object.isObject() || object.isArray() || object.isCallable() || object.isQObject())
+                return false;
+            QStringList found;
+            QJSValueIterator it(object);
+            while (it.hasNext()) {
+                it.next();
+                found.append(it.name());
+            }
+            auto expected = keys;
+            found.sort();
+            expected.sort();
+            return found == expected;
+        };
+        auto dictionary = [](const QJSValue &value) {
+            return value.isObject() && !value.isArray() && !value.isCallable() &&
+                   !value.isQObject() && !value.isDate() && !value.isRegExp();
+        };
+        if (!exact(output, {"values", "compatibilityRaw", "effects", "diagnostics"}) ||
+            !dictionary(output.property("values")) ||
+            !dictionary(output.property("compatibilityRaw")) ||
+            !output.property("effects").isArray() || !output.property("diagnostics").isArray())
+            throw ConfigProjectionFailure("projection-result");
+        ConfigProjectionResult result;
+        const auto values = worker.output(output.property("values"));
+        const auto compatibilityRaw = worker.output(output.property("compatibilityRaw"));
+        if (!worker.error.isEmpty())
+            throw ConfigProjectionFailure(worker.error);
+        if (values.metaType().id() != QMetaType::QVariantMap ||
+            compatibilityRaw.metaType().id() != QMetaType::QVariantMap)
+            throw ConfigProjectionFailure("projection-result");
+        result.values = values.toMap();
+        result.compatibilityRaw = compatibilityRaw.toMap();
+        const auto effects = output.property("effects");
+        const auto diagnostics = output.property("diagnostics");
+        if (effects.property("length").toUInt() > 64)
+            throw ConfigProjectionFailure("projection-effects");
+        if (diagnostics.property("length").toUInt() > 64)
+            throw ConfigProjectionFailure("projection-diagnostics");
+        for (quint32 i = 0; i < effects.property("length").toUInt(); ++i) {
+            const auto effect = effects.property(i);
+            const auto version = effect.property("version");
+            const auto n = version.toNumber();
+            if (!exact(effect, {"effectId", "version", "action", "arguments"}) ||
+                !effect.property("effectId").isString() || !effect.property("action").isString() ||
+                !dictionary(effect.property("arguments")) || !version.isNumber() ||
+                !std::isfinite(n) || std::trunc(n) != n || n < 0 || n > 9007199254740991.0)
+                throw ConfigProjectionFailure("projection-effects");
+            const auto arguments = worker.output(effect.property("arguments"));
+            if (!worker.error.isEmpty())
+                throw ConfigProjectionFailure(worker.error);
+            if (arguments.metaType().id() != QMetaType::QVariantMap)
+                throw ConfigProjectionFailure("projection-effects");
+            result.effects.append({effect.property("effectId").toString(), quint64(n),
+                                   effect.property("action").toString(), arguments.toMap()});
+        }
+        for (quint32 i = 0; i < diagnostics.property("length").toUInt(); ++i) {
+            const auto diagnostic = diagnostics.property(i);
+            if (!exact(diagnostic, {"code", "path", "severity"}) ||
+                !diagnostic.property("code").isString() ||
+                !diagnostic.property("severity").isString() ||
+                !diagnostic.property("path").isArray())
+                throw ConfigProjectionFailure("projection-diagnostics");
+            ConfigPath path;
+            const auto segments = diagnostic.property("path");
+            for (quint32 j = 0; j < segments.property("length").toUInt(); ++j) {
+                if (!segments.property(j).isString())
+                    throw ConfigProjectionFailure("projection-diagnostics");
+                path.append(segments.property(j).toString());
+            }
+            result.diagnostics.append({diagnostic.property("code").toString(), path,
+                                       diagnostic.property("severity").toString()});
+        }
+        if (worker.engine.hasError())
+            throw ConfigProjectionFailure("projection-script");
+        return result;
+    };
+    return spec;
 }
 } // namespace configqml

@@ -6,12 +6,14 @@
 
 namespace configqml {
 enum class ConfigWatchMode { Off, StartupSnapshot, Live };
+enum class ConfigStartupErrorPolicy { FailReady, SkipProjectionRetainError };
 struct ConfigJsonFile {
     QString layerId = "user";
     QString sourceId = "json";
     QString path; // Empty selects QStandardPaths::AppConfigLocation/config.json.
     bool optional = true;
     ConfigWatchMode watchMode = ConfigWatchMode::StartupSnapshot;
+    ConfigStartupErrorPolicy startupErrorPolicy = ConfigStartupErrorPolicy::FailReady;
 };
 struct ConfigFileEdit {
     ConfigPath path;               // Relative to this file's explicit namespace prefix.

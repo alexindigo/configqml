@@ -3,6 +3,7 @@
 #include "configresult.h"
 #include "configjsonbackend.h"
 #include "configlistmodel.h"
+#include "configrecordlistpolicy.h"
 #include <QObject>
 #include <QPointer>
 #include <QThread>
@@ -26,6 +27,10 @@ struct ConfigStoreOptions {
     ConfigJsonBackend::FaultHook fileFault;
     QString storeId;
     ConfigListModel::Numbers modelNumbers = ConfigListModel::Numbers::Native;
+    QList<ConfigProjectionSpec> projections;
+    QList<ConfigRecordListPolicySpec> recordListPolicies;
+    QString evidenceDirectory;
+    QList<ConfigPath> observedPaths;
     // Native, worker-only admission. Never pass an engine-bound callback here.
     std::function<QString(const ConfigInput &)> admission;
 };
@@ -84,6 +89,12 @@ public:
                           Callback callback = {});
     quint64 importProfile(const QString &file, const QList<ConfigPath> &paths = {},
                           QObject *context = nullptr, Callback callback = {});
+    QList<ConfigSourceState> sourceStates() const { return m_sourceStates; }
+    quint64 updateRecordListPolicy(const QString &policyId,
+                                   const ConfigRecordListMetadata &metadata,
+                                   QObject *context = nullptr, Callback callback = {});
+    quint64 editRecordList(const QString &policyId, const ConfigRecordListEditOptions &options,
+                           QObject *context = nullptr, Callback callback = {});
 signals:
     void statusChanged();
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
@@ -92,7 +103,11 @@ signals:
     void completed(const configqml::ConfigResult &result);
     void autoSaved(const configqml::ConfigResult &result);
     void sourceError(const configqml::ConfigError &error);
+    void sourceWarning(const configqml::ConfigError &warning);
     void migrationCompleted(const configqml::ConfigResult &result);
+    void sourceStatesChanged();
+    void sourceAccepted(const configqml::ConfigSourceAccepted &event);
+    void projectionEffects(const configqml::ConfigProjectionEffectsEvent &event);
 
 private:
     friend class ConfigWorker;
@@ -126,6 +141,8 @@ private:
     QString m_userLayerId;
     QString m_storeId;
     ConfigSnapshot m_cache;
+    QList<ConfigSourceState> m_sourceStates;
+    QMap<QString, ConfigPath> m_policyPaths;
     mutable QMap<ConfigPath, QVariant> m_presentations;
     std::shared_ptr<const ConfigSnapshot> m_admittedSnapshot;
     Status m_status = Status::Loading;
