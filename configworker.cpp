@@ -221,6 +221,7 @@ void ConfigWorker::initialize() {
             if (m_files.contains(source.id))
                 continue;
             m_backend->seed(source.id, encodeMemoryValue(source.raw), source.exists);
+            m_baselines[source.id] = source.raw;
             auto id = m_backend->submit({ConfigBackendRequest::Operation::Read, source.id, {}, {}});
             m_revisions[source.id] = m_backend->take(id)->revision;
         }
@@ -287,6 +288,13 @@ bool ConfigWorker::inheritFailures(ConfigResult &result) const {
 }
 ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &result, bool initial) {
     ConfigWorkerPacket packet;
+    for (const auto &capture : m_groups) {
+        auto info = capture.info;
+        for (auto &attempt : info.attempts)
+            attempt.error = m_options.schema.diagnostics().sanitize(attempt.error);
+        packet.groups[info.groupToken] = info;
+        packet.groupGenerations[info.groupToken] = capture.generation;
+    }
     packet.initial = initial;
     packet.result = result;
     packet.snapshot.generation = ++m_generation;
@@ -550,8 +558,12 @@ void ConfigWorker::coverInput(const ConfigCommand &command) {
 void ConfigWorker::acceptIntent(const ConfigInput &input) {
     // This is the common authoritative fence for all accepted producers. A
     // worker-resolved profile group never fabricates a GUI path generation.
-    const auto paths =
-        input.kind == ConfigInput::Kind::Group ? input.edits.keys() : input.pathGenerations.keys();
+    QList<ConfigPath> paths = input.pathGenerations.keys();
+    if (input.kind == ConfigInput::Kind::Group)
+        for (const auto &leaf : m_options.schema.leaves())
+            for (auto edit = input.edits.cbegin(); edit != input.edits.cend(); ++edit)
+                if (startsWith(leaf, edit.key()) && !paths.contains(leaf))
+                    paths.append(leaf);
     for (const auto &path : paths) {
         ++m_pathIntents[path];
         m_pathInputs[path] = qMax(m_pathInputs.value(path), input.sequence);
@@ -570,6 +582,11 @@ void ConfigWorker::process(const ConfigCommand &command) {
         post(publish(result));
         if (command.operation == "close")
             m_closed = true;
+        return;
+    }
+    if (command.operation == "retainGroup" || command.operation == "saveGroup" ||
+        command.operation == "retryGroup" || command.operation == "releaseGroup") {
+        retainedGroupCommand(command);
         return;
     }
     if (!command.input) {
@@ -610,6 +627,7 @@ void ConfigWorker::process(const ConfigCommand &command) {
         rejection.isEmpty())
         rejection = quarantined(input.path);
     ConfigWriteResult write;
+    const auto before = *m_layers;
     if (!rejection.isEmpty())
         write.errors = {m_options.schema.diagnostics().make(input.path, rejection)};
     else
@@ -650,18 +668,7 @@ void ConfigWorker::process(const ConfigCommand &command) {
         m_failures.append(result);
     } else if (input.kind == ConfigInput::Kind::User || input.kind == ConfigInput::Kind::Reset ||
                input.kind == ConfigInput::Kind::Initialize) {
-        for (auto it = m_routes.cbegin(); it != m_routes.cend(); ++it)
-            if (startsWith(input.path, it->prefix) || startsWith(it->prefix, input.path)) {
-                m_dirty[it.key()] = input.sequence;
-                if (m_files.contains(it.key())) {
-                    const auto relative = input.path.mid(it->prefix.size());
-                    m_edits[it.key()].append({relative,
-                                              input.kind == ConfigInput::Kind::Reset
-                                                  ? std::optional<QVariant>()
-                                                  : input.value,
-                                              input.kind == ConfigInput::Kind::Initialize});
-                }
-            }
+        recordPersistent(input, before);
         scheduleAutoSave();
     }
     post(publish(result));
@@ -670,6 +677,22 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
     m_autoTimer->stop();
     m_save = command;
     m_saveResult = resultFor(command);
+    m_saveIntents.clear();
+    m_saveBases.clear();
+    m_saveRevisions.clear();
+    m_recoveryRead = false;
+    m_recoveryChecked.clear();
+    m_recoveryWhole.clear();
+    m_unresolvedSave = false;
+    if (!command.groupToken.isEmpty()) {
+        describeGroup(m_saveResult, m_groups.value(command.groupToken).info);
+        m_saveResult.coveredRevisions = m_groups.value(command.groupToken).confirmedRevisions;
+    } else {
+        m_saveResult.unresolvedGroups = unresolvedGroups(command.prefix);
+        m_saveResult.excludedGroups = m_saveResult.unresolvedGroups;
+        m_unresolvedSave =
+            command.operation != "autosave" && !m_saveResult.unresolvedGroups.isEmpty();
+    }
     if (command.input && command.input->kind == ConfigInput::Kind::Group) {
         QSet<QString> masks;
         for (auto it = command.input->edits.cbegin(); it != command.input->edits.cend(); ++it) {
@@ -681,18 +704,40 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
         if (masks.size() == 1)
             m_saveResult.maskedBy = *masks.cbegin();
     }
-    m_saveRetainedFailure = inheritFailures(m_saveResult);
+    m_saveRetainedFailure = command.groupToken.isEmpty() && inheritFailures(m_saveResult);
     if (m_saveRetainedFailure) {
         finishSave();
         return; // Preserve the original outcome; never silently retry or recapture.
     }
-    if (m_dirty.isEmpty() || m_routes.isEmpty()) {
+    for (const auto &id : m_dirty.keys()) {
+        const auto intents = eligibleIntents(id, command);
+        if (intents.isEmpty())
+            continue;
+        m_saveIntents[id] = intents;
+        m_saveBases[id] = command.groupToken.isEmpty()
+                              ? m_baselines.value(id)
+                              : m_groups.value(command.groupToken).bases.value(id);
+        m_saveRevisions[id] = command.groupToken.isEmpty()
+                                  ? m_pendingRevisions.value(id, m_revisions.value(id))
+                                  : m_groups.value(command.groupToken).revisions.value(id);
+        if (command.groupToken.isEmpty())
+            for (const auto &path : m_options.schema.leaves()) {
+                quint64 through = 0;
+                for (const auto &intent : intents)
+                    if (!reserved(path) &&
+                        (startsWith(path, intent.path) || startsWith(intent.path, path)))
+                        through = qMax(through, intent.input);
+                if (through)
+                    m_saveResult.coverage.append({path, id, through, m_pathIntents.value(path)});
+            }
+    }
+    if (m_saveIntents.isEmpty() || m_routes.isEmpty()) {
         m_saveResult.status = "nothing_to_save";
         finishSave();
         return;
     }
     m_busy = true;
-    m_saveSources = m_dirty.keys();
+    m_saveSources = m_saveIntents.keys();
     continueSave();
 }
 void ConfigWorker::continueSave() {
@@ -701,6 +746,13 @@ void ConfigWorker::continueSave() {
         if (!outcome)
             return;
         m_activeBackend = 0;
+        if (m_recoveryRead) {
+            m_recoveryRead = false;
+            if (recoverOwnPublication(m_activeSource, *outcome))
+                m_saveSources.prepend(m_activeSource);
+            continueSave();
+            return;
+        }
         if (outcome->success && outcome->bytes != m_activeBytes) {
             outcome->success = false;
             outcome->publicationState = ConfigBackendResult::PublicationState::Uncertain;
@@ -712,10 +764,14 @@ void ConfigWorker::continueSave() {
         m_saveResult.publications.append(
             {m_activeSource, outcome->success, outcome->revision, state, outcome->error});
         if (outcome->success) {
-            m_revisions[m_activeSource] = outcome->revision;
             m_saveResult.coveredRevisions[m_activeSource] = outcome->revision;
-            m_dirty.remove(m_activeSource);
+            confirmed(m_activeSource, decodeMemoryValue(outcome->bytes), *outcome);
         } else {
+            if (!m_save.groupToken.isEmpty() && outcome->publicationWitness) {
+                auto &capture = m_groups[m_save.groupToken];
+                capture.uncertain[m_activeSource] = *outcome->publicationWitness;
+                capture.uncertainBytes[m_activeSource] = m_activeBytes;
+            }
             m_saveResult.status = "failed";
             m_saveResult.error = outcome->error;
             if (QString(state) == "uncertain")
@@ -727,10 +783,37 @@ void ConfigWorker::continueSave() {
         return;
     }
     m_activeSource = m_saveSources.takeFirst();
-    const auto route = m_routes.value(m_activeSource);
+    bool uncertain = false;
+    for (const auto &capture : m_groups)
+        uncertain |= capture.uncertain.contains(m_activeSource);
+    if (uncertain && !m_recoveryChecked.contains(m_activeSource)) {
+        m_recoveryChecked.insert(m_activeSource);
+        if (!m_files.contains(m_activeSource)) {
+            m_recoveryRead = true;
+            m_activeBackend =
+                m_backend->submit({ConfigBackendRequest::Operation::Read, m_activeSource, {}, {}});
+            continueSave();
+            return;
+        }
+        const auto id =
+            m_json->submit({ConfigBackendRequest::Operation::Read, m_activeSource, {}, {}});
+        if (!recoverOwnPublication(m_activeSource, *m_json->take(id))) {
+            continueSave();
+            return;
+        }
+    }
     if (m_files.contains(m_activeSource)) {
-        auto transaction = m_json->reconcile(m_activeSource, m_baselines.value(m_activeSource),
-                                             m_edits.value(m_activeSource));
+        QList<ConfigFileEdit> edits;
+        for (const auto &intent : m_saveIntents.value(m_activeSource))
+            edits.append(intent.edit);
+        if (m_recoveryWhole.contains(m_activeSource)) {
+            auto raw = m_saveBases.value(m_activeSource);
+            for (const auto &edit : edits)
+                applyFileEdit(raw, edit);
+            edits = {{{}, raw, false}};
+        }
+        auto transaction =
+            m_json->reconcile(m_activeSource, m_saveBases.value(m_activeSource), edits);
         const auto &outcome = transaction.outcome;
         const QString state =
             outcome.publicationState == ConfigBackendResult::PublicationState::Known ? "known"
@@ -739,15 +822,7 @@ void ConfigWorker::continueSave() {
             m_saveResult.publications.append(
                 {m_activeSource, outcome.success, outcome.revision, state, outcome.error});
         if (outcome.success) {
-            auto source = *m_layers->source(route.layerId, route.sourceId);
-            source.raw = transaction.raw;
-            source.bytes = outcome.bytes;
-            source.revision = outcome.revision.token;
-            source.exists = outcome.revision.exists;
-            m_layers->replaceSource(route.layerId, source);
-            source.localIntent = false;
-            source.diskExists = source.exists;
-            m_diskLayers->replaceSource(route.layerId, source);
+            confirmed(m_activeSource, transaction.raw, outcome);
             const auto retention = observeSource(m_activeSource, outcome, {}, false);
             if (!retention.isEmpty()) {
                 m_saveResult.status = "failed";
@@ -755,12 +830,13 @@ void ConfigWorker::continueSave() {
             }
             m_acceptOrigin = "own_save";
             m_acceptCause = "save";
-            m_baselines[m_activeSource] = transaction.raw;
-            m_revisions[m_activeSource] = outcome.revision;
             m_saveResult.coveredRevisions[m_activeSource] = outcome.revision;
-            m_dirty.remove(m_activeSource);
-            m_edits.remove(m_activeSource);
         } else {
+            if (!m_save.groupToken.isEmpty() && outcome.publicationWitness) {
+                auto &capture = m_groups[m_save.groupToken];
+                capture.uncertain[m_activeSource] = *outcome.publicationWitness;
+                capture.uncertainBytes[m_activeSource] = transaction.candidateBytes;
+            }
             m_saveResult.status = "failed";
             m_saveResult.error = outcome.error;
             if (state == "uncertain")
@@ -770,24 +846,47 @@ void ConfigWorker::continueSave() {
         continueSave();
         return;
     }
-    m_activeBytes = encodeMemoryValue(m_layers->source(route.layerId, route.sourceId)->raw);
+    m_activeRaw = m_saveBases.value(m_activeSource);
+    for (const auto &intent : m_saveIntents.value(m_activeSource))
+        applyFileEdit(m_activeRaw, intent.edit);
+    m_activeBytes = encodeMemoryValue(m_activeRaw);
     m_activeBackend = m_backend->submit({ConfigBackendRequest::Operation::Publish, m_activeSource,
-                                         m_activeBytes, m_revisions.value(m_activeSource)});
+                                         m_activeBytes, m_saveRevisions.value(m_activeSource)});
     continueSave(); // Immediate memory completion or deterministic delayed operation.
 }
 void ConfigWorker::finishSave() {
     if (m_saveResult.status.isEmpty())
         m_saveResult.status = m_saveResult.publications.isEmpty() ? "nothing_to_save" : "saved";
-    if (m_saveResult.status != "failed")
+    if (m_saveResult.status != "failed" && m_save.groupToken.isEmpty() &&
+        m_saveResult.excludedGroups.isEmpty())
         m_saveResult.coveredRevisions = m_revisions;
+    const bool refusal = m_unresolvedSave && m_saveResult.status != "failed";
+    if (refusal) {
+        m_saveResult.status = "failed";
+        m_saveResult.error = {"unresolved-group", {}, m_save.operation};
+    }
     if (m_saveResult.status == "failed") {
         bool success = false;
         for (const auto &p : m_saveResult.publications)
             success |= p.success;
         if (success)
             m_saveResult.publicationState = "partial";
-        if (!m_saveRetainedFailure)
+        if (!m_saveRetainedFailure && !refusal && m_save.groupToken.isEmpty())
             m_failures.append(m_saveResult);
+    }
+    if (!m_save.groupToken.isEmpty()) {
+        auto &info = m_groups[m_save.groupToken].info;
+        auto &attempt = info.attempts.last();
+        attempt.status = m_saveResult.status;
+        attempt.publicationState = m_saveResult.publicationState;
+        attempt.error = m_saveResult.error;
+        info.state = m_saveResult.status == "failed" ? "stopped" : "succeeded";
+        ++m_groups[m_save.groupToken].generation;
+        describeGroup(m_saveResult, info);
+        m_groups[m_save.groupToken].receipts.append(m_saveResult);
+        m_saveResult.unresolvedGroups = unresolvedGroups(m_save.prefix);
+        if (info.state == "succeeded")
+            scheduleAutoSave();
     }
     const bool closing = m_save.operation == "close";
     post(publish(m_saveResult));
@@ -955,19 +1054,11 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
         if (!m_dirty.contains(it.key()))
             m_baselines[it.key()] = source.raw;
         diskReplacements[route.layerId].append(source);
-        for (const auto &edit : m_edits.value(it.key())) {
-            if (edit.ifMissing && valueAt(source.raw, edit.path))
-                continue;
-            if (edit.value)
-                putValue(source.raw, edit.path, *edit.value);
-            else if (edit.path.isEmpty())
-                source.raw.clear();
-            else
-                removeValue(source.raw, edit.path);
-        }
-        if (!m_edits.value(it.key()).isEmpty())
+        for (const auto &edit : pendingEdits(it.key()))
+            applyFileEdit(source.raw, edit);
+        if (!m_intents.value(it.key()).isEmpty())
             source.exists = true;
-        source.localIntent = !m_edits.value(it.key()).isEmpty();
+        source.localIntent = !m_intents.value(it.key()).isEmpty();
         replacements[route.layerId].append(source);
         m_revisions[it.key()] = admittedRevision;
         changed = true;

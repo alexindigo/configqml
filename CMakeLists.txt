@@ -23,7 +23,7 @@ add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp
     configshutdown_p.h configshutdown.cpp)
 target_sources(configqml_core PRIVATE configprojection_p.h configprojection.cpp
     configprojection.h configsourceprojection_p.h configevidence_p.h configevidence.cpp
-    configrecordlistpolicy.h configrecordlistpolicy.cpp configrecordlistcommands.cpp
+    configrecordlistpolicy.h configrecordlistpolicy.cpp configrecordlistcommands.cpp configretainedgroup.cpp
     configlistmodel.h configlistmodel.cpp configdraft.h configdraft.cpp configgroup.cpp
     configstorehandle.h configstorehandle.cpp configmigration.cpp configjsonbackup.cpp)
 add_library(configqml::core ALIAS configqml_core)
@@ -57,7 +57,7 @@ if(CONFIGQML_BUILD_QML)
             configqmlstore.h configqmlstore.cpp configqmlvalue.h configqmlvalue.cpp
             confignamespace.cpp configfacade.h configfacade.cpp)
     target_sources(configqml PRIVATE configqmlmodel.h configqmlmigration.cpp configqmlhandles.cpp
-        configqmlcompat.cpp)
+        configqmlcompat.cpp configqmlgroups.cpp)
     add_library(configqml::configqml ALIAS configqml)
     target_link_libraries(configqml PUBLIC configqml::core Qt6::Qml PRIVATE Qt6::CorePrivate)
     target_include_directories(configqml PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -119,7 +119,7 @@ option(BUILD_TESTING "Build the configqml tests" OFF)
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 6.12 REQUIRED COMPONENTS Test Gui)
-    foreach(suite projections fallback_layers startup_policy record_list_policy source_events)
+    foreach(suite projections fallback_layers startup_policy record_list_policy source_events retained_groups)
         add_executable(test_${suite} tests/test_${suite}.cpp)
         target_link_libraries(test_${suite} PRIVATE configqml::core Qt6::Test)
         add_test(NAME ${suite} COMMAND test_${suite})
@@ -172,7 +172,7 @@ if(BUILD_TESTING)
         add_executable(test_projection_bridge tests/test_projection_bridge.cpp)
         target_link_libraries(test_projection_bridge PRIVATE configqml::configqml Qt6::Test)
         add_test(NAME projection_bridge COMMAND test_projection_bridge)
-        foreach(suite projections fallback_layers startup_policy record_list_policy source_events)
+        foreach(suite projections fallback_layers startup_policy record_list_policy source_events retained_groups)
             add_executable(test_qml_${suite} tests/test_compat_qml.cpp)
             target_link_libraries(test_qml_${suite} PRIVATE configqml::configqml Qt6::Test Qt6::Quick)
             target_compile_definitions(test_qml_${suite} PRIVATE QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"

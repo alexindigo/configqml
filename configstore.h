@@ -95,6 +95,12 @@ public:
                                    QObject *context = nullptr, Callback callback = {});
     quint64 editRecordList(const QString &policyId, const ConfigRecordListEditOptions &options,
                            QObject *context = nullptr, Callback callback = {});
+    quint64 retainGroup(const ConfigRetainedGroupOptions &options, QObject *context = nullptr,
+                        Callback callback = {});
+    quint64 saveGroup(const QString &token, QObject *context = nullptr, Callback callback = {});
+    quint64 retryGroup(const QString &token, QObject *context = nullptr, Callback callback = {});
+    quint64 releaseGroup(const QString &token, QObject *context = nullptr, Callback callback = {});
+    ConfigGroupInfo groupInfo(const QString &token) const;
 signals:
     void statusChanged();
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
@@ -124,6 +130,9 @@ private:
                               const ConfigAdmission *admission = nullptr);
     quint64 request(const QString &operation, QObject *context, Callback callback);
     quint64 registerRequest(QObject *context, Callback callback);
+    quint64 groupRequest(const QString &operation, const QString &token, QObject *context,
+                         Callback callback);
+    QMap<QString, quint64> retainedGenerations() const;
     void receive(const ConfigWorkerPacket &packet);
     void receiveResult(const ConfigResult &result);
     void deliver();
@@ -143,6 +152,19 @@ private:
     ConfigSnapshot m_cache;
     QList<ConfigSourceState> m_sourceStates;
     QMap<QString, ConfigPath> m_policyPaths;
+    QMap<QString, ConfigGroupInfo> m_groups;
+    // Value-free ingress claims, including requests whose worker reply is pending.
+    // Captures/bodies and semantic idempotency remain worker-owned.
+    QMap<QString, quint64> m_retainedRequests;
+    struct RetainedIngress {
+        // Last worker observation and separate object-thread transition claim.
+        // Only its own settlement removes a claim, even if admission refused it.
+        quint64 generation = 0, capturePrefix = 0;
+        QString state;
+        quint64 pendingRequest = 0, pendingGeneration = 0;
+        QString pendingState;
+    };
+    QMap<QString, RetainedIngress> m_retainedIngress;
     mutable QMap<ConfigPath, QVariant> m_presentations;
     std::shared_ptr<const ConfigSnapshot> m_admittedSnapshot;
     Status m_status = Status::Loading;

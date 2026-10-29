@@ -26,6 +26,8 @@ struct ConfigWorkerPacket {
     std::optional<ConfigSourceAccepted> sourceAccepted;
     QList<ConfigProjectionEffectsEvent> projectionEffects;
     QList<ConfigError> projectionDiagnostics;
+    QMap<QString, ConfigGroupInfo> groups;
+    QMap<QString, quint64> groupGenerations;
     QMap<ConfigPath, QMap<quint64, ConfigModelPlan>> models;
     qint64 planningNanos = 0;
 };
@@ -46,6 +48,32 @@ struct ConfigCommand {
     std::optional<ConfigRecordListMetadata> policyMetadata;
     std::optional<ConfigRecordListEditOptions> listEdits;
     QString conversionError;
+    std::optional<ConfigRetainedGroupOptions> retainedGroup;
+    bool retainedLookup = false;
+    QString groupToken, groupState;
+    // Object-thread snapshot, including earlier pending lifecycle claims.
+    QMap<QString, quint64> groupGenerations;
+};
+struct ConfigPendingIntent {
+    quint64 id = 0, input = 0;
+    ConfigPath path;
+    ConfigFileEdit edit;
+    QString reservation;
+};
+struct ConfigRetainedCapture {
+    ConfigGroupInfo info;
+    quint64 generation = 0;
+    QByteArray commandBody;
+    QList<ConfigPath> selections;
+    QMap<QString, QSet<quint64>> intents;
+    QMap<QString, QVariantMap> bases;
+    QMap<QString, ConfigRevision> revisions;
+    QMap<QString, ConfigRevision> uncertain;
+    QMap<QString, QByteArray> uncertainBytes;
+    QMap<QString, QVariantMap> originalBases;
+    QMap<QString, ConfigRevision> originalRevisions;
+    QList<ConfigResult> receipts;
+    QMap<QString, ConfigRevision> confirmedRevisions;
 };
 class ConfigWorker : public QObject {
     Q_OBJECT
@@ -95,6 +123,20 @@ private:
     QString quarantined(const ConfigPath &path) const;
     QString observeSource(const QString &id, const ConfigBackendResult &read,
                           const ConfigError &error, bool startup);
+    void retainedGroupCommand(const ConfigCommand &command);
+    void recordPersistent(const ConfigInput &input, const ConfigLayers &before);
+    void recordPersistentEdit(const ConfigRoute &route, const ConfigPath &path,
+                              const std::optional<QVariant> &value, bool ifMissing, quint64 input,
+                              const ConfigLayers &before);
+    QList<ConfigFileEdit> pendingEdits(const QString &source) const;
+    QList<ConfigPendingIntent> eligibleIntents(const QString &source,
+                                               const ConfigCommand &command) const;
+    bool reserved(const ConfigPath &path) const;
+    QStringList unresolvedGroups(quint64 prefix) const;
+    void confirmed(const QString &id, const QVariantMap &raw, const ConfigBackendResult &outcome);
+    void refreshDirty(const QString &id);
+    void describeGroup(ConfigResult &result, const ConfigGroupInfo &info) const;
+    bool recoverOwnPublication(const QString &source, const ConfigBackendResult &read);
     ConfigStoreOptions m_options;
     QString m_initializationError;
     std::unique_ptr<ConfigLayers> m_layers;
@@ -114,7 +156,18 @@ private:
     QMap<QString, ConfigJsonFile> m_files;
     QMap<QString, ConfigRoute> m_fileRoutes;
     QMap<QString, QVariantMap> m_baselines;
-    QMap<QString, QList<ConfigFileEdit>> m_edits;
+    QMap<QString, QList<ConfigPendingIntent>> m_intents;
+    quint64 m_nextIntent = 0;
+    QMap<QString, ConfigRetainedCapture> m_groups;
+    QMap<QString, QString> m_groupKeys;
+    QMap<QString, ConfigRevision> m_pendingRevisions;
+    QMap<QString, QList<ConfigPendingIntent>> m_saveIntents;
+    QMap<QString, QVariantMap> m_saveBases;
+    QMap<QString, ConfigRevision> m_saveRevisions;
+    QVariantMap m_activeRaw;
+    bool m_unresolvedSave = false;
+    bool m_recoveryRead = false;
+    QSet<QString> m_recoveryChecked, m_recoveryWhole;
     QFileSystemWatcher *m_watcher = nullptr;
     QTimer *m_watchTimer = nullptr;
     QTimer *m_autoTimer = nullptr;

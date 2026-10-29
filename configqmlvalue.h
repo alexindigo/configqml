@@ -11,4 +11,6 @@ ConfigValueResult admitQmlValue(const ConfigDescriptor &descriptor, const QVaria
                                 const ConfigPath &path = {});
 QVariant qmlValue(const ConfigDescriptor &descriptor, const QVariant &value);
 QVariantMap qmlResult(const ConfigResult &result, const ConfigDiagnosticBuilder &diagnostics = {});
+QVariantMap qmlGroupInfo(const ConfigGroupInfo &info,
+                         const ConfigDiagnosticBuilder &diagnostics = {});
 } // namespace configqml

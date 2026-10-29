@@ -12,5 +12,6 @@
 | 8 | [Ownership](ownership.md) | Shared capture, retention and validated ingress boundaries |
 | 9 | [Distribution](distribution.md) | Installed targets, compatibility and package layout |
 | 10 | [Compatibility views](compatibility-views.md) | Source transforms, conditional fallback, source observations and raw-directed record-list editing |
+| 11 | [Retained groups](retained-groups.md) | Worker reservations, immutable captures, explicit retry and causal suffixes |
 
 The [examples](../examples/README.md) are executable installed consumers.

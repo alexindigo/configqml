@@ -85,6 +85,7 @@ void ConfigWorker::processGroup(const ConfigCommand &command) {
             error = "draft-conflict";
     coverInput(command); // Rejection also settles its path generations.
     auto candidate = *m_layers;
+    const auto before = *m_layers;
     for (auto it = input.edits.cbegin(); error.isEmpty() && it != input.edits.cend(); ++it) {
         error = quarantined(it.key());
         if (!error.isEmpty())
@@ -114,12 +115,7 @@ void ConfigWorker::processGroup(const ConfigCommand &command) {
     }
     *m_layers = std::move(candidate);
     acceptIntent(input);
-    for (auto it = input.edits.cbegin(); it != input.edits.cend(); ++it) {
-        const auto route = m_layers->info(it.key()).route;
-        m_dirty[route.sourceId] = input.sequence;
-        if (m_files.contains(route.sourceId))
-            m_edits[route.sourceId].append({it.key().mid(route.prefix.size()), it.value(), false});
-    }
+    recordPersistent(input, before);
     beginSave(command);
 }
 static QVariant portableValue(const ConfigDescriptor &descriptor, const QVariant &raw) {

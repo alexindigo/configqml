@@ -81,6 +81,7 @@ ConfigBackendResult ConfigMemoryBackend::execute(quint64 id, const Pending &pend
         return fail("revision-conflict");
     entry = {copy(request.bytes), {true, QByteArray::number(++m_nextRevision)}};
     m_entries.insert(request.sourceId, entry);
+    result.publicationWitness = entry.revision;
     if (pending.schedule.fault == Fault::AfterPublication ||
         pending.schedule.fault == Fault::Readback) {
         result.publicationState = ConfigBackendResult::PublicationState::Uncertain;

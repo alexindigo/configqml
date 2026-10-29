@@ -16,9 +16,15 @@ private slots:
         compat::put(dir.filePath("legacy.json"),
                     "{\"oldCount\":7,\"a\":1,\"b\":2,\"wide\":18446744073709551615}");
         compat::put(dir.filePath("bad.json"), "malformed");
+        const bool retained = QString(COMPAT_FIXTURE).endsWith("tst_retained_groups.qml");
         const bool sourceEvents = QString(COMPAT_FIXTURE).endsWith("tst_source_events.qml");
         if (sourceEvents)
             QVERIFY(QDir().mkpath(dir.filePath("live")));
+        if (retained) {
+            QVERIFY(QDir().mkpath(dir.filePath("blocked")));
+            QVERIFY(QFile::setPermissions(dir.filePath("blocked"),
+                                          QFileDevice::ReadOwner | QFileDevice::ExeOwner));
+        }
         QQmlEngine engine;
         engine.addImportPath(QML_IMPORT_ROOT);
         QQmlComponent component(&engine, QUrl::fromLocalFile(COMPAT_FIXTURE));
@@ -75,11 +81,26 @@ private slots:
                                                                     QFileDevice::WriteOwner |
                                                                     QFileDevice::ExeOwner));
         }
+        if (retained) {
+            QTRY_VERIFY_WITH_TIMEOUT(root->property("stopped").toBool(), 10000);
+            QVERIFY(QFile::setPermissions(dir.filePath("blocked"), QFileDevice::ReadOwner |
+                                                                       QFileDevice::WriteOwner |
+                                                                       QFileDevice::ExeOwner));
+            QVERIFY(QMetaObject::invokeMethod(root.get(), "retry"));
+        }
         QTRY_VERIFY_WITH_TIMEOUT(root->property("finished").toBool() ||
                                      !root->property("failure").toString().isEmpty(),
                                  10000);
         QCOMPARE(root->property("failure").toString(), QString());
         QVERIFY(root->property("finished").toBool());
+        if (retained) {
+            ConfigJsonCodec codec;
+            const auto raw = codec.decode(compat::bytes(dir.filePath("blocked/user.json")), "user");
+            QCOMPARE(ConfigDescriptor::leaf(ConfigDescriptor::Type::SafeInteger, 0)
+                         .validate(raw.raw.value("choice"))
+                         .value.toInt(),
+                     1);
+        }
         QCOMPARE(compat::bytes(dir.filePath("legacy.json")),
                  QByteArray("{\"oldCount\":7,\"a\":1,\"b\":2,\"wide\":18446744073709551615}"));
     }

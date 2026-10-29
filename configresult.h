@@ -65,6 +65,31 @@ struct ConfigCoverage {
     QString sourceId;
     quint64 inputThrough = 0, intentRevision = 0;
 };
+struct ConfigGroupEdit {
+    ConfigPath path;
+    bool present = true;
+    QVariant value;
+};
+struct ConfigRetainedGroupOptions {
+    QString requestKey;
+    QList<ConfigPath> paths;
+    QList<ConfigGroupEdit> edits;
+    QStringList dependencies;
+};
+struct ConfigGroupAttempt {
+    QString attemptId;
+    quint64 attemptNumber = 0, requestId = 0;
+    QString status, publicationState = "known";
+    ConfigError error;
+};
+struct ConfigGroupInfo {
+    QString groupToken, requestKey, state;
+    quint64 capturePrefix = 0;
+    QList<ConfigCoverage> coverage;
+    QStringList dependencies;
+    QList<ConfigGroupAttempt> attempts;
+    ConfigError error;
+};
 struct ConfigResult {
     quint64 requestId = 0;
     QString storeId;
@@ -83,6 +108,9 @@ struct ConfigResult {
     QString policyId;
     quint64 metadataRevision = 0;
     QList<ConfigCoverage> coverage;
+    QString groupToken, requestKey, attemptId;
+    quint64 capturePrefix = 0, attemptNumber = 0;
+    QStringList dependencies, unresolvedGroups, excludedGroups;
     QString description() const {
         return maskedBy.isEmpty() ? QString() : QStringLiteral("masked by ") + maskedBy;
     }

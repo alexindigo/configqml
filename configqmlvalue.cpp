@@ -169,6 +169,42 @@ QVariantMap qmlResult(const ConfigResult &input, const ConfigDiagnosticBuilder &
             {"evidence", evidence},
             {"policyId", r.policyId},
             {"metadataRevision", QString::number(r.metadataRevision)},
+            {"groupToken", r.groupToken},
+            {"requestKey", r.requestKey},
+            {"capturePrefix", QString::number(r.capturePrefix)},
+            {"dependencies", r.dependencies},
+            {"attemptId", r.attemptId},
+            {"attemptNumber", QString::number(r.attemptNumber)},
+            {"unresolvedGroups", r.unresolvedGroups},
+            {"excludedGroups", r.excludedGroups},
             {"description", r.description()}};
+}
+QVariantMap qmlGroupInfo(const ConfigGroupInfo &info, const ConfigDiagnosticBuilder &diagnostics) {
+    if (!info.error.empty())
+        return {{"error", QVariantMap{{"code", info.error.code}}}};
+    QVariantList coverage, attempts;
+    for (const auto &item : info.coverage)
+        coverage.append(QVariantMap{{"path", item.path},
+                                    {"sourceId", item.sourceId},
+                                    {"inputThrough", QString::number(item.inputThrough)},
+                                    {"intentRevision", QString::number(item.intentRevision)}});
+    for (const auto &attempt : info.attempts) {
+        const auto error = diagnostics.sanitize(attempt.error);
+        attempts.append(QVariantMap{{"attemptId", attempt.attemptId},
+                                    {"attemptNumber", QString::number(attempt.attemptNumber)},
+                                    {"requestId", QString::number(attempt.requestId)},
+                                    {"status", attempt.status},
+                                    {"publicationState", attempt.publicationState},
+                                    {"error", QVariantMap{{"code", error.code},
+                                                          {"sourceId", error.sourceId},
+                                                          {"operation", error.operation},
+                                                          {"file", error.file},
+                                                          {"path", error.path},
+                                                          {"line", error.line}}}});
+    }
+    return {{"groupToken", info.groupToken}, {"requestKey", info.requestKey},
+            {"state", info.state},           {"capturePrefix", QString::number(info.capturePrefix)},
+            {"coverage", coverage},          {"dependencies", info.dependencies},
+            {"attempts", attempts}};
 }
 } // namespace configqml

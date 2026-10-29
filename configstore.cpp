@@ -391,6 +391,24 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
         statusChange = true;
     }
     // Complete generation is installed before the first property notification.
+    m_groups = packet.groups;
+    // Published display state is not ingress authority. Keep monotone worker
+    // observations separate from claims made before their replies can arrive.
+    for (auto it = packet.groups.cbegin(); it != packet.groups.cend(); ++it) {
+        auto &ingress = m_retainedIngress[it.key()];
+        const auto generation = packet.groupGenerations.value(it.key());
+        if (generation >= ingress.generation) {
+            ingress.generation = generation;
+            ingress.state = it->state;
+            ingress.capturePrefix = it->capturePrefix;
+        }
+    }
+    if (packet.result)
+        for (auto &ingress : m_retainedIngress)
+            if (ingress.pendingRequest && ingress.pendingRequest == packet.result->requestId) {
+                ingress.pendingRequest = ingress.pendingGeneration = 0;
+                ingress.pendingState.clear();
+            }
     ConfigConsumerGuard boundary(this);
     m_publishingModels = true;
     QMap<ConfigPath, quint64> acknowledgements;
@@ -451,6 +469,13 @@ void ConfigStore::receiveResult(const ConfigResult &input) {
     const auto result = m_schema.diagnostics().sanitize(input);
     if (result.requestId < m_nextCompletion || !m_pending.contains(result.requestId))
         return;
+    if (result.operation == "retainGroup" && result.status == "failed") {
+        for (auto it = m_retainedRequests.begin(); it != m_retainedRequests.end();)
+            if (it.value() == result.requestId)
+                it = m_retainedRequests.erase(it);
+            else
+                ++it;
+    }
     m_results[result.requestId] = result;
     deliver();
 }

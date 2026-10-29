@@ -81,6 +81,23 @@ bool compatibleAncestors(const QVariantMap &base, const QVariantMap &fresh, cons
     return true;
 }
 } // namespace
+bool applyFileEdit(QVariantMap &raw, const ConfigFileEdit &edit) {
+    const auto current = valueAt(raw, edit.path);
+    if (edit.ifMissing && current)
+        return false;
+    if (edit.pruneEmpty && (!current || (current->metaType().id() == QMetaType::QVariantMap &&
+                                         !current->toMap().isEmpty())))
+        return false;
+    if (edit.value && edit.path.isEmpty())
+        raw = edit.value->toMap();
+    else if (edit.value)
+        putValue(raw, edit.path, *edit.value);
+    else if (edit.path.isEmpty())
+        raw.clear();
+    else
+        removeValue(raw, edit.path);
+    return true;
+}
 ConfigJsonBackend::ConfigJsonBackend(const QList<ConfigJsonFile> &files, FaultHook hook,
                                      const QMap<QString, ConfigDiagnosticBuilder> &diagnostics)
     : m_files(files), m_hook(std::move(hook)) {
@@ -309,12 +326,20 @@ ConfigBackendResult ConfigJsonBackend::publish(const ConfigBackendRequest &reque
     if (::renameat(directory, temporaryBytes.constData(), directory,
                    QFile::encodeName(QFileInfo(name).fileName()).constData()) < 0)
         return fail("rename-failed", "rename");
+    struct stat published;
+    if (::fstat(fd.fd, &published) == 0 && stamp(name) == stamp(published) &&
+        resolve(id).path == name)
+        r.publicationWitness = ConfigRevision{
+            true, QFile::encodeName(name).toHex() + '|' + stamp(published) + '|' +
+                      QCryptographicHash::hash(request.bytes, QCryptographicHash::Sha256).toHex()};
     if (::fsync(directory) < 0)
         return fail("directory-sync-failed", "sync", true);
     injected = fault("readback", name);
     if (!injected.isEmpty())
         return fail(injected, "readback", true);
+    const auto witness = r.publicationWitness;
     r = read(id, name);
+    r.publicationWitness = witness;
     r.operation = ConfigBackendRequest::Operation::Publish;
     if (!r.success || r.bytes != request.bytes)
         return fail("readback-mismatch", "readback", true);
@@ -423,30 +448,21 @@ ConfigJsonTransaction ConfigJsonBackend::reconcile(const QString &sourceId,
                         m_diagnostics.value(id).make(edit.path, "path-conflict"), id, "reconcile",
                         name));
             }
-        if (!edit.ifMissing && (!same(valueAt(baseline, edit.path), fresh) ||
-                                !compatibleAncestors(baseline, t.raw, edit.path)))
+        const auto fence = edit.fencePath.value_or(edit.path);
+        if (!edit.ifMissing && (!same(valueAt(baseline, fence), valueAt(t.raw, fence)) ||
+                                !compatibleAncestors(baseline, t.raw, fence)))
             return fail(m_diagnostics.value(id).error(
                 m_diagnostics.value(id).make(edit.path, "path-conflict"), id, "reconcile", name));
     }
     bool applied = false;
-    for (const auto &edit : edits) {
-        if (edit.ifMissing && valueAt(t.raw, edit.path))
-            continue;
-        applied = true;
-        if (edit.value && edit.path.isEmpty())
-            t.raw = edit.value->toMap();
-        else if (edit.value)
-            putValue(t.raw, edit.path, *edit.value);
-        else if (edit.path.isEmpty())
-            t.raw.clear();
-        else
-            removeValue(t.raw, edit.path);
-    }
+    for (const auto &edit : edits)
+        applied |= applyFileEdit(t.raw, edit);
     if (!applied)
         return t;
     const auto encoded = codec.encode(t.raw, id);
     if (!encoded.ok())
         return fail(encoded.error);
+    t.candidateBytes = encoded.bytes;
     r = publish({ConfigBackendRequest::Operation::Publish, id, encoded.bytes, r.revision}, dir.fd,
                 name);
     t.published =

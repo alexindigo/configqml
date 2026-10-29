@@ -166,6 +166,7 @@ void ConfigWorker::recordListCommand(const ConfigCommand &command) {
                 return;
             }
         }
+        const auto before = *m_layers;
         const auto written = m_layers->setUser(policy.path, checked.value);
         if (!written.accepted) {
             fail(written.errors.first().code);
@@ -173,11 +174,7 @@ void ConfigWorker::recordListCommand(const ConfigCommand &command) {
         }
         coverInput(command);
         acceptIntent(input);
-        const auto route = written.route;
-        m_dirty[route.sourceId] = input.sequence;
-        if (m_files.contains(route.sourceId))
-            m_edits[route.sourceId].append(
-                {policy.path.mid(route.prefix.size()), checked.value, false});
+        recordPersistent(input, before);
         scheduleAutoSave();
         result.status = "admitted";
         result.maskedBy = m_layers->info(policy.path).maskedBy;

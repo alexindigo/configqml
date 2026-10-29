@@ -16,15 +16,22 @@ struct ConfigJsonFile {
     ConfigStartupErrorPolicy startupErrorPolicy = ConfigStartupErrorPolicy::FailReady;
 };
 struct ConfigFileEdit {
+    ConfigFileEdit() = default;
+    ConfigFileEdit(ConfigPath path, std::optional<QVariant> value, bool ifMissing = false)
+        : path(std::move(path)), value(std::move(value)), ifMissing(ifMissing) {}
     ConfigPath path;               // Relative to this file's explicit namespace prefix.
     std::optional<QVariant> value; // Missing means reset, null remains a value.
     bool ifMissing = false;
+    std::optional<ConfigPath> fencePath;
+    bool pruneEmpty = false; // Only declared namespace cleanup, never an atomic empty value.
 };
 struct ConfigJsonTransaction {
     ConfigBackendResult outcome;
     QVariantMap raw;
     bool published = false;
+    QByteArray candidateBytes;
 };
+bool applyFileEdit(QVariantMap &raw, const ConfigFileEdit &edit);
 class ConfigJsonBackend : public ConfigBackend {
 public:
     using FaultHook = std::function<QString(const QString &phase, const QString &file)>;

@@ -85,6 +85,11 @@ public:
                                                const QJSValue &callback = {});
     Q_INVOKABLE QString editRecordList(const QString &policyId, const QJSValue &options,
                                        const QJSValue &callback = {});
+    Q_INVOKABLE QString retainGroup(const QJSValue &options, const QJSValue &callback = {});
+    Q_INVOKABLE QString saveGroup(const QString &token, const QJSValue &callback = {});
+    Q_INVOKABLE QString retryGroup(const QString &token, const QJSValue &callback = {});
+    Q_INVOKABLE QString releaseGroup(const QString &token, const QJSValue &callback = {});
+    Q_INVOKABLE QVariantMap groupInfo(const QString &token) const;
 signals:
     void schemaChanged();
     void valuesChanged();
