@@ -147,6 +147,13 @@ static QVariant portableValue(const ConfigDescriptor &descriptor, const QVariant
 void ConfigWorker::profile(const ConfigCommand &command) {
     auto result = resultFor(command);
     const auto fail = [&](const QString &code) {
+        if (command.operation == "importProfile") {
+            auto covered = command;
+            ConfigInput input;
+            input.sequence = command.prefix;
+            covered.input = input;
+            coverInput(covered);
+        }
         result.status = "failed";
         result.error = {code, {}, command.operation, command.file};
         post(publish(result));

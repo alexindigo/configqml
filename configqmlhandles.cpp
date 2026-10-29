@@ -2,10 +2,13 @@
 #include "configqmlstore.h"
 #include "configqmlvalue.h"
 #include "configconsumer_p.h"
+#include "configstorehandle.h"
 #include <QQmlEngine>
 
 namespace configqml {
 bool ConfigQmlStore::canWrite(const ConfigPath &path) const {
+    if (m_overlay)
+        return m_overlay->writable() && m_overlay->schema().descriptor(path).has_value();
     return m_core && m_writable && startsWith(path, m_prefix) && m_core->canWriteUser(path) &&
            (!m_draft || m_draft->paths().contains(path));
 }
@@ -29,6 +32,7 @@ void ConfigQmlStore::initializeHandle(ConfigStore *core, const ConfigPath &prefi
         ConfigConsumerGuard(this).invoke([&] { emit completed(qmlResult(result, m_diagnostics)); });
     });
     m_values = createConfigNamespace(this, *core->schema().descriptor(prefix), prefix, this);
+    initializeOverlaySignals();
 }
 ConfigQmlStore *ConfigQmlStore::scope(const QStringList &key, bool writable) {
     if (!m_core || m_draft) {
@@ -99,6 +103,8 @@ ConfigQmlStore *ConfigQmlStore::draft(const QVariantList &paths) {
     return handle;
 }
 QString ConfigQmlStore::apply(const QJSValue &function) {
+    if (m_overlay)
+        return QString::number(m_overlay->apply(this, callback(function)));
     if (!m_draft || !m_core || m_draft->busy()) {
         reject({}, "not-an-idle-draft");
         return {};
@@ -121,6 +127,10 @@ void ConfigQmlStore::detach() {
     }
     if (m_core)
         disconnect(m_core, nullptr, this, nullptr);
+    if (m_nativeScope)
+        m_nativeScope->detach();
+    if (m_overlay)
+        m_overlay->detach();
     m_core = nullptr;
     m_draft = nullptr;
     ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); });

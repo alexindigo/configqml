@@ -4,6 +4,7 @@
 #include "configstore.h"
 #include "configmemorybackend.h"
 #include "configprojection_p.h"
+#include "configoverlay_p.h"
 #include <QQueue>
 #include <QTimer>
 #include <QFileSystemWatcher>
@@ -28,6 +29,7 @@ struct ConfigWorkerPacket {
     QList<ConfigError> projectionDiagnostics;
     QMap<QString, ConfigGroupInfo> groups;
     QMap<QString, quint64> groupGenerations;
+    QList<ConfigOverlayPresentation> overlays;
     QMap<ConfigPath, QMap<quint64, ConfigModelPlan>> models;
     qint64 planningNanos = 0;
 };
@@ -53,6 +55,9 @@ struct ConfigCommand {
     QString groupToken, groupState;
     // Object-thread snapshot, including earlier pending lifecycle claims.
     QMap<QString, quint64> groupGenerations;
+    std::shared_ptr<ConfigOverlayTransaction> overlay;
+    QString editorId;
+    QMap<ConfigPath, std::optional<QVariant>> overlayEdits;
 };
 struct ConfigPendingIntent {
     quint64 id = 0, input = 0;
@@ -95,6 +100,18 @@ public:
     ConfigMemoryBackend *backend() const { return m_backend.get(); }
     ConfigLayers *layers() const { return m_layers.get(); }
     ConfigJsonBackend *jsonBackend() const { return m_json.get(); }
+    void setOverlayEndpoint(std::shared_ptr<ConfigOverlayEndpoint> endpoint) {
+        m_endpoint = std::move(endpoint);
+    }
+    void overlayLease(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
+    void overlayRelease(const QString &token);
+    void overlayContinue(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
+    void overlayChanged(const QString &editorId);
+    void overlayDetach(const QString &editorId);
+    void overlayScopeClosed(const std::shared_ptr<std::atomic_bool> &lifetime);
+    void overlayControl(const std::function<void(ConfigWorker &)> &message);
+    void holdOverlayLeases(bool hold);
+    qsizetype heldOverlayLeases() const { return m_overlayPaused.size(); }
     void setAdmission(std::function<QString(const ConfigInput &)> admission) {
         m_options.admission = std::move(admission);
     }
@@ -118,6 +135,26 @@ private:
     void armWatches();
     void scheduleAutoSave();
     void processGroup(const ConfigCommand &command);
+    void overlayCommand(const ConfigCommand &command);
+    void overlayAcquire(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
+    void overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
+    void overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
+    void overlayCancelAll();
+    void overlayNotify();
+    bool overlayBlocked(const ConfigCommand &command) const;
+    QList<ConfigPath> commandPaths(const ConfigCommand &command) const;
+    std::shared_ptr<ConfigOverlayEndpoint> m_endpoint;
+    QMap<QString, QList<ConfigPath>> m_overlayLeases;
+    QMap<QString, std::shared_ptr<ConfigOverlayTransaction>> m_overlayIncoming;
+    QMap<QString, std::shared_ptr<ConfigOverlayTransaction>> m_overlayPaused;
+    bool m_holdOverlayLeases = false;
+    QMap<QString, std::shared_ptr<ConfigOverlayTransaction>> m_overlayTransactions;
+    QMap<QString, ConfigCommand> m_overlayCommands;
+    QMap<QString, ConfigOverlayCapture> m_overlayCaptures;
+    QMap<QString, ConfigOverlaySubscription> m_overlaySubscriptions;
+    QMap<QString, ConfigResult> m_overlayReceipts;
+    QList<ConfigOverlayPresentation> m_overlayPackets;
+    QList<ConfigPath> m_reloadSelection;
     void profile(const ConfigCommand &command);
     bool migrateSources();
     void recordListCommand(const ConfigCommand &command);
@@ -186,6 +223,7 @@ private:
     bool m_closed = false;
     bool m_draining = false;
     quint64 m_prefix = 0;
+    QSet<quint64> m_settledInputs;
     quint64 m_generation = 0;
     QMap<ConfigPath, quint64> m_pathGenerations;
     QMap<ConfigPath, quint64> m_pathInputs;

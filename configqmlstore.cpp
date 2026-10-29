@@ -16,6 +16,18 @@ void ConfigQmlStore::setSchema(ConfigQmlSchema *schema) {
     ConfigConsumerGuard(this).invoke([&] { emit schemaChanged(); });
 }
 ConfigQmlStore::Status ConfigQmlStore::status() const {
+    if (m_overlay) {
+        switch (m_overlay->status()) {
+        case ConfigOverlayEditor::Status::Loading:
+            return Loading;
+        case ConfigOverlayEditor::Status::Ready:
+            return Ready;
+        case ConfigOverlayEditor::Status::Error:
+            return Error;
+        case ConfigOverlayEditor::Status::Closed:
+            return Closed;
+        }
+    }
     if (m_isHandle && !m_core)
         return Closed;
     return m_core ? Status(m_core->status()) : m_error.isEmpty() ? Loading : Error;
@@ -136,12 +148,13 @@ void ConfigQmlStore::componentComplete() {
     }
     m_core = new ConfigStore(options, this);
     initializeCompatibilitySignals();
+    initializeOverlaySignals();
     connect(m_core, &ConfigStore::valuesChanged, this, &ConfigQmlStore::settingValuesChanged);
     m_values = createConfigNamespace(this, *m_core->schema().descriptor({}), {}, this);
     connect(m_core, &ConfigStore::statusChanged, this,
             [this] { ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); }); });
     connect(m_core, &ConfigStore::completed, this, [this](const auto &result) {
-        ConfigConsumerGuard(this).invoke([&] { emit completed(qmlResult(result, m_diagnostics)); });
+        ConfigConsumerGuard(this).invoke([&] { emit completed(resultMap(result)); });
     });
     connect(m_core, &ConfigStore::autoSaved, this, [this](const auto &result) {
         ConfigConsumerGuard(this).invoke([&] { emit autoSaved(qmlResult(result, m_diagnostics)); });
@@ -176,8 +189,12 @@ void ConfigQmlStore::reject(const ConfigPath &path, const QString &code) {
     boundary.invoke([&] { raise(code); });
 }
 void ConfigQmlStore::raise(const QString &code) {
-    if (auto *engine = qjsEngine(this))
+    if (auto *engine = scriptEngine())
         engine->throwError(QJSValue::TypeError, QStringLiteral("configqml: ") + code);
+}
+QJSEngine *ConfigQmlStore::scriptEngine() const {
+    return qjsEngine(m_callbackContext ? m_callbackContext.data()
+                                       : const_cast<ConfigQmlStore *>(this));
 }
 ConfigStore::Callback ConfigQmlStore::callback(const QJSValue &function) {
     if (!function.isCallable())
@@ -186,12 +203,11 @@ ConfigStore::Callback ConfigQmlStore::callback(const QJSValue &function) {
     return [guard, function](const ConfigResult &result) {
         if (!guard || (guard->m_isHandle && !guard->m_core))
             return;
-        if (auto *engine = qjsEngine(guard)) {
+        if (auto *engine = guard->scriptEngine()) {
             ConfigConsumerGuard boundary(guard, engine);
             QJSValue returned;
             if (!boundary.invoke([&] {
-                    returned = function.call(
-                        {engine->toScriptValue(qmlResult(result, guard->m_diagnostics))});
+                    returned = function.call({engine->toScriptValue(guard->resultMap(result))});
                 }))
                 return;
             if (returned.isError())
@@ -200,6 +216,8 @@ ConfigStore::Callback ConfigQmlStore::callback(const QJSValue &function) {
     };
 }
 QVariant ConfigQmlStore::read(const ConfigPath &path) const {
+    if (m_overlay)
+        return m_overlay->presentation(path);
     if (!m_core)
         return {};
     return m_draft ? m_draft->presentation(path) : m_core->presentation(path);
@@ -215,7 +233,7 @@ ConfigRequestHandle ConfigQmlStore::write(const ConfigPath &path, const QVariant
         reject(path, "read-only-path");
         return {};
     }
-    const auto schema = m_core->schema();
+    const auto schema = m_overlay ? m_overlay->schema() : m_core->schema();
     const auto core = m_core;
     const auto draft = m_draft;
     ConfigAdmission checked;
@@ -226,6 +244,13 @@ ConfigRequestHandle ConfigQmlStore::write(const ConfigPath &path, const QVariant
         return {};
     }
     ConfigRequestHandle handle;
+    if (m_overlay) {
+        if (!boundary.invoke([&] { handle = m_overlay->setValue(checked); }))
+            return handle;
+        if (!handle.accepted)
+            reject(path, handle.errors.first().code);
+        return handle;
+    }
     if (m_draft) {
         ConfigOperation operation;
         if (!boundary.invoke([&] { operation = m_draft->setValue(checked); }))

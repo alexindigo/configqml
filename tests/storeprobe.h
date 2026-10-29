@@ -1,10 +1,27 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 #include "configworker_p.h"
+#include "configshutdown_p.h"
 
 namespace configqml {
 class ConfigStoreTestAccess {
 public:
+    static quint64 endpointRevision(const ConfigStore &store, const ConfigPath &path) {
+        return store.m_owner->overlayEndpoint()->revision(path);
+    }
+    static std::function<void()> backendRelease(ConfigStore &store) {
+        QPointer<ConfigWorker> worker = store.m_worker;
+        return [worker] {
+            if (worker)
+                QMetaObject::invokeMethod(
+                    worker,
+                    [worker] {
+                        if (worker)
+                            worker->releaseBackend();
+                    },
+                    Qt::QueuedConnection);
+        };
+    }
     static qint64 planningNanos(const ConfigStore &store) { return store.m_lastPlanningNanos; }
     static qint64 publicationLibraryNanos(const ConfigStore &store) {
         return store.m_lastLibraryPublicationNanos;

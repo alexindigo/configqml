@@ -305,6 +305,8 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
         packet.groupGenerations[info.groupToken] = capture.generation;
     }
     packet.initial = initial;
+    packet.overlays = std::move(m_overlayPackets);
+    m_overlayPackets.clear();
     packet.result = result;
     packet.snapshot.generation = ++m_generation;
     packet.snapshot.inputPrefix = m_prefix;
@@ -351,7 +353,7 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
         const auto next = valueAt(effective, path).value_or(QVariant());
         ConfigPathState state;
         state.provenance = m_layers->info(path);
-        state.workerCovered = m_prefix;
+        state.workerCovered = qMax(m_prefix, m_pathInputs.value(path));
         state.latestInput = m_pathInputs.value(path);
         state.intentRevision = m_pathIntents.value(path);
         QVariantList content{next, QString::number(state.intentRevision)};
@@ -407,6 +409,7 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
     }
     m_previous.generation = m_generation;
     m_previous.inputPrefix = m_prefix;
+    overlayNotify();
     packet.admitted = std::make_shared<const ConfigSnapshot>(m_previous);
     packet.sourceStates = m_sourceStates;
     for (auto &state : *packet.sourceStates)
@@ -551,6 +554,8 @@ void ConfigWorker::post(const ConfigWorkerPacket &input) {
 }
 void ConfigWorker::enqueue(const ConfigCommand &command) {
     Q_ASSERT(QThread::currentThread() == thread());
+    if (command.operation == "close" || command.operation == "retire")
+        overlayCancelAll();
     m_queue.enqueue(command);
     drain();
 }
@@ -559,7 +564,12 @@ void ConfigWorker::drain() {
         return;
     m_draining = true;
     while (!m_busy && !m_holdInputs && !m_queue.isEmpty()) {
-        const auto command = m_queue.dequeue();
+        qsizetype index = 0;
+        while (index < m_queue.size() && overlayBlocked(m_queue[index]))
+            ++index;
+        if (index == m_queue.size())
+            break;
+        const auto command = m_queue.takeAt(index);
         try {
             process(command);
         } catch (const std::exception &) {
@@ -582,7 +592,10 @@ void ConfigWorker::coverInput(const ConfigCommand &command) {
     if (!command.input)
         return;
     const auto &input = *command.input;
-    m_prefix = input.sequence;
+    if (input.sequence > m_prefix)
+        m_settledInputs.insert(input.sequence);
+    while (m_settledInputs.remove(m_prefix + 1))
+        ++m_prefix;
     for (auto it = input.pathGenerations.cbegin(); it != input.pathGenerations.cend(); ++it) {
         m_pathGenerations[it.key()] = it.value();
         m_pathInputs[it.key()] = input.sequence;
@@ -603,6 +616,10 @@ void ConfigWorker::acceptIntent(const ConfigInput &input) {
     }
 }
 void ConfigWorker::process(const ConfigCommand &command) {
+    if (command.operation == "overlayLease") {
+        overlayAcquire(command.overlay);
+        return;
+    }
     // Every settled input covers its sequence/generation, including terminal
     // refusal. Retained intent does not keep a rejected local value effective.
     if (!command.input || command.input->kind != ConfigInput::Kind::Group || m_failed || m_closed)
@@ -615,6 +632,10 @@ void ConfigWorker::process(const ConfigCommand &command) {
         post(publish(result));
         if (command.operation == "close")
             m_closed = true;
+        return;
+    }
+    if (command.operation.startsWith("overlay") || command.operation == "openOverlay") {
+        overlayCommand(command);
         return;
     }
     if (command.operation == "retainGroup" || command.operation == "saveGroup" ||
@@ -953,6 +974,25 @@ void ConfigWorker::finishSave() {
             scheduleAutoSave();
     }
     const bool closing = m_save.operation == "close";
+    if (!m_save.editorId.isEmpty()) {
+        const auto command = m_save;
+        auto receipt = m_saveResult;
+        receipt.editorId = command.editorId;
+        receipt.refreshState = "not_refreshed";
+        post(publish());
+        m_busy = false;
+        if (receipt.status == "failed") {
+            post(publish(receipt));
+        } else {
+            m_overlayReceipts[command.editorId] = receipt;
+            auto refresh = command;
+            refresh.operation = "overlayRefresh";
+            refresh.input.reset();
+            overlayCommand(refresh);
+        }
+        drain();
+        return;
+    }
     post(publish(m_saveResult));
     m_busy = false;
     if (closing)
@@ -997,6 +1037,7 @@ void ConfigWorker::fail(const QString &code) {
     if (m_failed)
         return;
     m_failed = true;
+    overlayCancelAll();
     ConfigResult failure;
     failure.storeId = m_options.storeId;
     failure.status = "failed";
@@ -1059,6 +1100,21 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
     QMap<QString, QList<ConfigSource>> diskReplacements;
     bool changed = false;
     for (auto it = m_files.cbegin(); it != m_files.cend(); ++it) {
+        const auto sourcePrefix = m_fileRoutes.value(it.key()).prefix;
+        if (!m_reloadSelection.isEmpty()) {
+            bool selected = false;
+            for (const auto &path : m_reloadSelection)
+                selected |= startsWith(path, sourcePrefix) || startsWith(sourcePrefix, path);
+            if (!selected)
+                continue;
+        } else if (!command) {
+            bool leased = false;
+            for (const auto &paths : m_overlayLeases)
+                for (const auto &path : paths)
+                    leased |= startsWith(path, sourcePrefix) || startsWith(sourcePrefix, path);
+            if (leased)
+                continue;
+        }
         if (!command && (it->watchMode != ConfigWatchMode::Live || !m_json->changed(it.key())))
             continue;
         auto id = m_json->submit({ConfigBackendRequest::Operation::Read, it.key(), {}, {}});
@@ -1081,7 +1137,17 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
             errors.append(error);
             continue; // Parse/IO failures never destroy last-good layer state.
         }
-        auto source = *m_layers->source(route.layerId, route.sourceId);
+        const auto current = m_layers->source(route.layerId, route.sourceId);
+        if (current->available && m_layers->diagnostics(route.layerId, route.sourceId).isEmpty() &&
+            m_revisions.contains(it.key()) && read.revision == m_revisions.value(it.key()) &&
+            read.bytes == m_sourceBytes.value(it.key())) {
+            // The accepted disk observation is unchanged. Re-admitting its
+            // raw-plus-intent replay would replace pending contribution fences
+            // with disk provenance and invent a new displayed generation.
+            // Source state/evidence above still describe this successful read.
+            continue;
+        }
+        auto source = *current;
         source.raw = decoded.raw;
         source.bytes = read.bytes;
         source.revision = read.revision.token;

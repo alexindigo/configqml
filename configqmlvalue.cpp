@@ -3,8 +3,44 @@
 #include "configprojection_p.h"
 #include <QJSValue>
 #include <QJSValueIterator>
+#include <cmath>
 
 namespace configqml {
+bool qmlIndex(const QVariant &value, qsizetype &out) {
+    const auto type = value.metaType().id();
+    if (type != QMetaType::LongLong && type != QMetaType::ULongLong && type != QMetaType::Double)
+        return false;
+    const auto n = value.toDouble();
+    if (!std::isfinite(n) || std::trunc(n) != n || n < 0 || n > 9007199254740991.0)
+        return false;
+    out = qsizetype(n);
+    return true;
+}
+bool qmlSelectors(const QVariant &value, QList<ConfigValueSelector> &out, bool each) {
+    if (value.metaType().id() != QMetaType::QVariantList)
+        return false;
+    for (const auto &raw : value.toList()) {
+        if (raw.metaType().id() != QMetaType::QVariantMap)
+            return false;
+        const auto segment = raw.toMap();
+        if (segment.size() != 1)
+            return false;
+        if (segment.contains("key") && segment.value("key").metaType().id() == QMetaType::QString)
+            out.append({ConfigValueSelector::Kind::Key, segment.value("key").toString(), 0});
+        else if (segment.contains("index")) {
+            qsizetype n;
+            if (!qmlIndex(segment.value("index"), n))
+                return false;
+            out.append({ConfigValueSelector::Kind::Index, {}, n});
+        } else if (each && segment.contains("each") &&
+                   segment.value("each").metaType().id() == QMetaType::Bool &&
+                   segment.value("each").toBool())
+            out.append({ConfigValueSelector::Kind::Each, {}, 0});
+        else
+            return false;
+    }
+    return true;
+}
 namespace {
 class QmlInput final : public ConfigValueInput {
 public:
@@ -177,6 +213,8 @@ QVariantMap qmlResult(const ConfigResult &input, const ConfigDiagnosticBuilder &
             {"attemptNumber", QString::number(r.attemptNumber)},
             {"unresolvedGroups", r.unresolvedGroups},
             {"excludedGroups", r.excludedGroups},
+            {"editorId", r.editorId},
+            {"refreshState", r.refreshState},
             {"description", r.description()}};
 }
 QVariantMap qmlGroupInfo(const ConfigGroupInfo &info, const ConfigDiagnosticBuilder &diagnostics) {

@@ -23,6 +23,9 @@ Detached editor drafts apply one revision-fenced group; scoped handles share tha
 owner. [Editors and profiles](docs/editors-profiles.md) describes portable raw
 exports/imports, and [evolution and secrets](docs/evolution-secrets.md) documents
 worker-only raw migrations, per-node admission, redaction and keyring references.
+Declared [overlay views and editors](docs/overlay-editors.md) combine a scoped
+base with sparse record overrides: live read-only runtime values and separately
+captured revision-fenced previews, with worker-owned merge/difference and receipts.
 
 ## Install
 

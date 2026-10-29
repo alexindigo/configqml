@@ -98,6 +98,14 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
 ConfigStore::~ConfigStore() {
     // Accepted work belongs to the process-owned worker. Only consumer delivery
     // ends here; no nested drain, abandonment or cancellation of persistence.
+    // QObject deletes children after derived members. Close their delivery now
+    // so an overlay child's destructor cannot access our destroyed owner member.
+    // Worker-owned admitted persistence is still retired by the owner below.
+    for (const auto &editor : m_overlays)
+        if (editor) {
+            editor->m_status = ConfigOverlayEditor::Status::Closed;
+            editor->m_store = nullptr;
+        }
     m_owner->detach();
 }
 void ConfigStore::finishThread() {
@@ -410,6 +418,14 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
                 ingress.pendingState.clear();
             }
     ConfigConsumerGuard boundary(this);
+    for (const auto &p : packet.overlays) {
+        if (packet.result && packet.result->operation == "openOverlay" &&
+            packet.result->status == "opened")
+            m_overlayPresentations[packet.result->requestId] =
+                std::make_shared<ConfigOverlayPresentation>(p);
+        else if (!boundary.invoke([&] { receiveOverlay(p); }))
+            return;
+    }
     m_publishingModels = true;
     QMap<ConfigPath, quint64> acknowledgements;
     qint64 modelNotifications = 0;
@@ -487,6 +503,21 @@ void ConfigStore::deliver() {
     while (m_results.contains(m_nextCompletion)) {
         const auto result = m_results.take(m_nextCompletion);
         auto pending = m_pending.take(m_nextCompletion++); // Detach before arbitrary reentry.
+        if (result.operation == "openOverlay") {
+            const auto presentation = m_overlayPresentations.take(result.requestId);
+            if (result.status == "opened" && presentation && pending.context) {
+                auto *editor = new ConfigOverlayEditor(this, *presentation);
+                m_overlays[result.editorId] = editor;
+                if (!boundary.invoke([&] { emit overlayOpened(result.requestId, editor); }))
+                    return;
+            } else {
+                const auto endpoint = m_owner->overlayEndpoint();
+                overlayRemoveDependency(endpoint, result.editorId);
+                if (result.status == "opened")
+                    endpoint->send(
+                        [id = result.editorId](ConfigWorker &w) { w.overlayDetach(id); });
+            }
+        }
         if (result.status == "failed")
             m_failures.append(result);
         if (result.operation == "close") {

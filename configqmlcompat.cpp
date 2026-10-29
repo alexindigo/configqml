@@ -19,37 +19,9 @@ bool string(const QVariant &value) { return value.metaType().id() == QMetaType::
 bool boolean(const QVariant &value) { return value.metaType().id() == QMetaType::Bool; }
 bool map(const QVariant &value) { return value.metaType().id() == QMetaType::QVariantMap; }
 bool list(const QVariant &value) { return value.metaType().id() == QMetaType::QVariantList; }
-bool index(const QVariant &value, qsizetype &out) {
-    const auto type = value.metaType().id();
-    if (type != QMetaType::LongLong && type != QMetaType::ULongLong && type != QMetaType::Double)
-        return false;
-    const auto n = value.toDouble();
-    if (!std::isfinite(n) || std::trunc(n) != n || n < 0 || n > 9007199254740991.0)
-        return false;
-    out = qsizetype(n);
-    return true;
-}
+bool index(const QVariant &value, qsizetype &out) { return qmlIndex(value, out); }
 bool selectors(const QVariant &value, QList<ConfigValueSelector> &out, bool each) {
-    if (!list(value))
-        return false;
-    for (const auto &raw : value.toList()) {
-        if (!map(raw))
-            return false;
-        const auto segment = raw.toMap();
-        if (exact(segment, {"key"}) && string(segment.value("key")))
-            out.append({ConfigValueSelector::Kind::Key, segment.value("key").toString(), 0});
-        else if (exact(segment, {"index"})) {
-            qsizetype n;
-            if (!index(segment.value("index"), n))
-                return false;
-            out.append({ConfigValueSelector::Kind::Index, {}, n});
-        } else if (each && exact(segment, {"each"}) && boolean(segment.value("each")) &&
-                   segment.value("each").toBool())
-            out.append({ConfigValueSelector::Kind::Each, {}, 0});
-        else
-            return false;
-    }
-    return true;
+    return qmlSelectors(value, out, each);
 }
 QVariantMap errorMap(const ConfigError &error) {
     return {{"code", error.code}, {"sourceId", error.sourceId}, {"file", error.file},

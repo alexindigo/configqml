@@ -3,11 +3,13 @@
 #include "configqmldeclaration.h"
 #include "configstore.h"
 #include "configdraft.h"
+#include "configoverlayeditor.h"
 #include <QJSValue>
 #include <QQmlParserStatus>
 #include <QAbstractItemModel>
 
 namespace configqml {
+class ConfigQmlOverlay;
 class ConfigQmlStore : public QObject, public QQmlParserStatus {
     Q_OBJECT
     QML_NAMED_ELEMENT(ConfigStore)
@@ -29,6 +31,7 @@ class ConfigQmlStore : public QObject, public QQmlParserStatus {
     Q_PROPERTY(bool dirty READ dirty NOTIFY draftStateChanged)
     Q_PROPERTY(bool conflicted READ conflicted NOTIFY draftStateChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY draftStateChanged)
+    Q_PROPERTY(QString editorId READ editorId CONSTANT)
 public:
     enum Status { Loading, Ready, Error, Closing, Closed };
     Q_ENUM(Status)
@@ -46,11 +49,16 @@ public:
     QObject *values() const { return m_values; }
     Status status() const;
     bool ready() const { return status() == Ready; }
-    QString error() const { return m_core ? m_core->error() : m_error; }
+    QString error() const {
+        return m_overlay ? m_overlay->error() : m_core ? m_core->error() : m_error;
+    }
     ConfigStore *core() const { return m_core; }
-    bool dirty() const { return m_draft && m_draft->dirty(); }
-    bool conflicted() const { return m_draft && m_draft->conflicted(); }
-    bool busy() const { return m_draft && m_draft->busy(); }
+    bool dirty() const { return m_overlay ? m_overlay->dirty() : m_draft && m_draft->dirty(); }
+    bool conflicted() const {
+        return m_overlay ? m_overlay->conflicted() : m_draft && m_draft->conflicted();
+    }
+    bool busy() const { return m_overlay ? m_overlay->busy() : m_draft && m_draft->busy(); }
+    QString editorId() const { return m_overlay ? m_overlay->editorId() : QString(); }
     bool canWrite(const ConfigPath &path) const;
     QVariant read(const ConfigPath &path) const;
     ConfigRequestHandle write(const ConfigPath &path, const QVariant &value,
@@ -75,6 +83,9 @@ public:
     Q_INVOKABLE ConfigQmlStore *draft(const QVariantList &paths = {});
     Q_INVOKABLE QString apply(const QJSValue &callback = {});
     Q_INVOKABLE bool discard();
+    Q_INVOKABLE QString openOverlay(const QJSValue &options, const QJSValue &callback = {});
+    Q_INVOKABLE QString resetOverrides(const QJSValue &callback = {});
+    Q_INVOKABLE bool unset(const QStringList &path);
     Q_INVOKABLE void detach();
     Q_INVOKABLE QString exportProfile(const QString &name, const QString &file,
                                       const QVariantList &paths = {},
@@ -107,10 +118,14 @@ signals:
     void projectionEffects(const QVariantMap &event);
 
 private:
+    friend class ConfigQmlOverlay;
     ConfigStore::Callback callback(const QJSValue &function);
+    QJSEngine *scriptEngine() const;
     void reject(const ConfigPath &path, const QString &code);
     void raise(const QString &code);
     void initializeCompatibilitySignals();
+    void initializeOverlaySignals();
+    QVariantMap resultMap(const ConfigResult &result) const;
     QList<ConfigPath> selectedPaths(const QVariantList &paths, bool *ok);
     void initializeHandle(ConfigStore *core, const ConfigPath &prefix, bool writable,
                           ConfigDraft *draft = nullptr);
@@ -130,6 +145,11 @@ private:
     int m_autoSaveInterval = 300;
     ConfigPath m_prefix;
     QPointer<ConfigDraft> m_draft;
+    QPointer<ConfigOverlayEditor> m_overlay;
+    QPointer<QObject> m_callbackContext;
+    QPointer<ConfigStoreHandle> m_nativeScope;
+    QMap<QString, QPointer<QObject>> m_overlayHandles;
+    QSet<quint64> m_overlayRequests;
     bool m_writable = true;
     bool m_isHandle = false;
     ConfigDiagnosticBuilder m_diagnostics;

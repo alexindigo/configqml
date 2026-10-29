@@ -18,6 +18,10 @@ struct ConfigWorkerPacket;
 class ConfigStoreTestAccess;
 class ConfigDraft;
 class ConfigStoreHandle;
+class ConfigOverlayEditor;
+struct ConfigOverlayOptions;
+struct ConfigOverlayPresentation;
+struct ConfigOverlayEndpoint;
 struct ConfigStoreOptions {
     ConfigSchema schema{ConfigDescriptor::group({})};
     QList<ConfigLayer> layers;
@@ -101,6 +105,8 @@ public:
     quint64 retryGroup(const QString &token, QObject *context = nullptr, Callback callback = {});
     quint64 releaseGroup(const QString &token, QObject *context = nullptr, Callback callback = {});
     ConfigGroupInfo groupInfo(const QString &token) const;
+    quint64 openOverlay(const ConfigOverlayOptions &options, QObject *context = nullptr,
+                        Callback callback = {});
 signals:
     void statusChanged();
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
@@ -114,11 +120,17 @@ signals:
     void sourceStatesChanged();
     void sourceAccepted(const configqml::ConfigSourceAccepted &event);
     void projectionEffects(const configqml::ConfigProjectionEffectsEvent &event);
+    void overlayOpened(quint64 requestId, configqml::ConfigOverlayEditor *editor);
 
 private:
     friend class ConfigWorker;
     friend class ConfigStoreTestAccess;
     friend class ConfigDraft;
+    friend class ConfigStoreHandle;
+    friend class ConfigOverlayEditor;
+    quint64 overlayRequest(ConfigOverlayEditor *editor, const QString &operation, QObject *context,
+                           Callback callback);
+    void receiveOverlay(const ConfigOverlayPresentation &presentation);
     quint64 applyGroup(const QMap<ConfigPath, std::optional<QVariant>> &edits,
                        const QMap<ConfigPath, ConfigPathState> &fences, QObject *context,
                        Callback callback);
@@ -165,6 +177,8 @@ private:
         QString pendingState;
     };
     QMap<QString, RetainedIngress> m_retainedIngress;
+    QMap<QString, QPointer<ConfigOverlayEditor>> m_overlays;
+    QMap<quint64, std::shared_ptr<ConfigOverlayPresentation>> m_overlayPresentations;
     mutable QMap<ConfigPath, QVariant> m_presentations;
     std::shared_ptr<const ConfigSnapshot> m_admittedSnapshot;
     Status m_status = Status::Loading;

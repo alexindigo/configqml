@@ -111,6 +111,7 @@ struct ConfigResult {
     QString groupToken, requestKey, attemptId;
     quint64 capturePrefix = 0, attemptNumber = 0;
     QStringList dependencies, unresolvedGroups, excludedGroups;
+    QString editorId, refreshState;
     QString description() const {
         return maskedBy.isEmpty() ? QString() : QStringLiteral("masked by ") + maskedBy;
     }
