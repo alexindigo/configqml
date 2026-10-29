@@ -5,5 +5,5 @@
 
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
-    return std::strcmp(configqml::version(), "0.1.0");
+    return std::strcmp(configqml::version(), CONFIGQML_EXPECTED_VERSION);
 }

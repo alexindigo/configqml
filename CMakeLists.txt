@@ -26,7 +26,8 @@ target_sources(configqml_core PRIVATE configprojection_p.h configprojection.cpp
     configstorehandle.h configstorehandle.cpp configmigration.cpp)
 add_library(configqml::core ALIAS configqml_core)
 set_target_properties(configqml_core PROPERTIES EXPORT_NAME core
-    VERSION ${PROJECT_VERSION} SOVERSION 0 INSTALL_RPATH "$ORIGIN")
+    VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR} INSTALL_RPATH "$ORIGIN")
+target_compile_definitions(configqml_core PRIVATE CONFIGQML_VERSION="${PROJECT_VERSION}")
 target_link_libraries(configqml_core PUBLIC Qt6::Core)
 target_include_directories(configqml_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -59,7 +60,7 @@ if(CONFIGQML_BUILD_QML)
     target_include_directories(configqml PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<INSTALL_INTERFACE:${_configqml_include_dir}>)
     target_compile_options(configqml PRIVATE -Wall -Wextra -Wpedantic)
-    set_target_properties(configqml PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 0
+    set_target_properties(configqml PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR}
         INSTALL_RPATH "$ORIGIN")
 
     # Retain Qt's QML-to-library relationship even with a custom GNU libdir.
@@ -242,6 +243,7 @@ if(BUILD_TESTING)
     endif()
     add_executable(test_core_link tests/test_core_link.cpp)
     target_link_libraries(test_core_link PRIVATE configqml::core)
+    target_compile_definitions(test_core_link PRIVATE CONFIGQML_EXPECTED_VERSION="${PROJECT_VERSION}")
     add_test(NAME core_link COMMAND ${CMAKE_COMMAND}
         -DPROGRAM=$<TARGET_FILE:test_core_link>
         -DLIBRARY=$<TARGET_FILE:configqml_core>

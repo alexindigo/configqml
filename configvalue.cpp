@@ -5,7 +5,7 @@
 #include <cmath>
 
 namespace configqml {
-const char *version() { return "0.1.0"; }
+const char *version() { return CONFIGQML_VERSION; }
 
 bool isNull(const QVariant &value) { return value.metaType().id() == QMetaType::Nullptr; }
 
