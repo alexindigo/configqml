@@ -23,6 +23,7 @@ private:
     std::shared_ptr<ConfigLayers> m_owner;
     ConfigPath m_prefix;
     bool m_writable = false;
+    ConfigDiagnosticBuilder m_diagnostics;
 };
 
 // Storage adapters can use these reversible, canonical single-component names.

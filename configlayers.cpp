@@ -15,7 +15,7 @@ ConfigLayers::ConfigLayers(const ConfigSchema &schema, const QList<ConfigLayer> 
         if (layer.id.isEmpty() || layer.id == "defaults" || ids.contains(layer.id) ||
             kind < previous || (kind != 0 && singletonKinds.contains(kind)) ||
             (layer.writable && layer.kind != ConfigLayerKind::File))
-            m_errors.append(ConfigDiagnostic{{}, "layer-descriptor"});
+            m_errors.append(m_schema.diagnostics().make({}, "layer-descriptor"));
         previous = kind;
         singletonKinds.insert(kind);
         ids.insert(layer.id);
@@ -28,11 +28,12 @@ ConfigLayers::ConfigLayers(const ConfigSchema &schema, const QList<ConfigLayer> 
             const auto d = schema.descriptor(source.prefix);
             if (source.id.isEmpty() || sourceIds.contains(source.id) || !d ||
                 d->type != ConfigDescriptor::Type::Group)
-                m_errors.append(ConfigDiagnostic{source.prefix, "source-descriptor"});
+                m_errors.append(m_schema.diagnostics().make(source.prefix, "source-descriptor"));
             for (const auto &other : state.sources)
                 if (startsWith(source.prefix, other.source.prefix) ||
                     startsWith(other.source.prefix, source.prefix))
-                    m_errors.append(ConfigDiagnostic{source.prefix, "overlapping-sources"});
+                    m_errors.append(
+                        m_schema.diagnostics().make(source.prefix, "overlapping-sources"));
             sourceIds.insert(source.id);
             SourceState owned;
             owned.source.id = ownString(source.id);
@@ -43,15 +44,28 @@ ConfigLayers::ConfigLayers(const ConfigSchema &schema, const QList<ConfigLayer> 
                 m_errors.append(result.errors);
             state.sources.append(owned);
         }
+        bool rejected = false;
+        for (const auto &source : state.sources)
+            rejected |= source.rejected;
+        if (rejected)
+            for (auto &source : state.sources)
+                source.admitted.clear();
         m_layers.append(state);
     }
     if (writable > 1)
-        m_errors.append(ConfigDiagnostic{{}, "multiple-writable-layers"});
+        m_errors.append(m_schema.diagnostics().make({}, "multiple-writable-layers"));
+}
+bool ConfigLayers::rejects(const LayerState &layer, const ConfigPath &path) const {
+    const auto policy = m_schema.policy(path);
+    return policy == ConfigDescriptor::AdmissionPolicy::Strict ||
+           (policy == ConfigDescriptor::AdmissionPolicy::Inherit &&
+            (layer.descriptor.policy == ConfigAdmissionPolicy::RejectInput ||
+             layer.descriptor.shippedDefaults));
 }
 
 ConfigOperation ConfigLayers::admit(LayerState &layer, SourceState &state,
                                     const ConfigSource &input) {
-    const auto captured = ownValue(input.raw);
+    const auto captured = ownValue(input.raw, input.prefix, m_schema.diagnostics());
     if (!captured.ok())
         return {false, captured.errors};
     ConfigSource source = input;
@@ -77,7 +91,7 @@ ConfigOperation ConfigLayers::admit(LayerState &layer, SourceState &state,
                     for (const auto &error : errors)
                         reported |= error.path == traversed;
                     if (!reported)
-                        errors.append(ConfigDiagnostic{traversed, "namespace-type"});
+                        errors.append(m_schema.diagnostics().make(traversed, "namespace-type"));
                     missing = true;
                     invalidNamespace = true;
                     break;
@@ -91,7 +105,8 @@ ConfigOperation ConfigLayers::admit(LayerState &layer, SourceState &state,
                 traversed.append(key);
             }
             if (missing) {
-                if (layer.descriptor.policy == ConfigAdmissionPolicy::RetainLastGood &&
+                if (m_schema.policy(path) == ConfigDescriptor::AdmissionPolicy::Inherit &&
+                    layer.descriptor.policy == ConfigAdmissionPolicy::RetainLastGood &&
                     invalidNamespace && state.admitted.contains(path))
                     admitted.insert(path, state.admitted.value(path));
                 continue;
@@ -102,7 +117,8 @@ ConfigOperation ConfigLayers::admit(LayerState &layer, SourceState &state,
                 admitted.insert(path, {checked.value, source.revision, 0});
             else {
                 errors.append(checked.errors);
-                if (layer.descriptor.policy == ConfigAdmissionPolicy::RetainLastGood &&
+                if (m_schema.policy(path) == ConfigDescriptor::AdmissionPolicy::Inherit &&
+                    layer.descriptor.policy == ConfigAdmissionPolicy::RetainLastGood &&
                     state.admitted.contains(path))
                     admitted.insert(path, state.admitted.value(path));
             }
@@ -110,24 +126,53 @@ ConfigOperation ConfigLayers::admit(LayerState &layer, SourceState &state,
     }
     state.source = source;
     state.errors = errors;
-    if (!errors.isEmpty() && layer.descriptor.policy == ConfigAdmissionPolicy::RejectInput)
-        return {false, errors}; // Keep the prior admitted projection and the new raw evidence.
+    state.rejected = false;
+    for (const auto &error : errors)
+        state.rejected |= rejects(layer, error.path);
+    if (state.rejected)
+        return {false, errors}; // Keep prior projection and new raw evidence.
     state.admitted = admitted;
     return {true, errors};
 }
 
 ConfigOperation ConfigLayers::replaceSource(const QString &layerId, const ConfigSource &source) {
+    return replaceSources(layerId, {source});
+}
+ConfigOperation ConfigLayers::replaceSources(const QString &layerId,
+                                             const QList<ConfigSource> &sources) {
     if (!valid())
         return {false, m_errors};
-    for (auto &layer : m_layers)
-        if (layer.descriptor.id == layerId)
-            for (auto &state : layer.sources)
+    for (auto &layer : m_layers) {
+        if (layer.descriptor.id != layerId)
+            continue;
+        auto candidate = layer;
+        ConfigOperation result{true, {}};
+        QSet<QString> seen;
+        for (const auto &source : sources) {
+            bool found = false;
+            if (seen.contains(source.id))
+                return {false, {m_schema.diagnostics().make(source.prefix, "duplicate-source")}};
+            seen.insert(source.id);
+            for (auto &state : candidate.sources)
                 if (state.source.id == source.id) {
+                    found = true;
                     if (state.source.prefix != source.prefix)
-                        return {false, {{source.prefix, "source-topology"}}};
-                    return admit(layer, state, source);
+                        return {false,
+                                {m_schema.diagnostics().make(source.prefix, "source-topology")}};
+                    const auto admitted = admit(candidate, state, source);
+                    result.accepted &= admitted.accepted;
+                    result.errors.append(admitted.errors);
                 }
-    return {false, {{{}, "unknown-source"}}};
+            if (!found)
+                return {false, {m_schema.diagnostics().make({}, "unknown-source")}};
+        }
+        if (!result.accepted)
+            for (int i = 0; i < candidate.sources.size(); ++i)
+                candidate.sources[i].admitted = layer.sources[i].admitted;
+        layer = std::move(candidate); // Raw evidence survives strict layer rejection.
+        return result;
+    }
+    return {false, {m_schema.diagnostics().make({}, "unknown-source")}};
 }
 
 QVariantMap ConfigLayers::effective() const {
@@ -162,6 +207,14 @@ QList<ConfigDiagnostic> ConfigLayers::diagnostics(const QString &layerId,
                 if (source.source.id == sourceId)
                     return source.errors;
     return {};
+}
+QList<ConfigDiagnostic> ConfigLayers::rejectedDiagnostics() const {
+    QList<ConfigDiagnostic> result;
+    for (const auto &layer : m_layers)
+        for (const auto &source : layer.sources)
+            if (source.rejected)
+                result.append(source.errors);
+    return result;
 }
 
 ConfigRoute ConfigLayers::route(const ConfigPath &path, const QString &layerId) const {
@@ -242,7 +295,11 @@ ConfigWriteResult ConfigLayers::write(const ConfigPath &path, const QVariant &va
             continue;
         const auto target = route(path, layer.descriptor.id);
         if (!target.valid())
-            return {false, {{path, "no-write-route"}}, {}, {}, m_intentRevision};
+            return {false,
+                    {m_schema.diagnostics().make(path, "no-write-route")},
+                    {},
+                    {},
+                    m_intentRevision};
         for (auto &source : layer.sources)
             if (source.source.id == target.sourceId) {
                 putValue(source.source.raw, path.mid(target.prefix.size()), checked.value);
@@ -258,7 +315,8 @@ ConfigWriteResult ConfigLayers::write(const ConfigPath &path, const QVariant &va
                     true, {}, target, runtime ? QString() : info(path).maskedBy, m_intentRevision};
             }
     }
-    return {false, {{path, "no-write-target"}}, {}, {}, m_intentRevision};
+    return {
+        false, {m_schema.diagnostics().make(path, "no-write-target")}, {}, {}, m_intentRevision};
 }
 
 ConfigWriteResult ConfigLayers::erase(const ConfigPath &path, const QString &layerId,
@@ -266,7 +324,11 @@ ConfigWriteResult ConfigLayers::erase(const ConfigPath &path, const QString &lay
     if (!valid())
         return {false, m_errors, {}, {}, m_intentRevision};
     if (!m_schema.descriptor(path))
-        return {false, {{path, "undeclared-path"}}, {}, {}, m_intentRevision};
+        return {false,
+                {m_schema.diagnostics().make(path, "undeclared-path")},
+                {},
+                {},
+                m_intentRevision};
     for (auto &layer : m_layers) {
         if (layer.descriptor.id != layerId ||
             !(runtime ? layer.descriptor.kind == ConfigLayerKind::Runtime
@@ -294,7 +356,11 @@ ConfigWriteResult ConfigLayers::erase(const ConfigPath &path, const QString &lay
                     ++it;
         }
         if (!routed)
-            return {false, {{path, "no-write-route"}}, {}, {}, m_intentRevision};
+            return {false,
+                    {m_schema.diagnostics().make(path, "no-write-route")},
+                    {},
+                    {},
+                    m_intentRevision};
         ++m_intentRevision;
         return {true,
                 {},
@@ -302,7 +368,8 @@ ConfigWriteResult ConfigLayers::erase(const ConfigPath &path, const QString &lay
                 runtime ? QString() : info(path).maskedBy,
                 m_intentRevision};
     }
-    return {false, {{path, "read-only-target"}}, {}, {}, m_intentRevision};
+    return {
+        false, {m_schema.diagnostics().make(path, "read-only-target")}, {}, {}, m_intentRevision};
 }
 
 ConfigWriteResult ConfigLayers::setUser(const ConfigPath &path, const QVariant &value) {
@@ -318,6 +385,7 @@ ConfigWriteResult ConfigLayers::clearRuntime(const ConfigPath &path) {
     for (const auto &layer : m_layers)
         if (layer.descriptor.kind == ConfigLayerKind::Runtime)
             return erase(ownPath(path), layer.descriptor.id, true);
-    return {false, {{path, "no-runtime-target"}}, {}, {}, m_intentRevision};
+    return {
+        false, {m_schema.diagnostics().make(path, "no-runtime-target")}, {}, {}, m_intentRevision};
 }
 } // namespace configqml

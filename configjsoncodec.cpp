@@ -34,21 +34,25 @@ ConfigCodecCapabilities ConfigJsonCodec::capabilities() const {
 }
 ConfigDecodeResult ConfigJsonCodec::decode(const QByteArray &bytes, const QString &id) {
     ConfigJsonLayout layout;
-    const auto result = decodeJsonValue(bytes, {}, &layout);
+    const auto result = decodeJsonValue(bytes, {}, &layout, m_diagnostics);
     if (!result.ok()) {
         const auto d = result.errors.first();
         return {{},
-                {d.code, id, "parse", {}, d.path, 1 + bytes.left(layout.errorOffset).count('\n')}};
+                m_diagnostics.error(d, id, "parse", {},
+                                    1 + bytes.left(layout.errorOffset).count('\n'))};
     }
     if (result.value.metaType().id() != QMetaType::QVariantMap)
-        return {{}, {"json-root-object", id, "parse", {}, {}, 1}};
+        return {
+            {},
+            m_diagnostics.error(m_diagnostics.make({}, "json-root-object"), id, "parse", {}, 1)};
     m_layout = layout;
     return {result.value.toMap(), {}};
 }
 static ConfigJsonEncodeResult ordered(const QVariant &value, const ConfigPath &path,
-                                      const ConfigJsonLayout &layout) {
+                                      const ConfigJsonLayout &layout,
+                                      const ConfigDiagnosticBuilder &diagnostics) {
     if (value.metaType().id() == QMetaType::QUrl)
-        return encodeJsonValue(value.toUrl().toString(QUrl::FullyEncoded), path);
+        return encodeJsonValue(value.toUrl().toString(QUrl::FullyEncoded), path, diagnostics);
     if (value.metaType().id() == QMetaType::QVariantMap) {
         const auto map = value.toMap();
         auto keys = layout.keys.value(path);
@@ -60,7 +64,8 @@ static ConfigJsonEncodeResult ordered(const QVariant &value, const ConfigPath &p
         for (const auto &key : keys) {
             if (!map.contains(key))
                 continue;
-            const auto encoded = ordered(map.value(key), path + ConfigPath{key}, layout);
+            const auto encoded =
+                ordered(map.value(key), path + ConfigPath{key}, layout, diagnostics);
             if (!encoded.ok())
                 return encoded;
             if (!first)
@@ -74,7 +79,8 @@ static ConfigJsonEncodeResult ordered(const QVariant &value, const ConfigPath &p
         QByteArray bytes = "[";
         const auto list = value.toList();
         for (qsizetype i = 0; i < list.size(); ++i) {
-            const auto encoded = ordered(list[i], path + ConfigPath{QString::number(i)}, layout);
+            const auto encoded =
+                ordered(list[i], path + ConfigPath{QString::number(i)}, layout, diagnostics);
             if (!encoded.ok())
                 return encoded;
             if (i)
@@ -83,15 +89,15 @@ static ConfigJsonEncodeResult ordered(const QVariant &value, const ConfigPath &p
         }
         return {bytes + ']', {}};
     }
-    return encodeJsonValue(value, path);
+    return encodeJsonValue(value, path, diagnostics);
 }
 ConfigEncodeResult ConfigJsonCodec::encode(const QVariantMap &raw, const QString &id) {
-    const auto owned = ownValue(raw);
+    const auto owned = ownValue(raw, {}, m_diagnostics);
     if (!owned.ok())
-        return {{}, {owned.errors.first().code, id, "encode", {}, owned.errors.first().path}};
-    const auto result = ordered(owned.value, {}, m_layout);
+        return {{}, m_diagnostics.error(owned.errors.first(), id, "encode")};
+    const auto result = ordered(owned.value, {}, m_layout, m_diagnostics);
     if (!result.ok())
-        return {{}, {result.errors.first().code, id, "encode", {}, result.errors.first().path}};
+        return {{}, m_diagnostics.error(result.errors.first(), id, "encode")};
     return {result.bytes + '\n', {}};
 }
 } // namespace configqml

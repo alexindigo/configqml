@@ -19,9 +19,11 @@ public:
     virtual void visit(const Visitor &visitor) const = 0;
 };
 struct ConfigCapture;
-ConfigValueResult captureValue(const ConfigValueInput &input, const ConfigPath &path = {});
+ConfigValueResult captureValue(const ConfigValueInput &input, const ConfigPath &path = {},
+                               const ConfigDiagnosticBuilder &diagnostics = {});
 struct ConfigDescriptor {
     enum class Format { Native, Qml };
+    enum class AdmissionPolicy { Inherit, Strict, Tolerant };
     enum class Type {
         Group,
         Boolean,
@@ -33,12 +35,15 @@ struct ConfigDescriptor {
         List,
         Record,
         Map,
-        SafeInteger
+        SafeInteger,
+        SecretRef
     };
     Type type = Type::String;
     bool optional = false;
     bool nullable = false;
     bool sensitive = false;
+    bool machineLocal = false;
+    AdmissionPolicy admissionPolicy = AdmissionPolicy::Inherit;
     bool forbidden = false;
     std::optional<QVariant> defaultValue;
     QList<QVariant> choices;
@@ -60,7 +65,8 @@ private:
     friend struct ConfigCapture;
     friend class ConfigSchema;
     ConfigValueResult validateCaptured(const QVariant &value, const ConfigPath &path, Format format,
-                                       bool childrenAdmitted = false) const;
+                                       bool childrenAdmitted,
+                                       const ConfigDiagnosticBuilder &diagnostics) const;
 };
 
 // Sealed result of an owned schema admission. No public unchecked-value constructor.
@@ -78,9 +84,17 @@ private:
     ConfigValueResult m_result;
     std::shared_ptr<const char> m_identity;
 };
+struct ConfigMigration {
+    int fromVersion = 0;
+    // Worker-only, owned plain data; no application QObject or engine captures.
+    std::function<ConfigValueResult(const QVariantMap &)> transform;
+};
 class ConfigSchema {
 public:
-    explicit ConfigSchema(const ConfigDescriptor &root);
+    explicit ConfigSchema(const ConfigDescriptor &root, int version = 0,
+                          QList<ConfigMigration> migrations = {});
+    int version() const { return m_version; }
+    QList<ConfigMigration> migrations() const { return m_migrations; }
     bool valid() const { return m_errors.isEmpty(); }
     QList<ConfigDiagnostic> errors() const { return m_errors; }
     QVariantMap defaults() const { return m_defaults; }
@@ -92,9 +106,15 @@ public:
     ConfigAdmission admit(const ConfigPath &path, const ConfigValueInput &input,
                           ConfigDescriptor::Format format = ConfigDescriptor::Format::Native) const;
     ConfigValueResult admitted(const ConfigAdmission &input) const;
+    ConfigDescriptor::AdmissionPolicy policy(const ConfigPath &path) const;
+    bool portable(const ConfigPath &path) const;
+    bool sensitive(const ConfigPath &path) const;
+    ConfigDiagnosticBuilder diagnostics() const { return ConfigDiagnosticBuilder(m_root); }
 
 private:
     ConfigDescriptor m_root;
+    int m_version = 0;
+    QList<ConfigMigration> m_migrations;
     QVariantMap m_defaults;
     QList<ConfigPath> m_leaves;
     QList<ConfigDiagnostic> m_errors;

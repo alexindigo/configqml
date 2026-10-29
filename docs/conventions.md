@@ -26,7 +26,7 @@ engine-bound objects are not supported configuration values.
 | 8 | Optional | A setting may lack a schema default; absent overrides then leave it missing. Record fields marked optional may be absent. |
 | 9 | Required/defaults | A nonoptional setting needs a valid default. Invalid defaults or descriptor constraints invalidate the schema; there is no tolerant defaults mode. |
 | 10 | Choices/ranges | Exact typed enum membership and inclusive numeric bounds. Integer comparisons preserve the full 64-bit range. |
-| 11 | Forbidden/sensitive | Forbidden settings reject values; sensitive is metadata for later explicit exports. Diagnostic/provenance records contain paths and codes, never value dumps. M1 provides no profile/export API or secret provider. |
+| 11 | Forbidden/sensitive | Forbidden settings reject values. Sensitive metadata excludes data from profiles and redacts input evidence; diagnostic/provenance records contain paths and codes, never value dumps. No secret provider is embedded. See [evolution-secrets.md](evolution-secrets.md). |
 
 Descriptor construction rejects unsupported constraints: namespaces cannot carry
 choices, bounds, defaults, optional/nullable or forbidden modifiers; numeric

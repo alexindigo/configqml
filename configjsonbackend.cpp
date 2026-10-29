@@ -81,8 +81,11 @@ bool compatibleAncestors(const QVariantMap &base, const QVariantMap &fresh, cons
     return true;
 }
 } // namespace
-ConfigJsonBackend::ConfigJsonBackend(const QList<ConfigJsonFile> &files, FaultHook hook)
+ConfigJsonBackend::ConfigJsonBackend(const QList<ConfigJsonFile> &files, FaultHook hook,
+                                     const QMap<QString, ConfigDiagnosticBuilder> &diagnostics)
     : m_files(files), m_hook(std::move(hook)) {
+    for (auto it = diagnostics.cbegin(); it != diagnostics.cend(); ++it)
+        m_diagnostics.insert(ownString(it.key()), it.value());
     for (auto &file : m_files) {
         file.layerId = ownString(file.layerId);
         file.sourceId = ownString(file.sourceId);
@@ -378,7 +381,7 @@ ConfigJsonTransaction ConfigJsonBackend::reconcile(const QString &sourceId,
         error = checkTarget(id, name, true);
     auto fail = [&](ConfigError e) {
         r.success = false;
-        r.error = std::move(e);
+        r.error = m_diagnostics.value(id).sanitize(std::move(e));
         return t;
     };
     if (!error.empty())
@@ -396,7 +399,7 @@ ConfigJsonTransaction ConfigJsonBackend::reconcile(const QString &sourceId,
     r.operation = ConfigBackendRequest::Operation::Publish;
     if (!r.success)
         return t;
-    ConfigJsonCodec codec;
+    ConfigJsonCodec codec(m_diagnostics.value(id));
     if (r.revision.exists) {
         auto parsed = codec.decode(r.bytes, id);
         if (!parsed.ok()) {
@@ -406,6 +409,9 @@ ConfigJsonTransaction ConfigJsonBackend::reconcile(const QString &sourceId,
         t.raw = parsed.raw;
     }
     for (const auto &edit : edits) {
+        if (edit.path.isEmpty() && edit.value &&
+            edit.value->metaType().id() != QMetaType::QVariantMap)
+            return fail({"root-edit-object", id, "reconcile", name});
         const auto fresh = valueAt(t.raw, edit.path);
         if (edit.ifMissing && fresh)
             continue;
@@ -413,18 +419,23 @@ ConfigJsonTransaction ConfigJsonBackend::reconcile(const QString &sourceId,
             for (qsizetype i = 1; i < edit.path.size(); ++i) {
                 const auto ancestor = valueAt(t.raw, edit.path.mid(0, i));
                 if (ancestor && ancestor->metaType().id() != QMetaType::QVariantMap)
-                    return fail({"path-conflict", id, "reconcile", name, edit.path});
+                    return fail(m_diagnostics.value(id).error(
+                        m_diagnostics.value(id).make(edit.path, "path-conflict"), id, "reconcile",
+                        name));
             }
         if (!edit.ifMissing && (!same(valueAt(baseline, edit.path), fresh) ||
                                 !compatibleAncestors(baseline, t.raw, edit.path)))
-            return fail({"path-conflict", id, "reconcile", name, edit.path});
+            return fail(m_diagnostics.value(id).error(
+                m_diagnostics.value(id).make(edit.path, "path-conflict"), id, "reconcile", name));
     }
     bool applied = false;
     for (const auto &edit : edits) {
         if (edit.ifMissing && valueAt(t.raw, edit.path))
             continue;
         applied = true;
-        if (edit.value)
+        if (edit.value && edit.path.isEmpty())
+            t.raw = edit.value->toMap();
+        else if (edit.value)
             putValue(t.raw, edit.path, *edit.value);
         else if (edit.path.isEmpty())
             t.raw.clear();

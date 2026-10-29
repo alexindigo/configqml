@@ -27,12 +27,12 @@ public:
             const auto signal = builder.addSignal(it.key().toUtf8() + "Changed()");
             auto property = builder.addProperty(it.key().toUtf8(), group ? "QObject*" : "QVariant",
                                                 signal.index());
-            property.setWritable(!group && store->core()->canWriteUser(childPath));
+            property.setWritable(!group && store->canWrite(childPath));
             property.setConstant(group);
         }
         m_meta = builder.toMetaObject();
         QQmlEngine::setObjectOwnership(this, QQmlEngine::CppOwnership);
-        connect(store->core(), &ConfigStore::valuesChanged, this, [this](const auto &paths) {
+        connect(store, &ConfigQmlStore::settingValuesChanged, this, [this](const auto &paths) {
             ConfigConsumerGuard boundary(this);
             for (const auto &path : paths)
                 if (path.size() == m_path.size() + 1 && startsWith(path, m_path)) {

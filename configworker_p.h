@@ -21,14 +21,23 @@ struct ConfigWorkerPacket {
     std::optional<ConfigResult> result;
     bool autoSaveRequested = false;
     std::optional<ConfigError> sourceError;
+    std::optional<ConfigResult> migrationResult;
     QMap<ConfigPath, QMap<quint64, ConfigModelPlan>> models;
     qint64 planningNanos = 0;
 };
 struct ConfigCommand {
+    ConfigCommand() = default;
+    ConfigCommand(quint64 requestId, quint64 prefix, QString operation,
+                  std::optional<ConfigInput> input)
+        : requestId(requestId), prefix(prefix), operation(std::move(operation)),
+          input(std::move(input)) {}
     quint64 requestId = 0;
     quint64 prefix = 0;
     QString operation;
     std::optional<ConfigInput> input;
+    QString file;
+    QString profileName;
+    QList<ConfigPath> selection;
 };
 class ConfigWorker : public QObject {
     Q_OBJECT
@@ -59,6 +68,7 @@ private:
     void drain();
     void process(const ConfigCommand &command);
     void coverInput(const ConfigCommand &command);
+    void acceptIntent(const ConfigInput &input);
     ConfigWorkerPacket publish(const std::optional<ConfigResult> &result = {},
                                bool initial = false);
     void post(const ConfigWorkerPacket &packet);
@@ -67,9 +77,12 @@ private:
     void beginSave(const ConfigCommand &command);
     void continueSave();
     void finishSave();
-    void reloadFiles(const std::optional<ConfigCommand> &command = {});
+    bool reloadFiles(const std::optional<ConfigCommand> &command = {});
     void armWatches();
     void scheduleAutoSave();
+    void processGroup(const ConfigCommand &command);
+    void profile(const ConfigCommand &command);
+    bool migrateSources();
     ConfigStoreOptions m_options;
     QString m_initializationError;
     std::unique_ptr<ConfigLayers> m_layers;
@@ -94,6 +107,9 @@ private:
     quint64 m_generation = 0;
     QMap<ConfigPath, quint64> m_pathGenerations;
     QMap<ConfigPath, quint64> m_pathInputs;
+    QMap<ConfigPath, quint64> m_pathIntents;
+    QMap<ConfigPath, QVariantList> m_content;
+    QMap<ConfigPath, quint64> m_contentRevisions;
     ConfigSnapshot m_previous;
     QMap<ConfigPath, QMap<quint64, QList<ConfigModelRow>>> m_modelVersions;
     QMap<QString, ConfigRoute> m_routes;

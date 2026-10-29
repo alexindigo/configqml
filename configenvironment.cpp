@@ -37,15 +37,19 @@ static QVariant jsonValue(const QVariant &v, const ConfigDescriptor &d) {
 }
 
 static ConfigValueResult parse(const QString &text, const ConfigDescriptor &d,
-                               const ConfigPath &path) {
+                               const ConfigPath &path, const ConfigSchema &schema) {
+    const auto diagnostics = schema.diagnostics();
     static const QRegularExpression integer("\\A-?(?:0|[1-9][0-9]*)\\z");
     static const QRegularExpression unsignedInteger("\\A(?:0|[1-9][0-9]*)\\z");
     static const QRegularExpression real(
         "\\A-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\\z");
-    auto fail = [&]() { return ConfigValueResult{{}, {{path, "environment-syntax"}}}; };
+    auto fail = [&]() {
+        return ConfigValueResult{{}, {diagnostics.make(path, "environment-syntax")}};
+    };
     QVariant value;
     switch (d.type) {
     case T::String:
+    case T::SecretRef:
         value = text;
         break;
     case T::Boolean:
@@ -75,7 +79,7 @@ static ConfigValueResult parse(const QString &text, const ConfigDescriptor &d,
     case T::List:
     case T::Record:
     case T::Map: {
-        const auto parsed = decodeJsonValue(text.toUtf8(), path);
+        const auto parsed = decodeJsonValue(text.toUtf8(), path, nullptr, diagnostics);
         if (!parsed.ok())
             return parsed;
         value = jsonValue(parsed.value, d);
@@ -84,7 +88,7 @@ static ConfigValueResult parse(const QString &text, const ConfigDescriptor &d,
     case T::Group:
         return fail();
     }
-    return d.validate(value, path);
+    return schema.validate(path, value);
 }
 
 ConfigEnvironmentResult mapEnvironment(const ConfigSchema &schema,
@@ -102,7 +106,7 @@ ConfigEnvironmentResult mapEnvironment(const ConfigSchema &schema,
         const auto d = schema.descriptor(mapping.path);
         if (mapping.name.isEmpty() || names.contains(mapping.name) ||
             paths.contains(mapping.path) || !d || d->type == T::Group || d->forbidden)
-            out.errors.append(ConfigDiagnostic{mapping.path, "environment-mapping"});
+            out.errors.append(schema.diagnostics().make(mapping.path, "environment-mapping"));
         names.insert(mapping.name);
         paths.insert(mapping.path);
     }
@@ -112,7 +116,7 @@ ConfigEnvironmentResult mapEnvironment(const ConfigSchema &schema,
         if (!environment.contains(mapping.name))
             continue;
         const auto result = parse(environment.value(mapping.name), *schema.descriptor(mapping.path),
-                                  ownPath(mapping.path));
+                                  ownPath(mapping.path), schema);
         out.errors.append(result.errors);
         if (result.ok())
             putValue(out.values, ownPath(mapping.path), result.value);

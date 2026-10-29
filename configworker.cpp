@@ -70,7 +70,12 @@ ConfigWorker::ConfigWorker(ConfigStoreOptions options, QString initializationErr
 void ConfigWorker::initialize() {
     Q_ASSERT(QThread::currentThread() == thread());
     m_backend = std::make_unique<ConfigMemoryBackend>();
-    m_json = std::make_unique<ConfigJsonBackend>(m_options.jsonFiles, m_options.fileFault);
+    QMap<QString, ConfigDiagnosticBuilder> diagnostics;
+    for (const auto &layer : m_options.layers)
+        for (const auto &source : layer.sources)
+            diagnostics[source.id] = m_options.schema.diagnostics().at(source.prefix);
+    m_json =
+        std::make_unique<ConfigJsonBackend>(m_options.jsonFiles, m_options.fileFault, diagnostics);
     QSet<QString> paths;
     QMap<QString, int> sourceIds;
     for (const auto &layer : m_options.layers)
@@ -98,7 +103,7 @@ void ConfigWorker::initialize() {
                         const auto id = m_json->submit(
                             {ConfigBackendRequest::Operation::Read, file.sourceId, {}, {}});
                         auto read = *m_json->take(id);
-                        ConfigJsonCodec codec;
+                        ConfigJsonCodec codec(m_options.schema.diagnostics().at(source.prefix));
                         const auto decoded = read.revision.exists
                                                  ? codec.decode(read.bytes, file.sourceId)
                                                  : ConfigDecodeResult{};
@@ -127,12 +132,10 @@ void ConfigWorker::initialize() {
         if (!found)
             m_initializationError = "unknown-file-route";
     }
+    migrateSources();
     m_layers = std::make_unique<ConfigLayers>(m_options.schema, m_options.layers);
-    for (const auto &layer : m_options.layers)
-        if (layer.policy == ConfigAdmissionPolicy::RejectInput)
-            for (const auto &source : layer.sources)
-                if (source.json && !m_layers->diagnostics(layer.id, source.id).isEmpty())
-                    m_initializationError = "strict-file-admission";
+    if (m_initializationError.isEmpty() && !m_layers->rejectedDiagnostics().isEmpty())
+        m_initializationError = "strict-file-admission";
     for (const auto &layer : m_options.layers) {
         if (!layer.writable)
             continue;
@@ -219,6 +222,21 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
         state.provenance = m_layers->info(path);
         state.workerCovered = m_prefix;
         state.latestInput = m_pathInputs.value(path);
+        state.intentRevision = m_pathIntents.value(path);
+        QVariantList content{next, QString::number(state.intentRevision)};
+        for (const auto &contribution : state.provenance.contributions) {
+            const auto source = m_layers->source(contribution.layerId, contribution.sourceId);
+            if (!source)
+                continue;
+            const auto raw = valueAt(source->raw, path.mid(source->prefix.size()));
+            content.append(
+                QVariantMap{{"present", bool(raw)}, {"value", raw.value_or(QVariant())}});
+        }
+        if (!m_content.contains(path) || m_content.value(path) != content) {
+            ++m_contentRevisions[path];
+            m_content[path] = content;
+        }
+        state.contentRevision = m_contentRevisions.value(path);
         state.pathGeneration = m_pathGenerations.value(path);
         state.publicationGeneration = packet.snapshot.generation;
         const auto before = m_previous.information.value(path);
@@ -226,7 +244,8 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
             state.pathGeneration != before.pathGeneration ||
             state.provenance.layerId != before.provenance.layerId ||
             state.provenance.maskedBy != before.provenance.maskedBy ||
-            state.provenance.contributions != before.provenance.contributions) {
+            state.provenance.contributions != before.provenance.contributions ||
+            state.contentRevision != before.contentRevision) {
             packet.snapshot.values[path] = next;
             packet.snapshot.information[path] = state;
             const auto descriptor = *m_options.schema.descriptor(path);
@@ -264,7 +283,15 @@ void ConfigWorker::acknowledgeModels(const QMap<ConfigPath, quint64> &generation
         versions.erase(versions.begin(), end);
     }
 }
-void ConfigWorker::post(const ConfigWorkerPacket &packet) {
+void ConfigWorker::post(const ConfigWorkerPacket &input) {
+    auto packet = input;
+    const auto diagnostics = m_options.schema.diagnostics();
+    if (packet.result)
+        packet.result = diagnostics.sanitize(*packet.result);
+    if (packet.sourceError)
+        packet.sourceError = diagnostics.sanitize(*packet.sourceError);
+    if (packet.migrationResult)
+        packet.migrationResult = diagnostics.sanitize(*packet.migrationResult);
     if (m_holdReplies) {
         m_replies.enqueue(packet);
         return;
@@ -310,10 +337,21 @@ void ConfigWorker::coverInput(const ConfigCommand &command) {
         m_pathInputs[it.key()] = input.sequence;
     }
 }
+void ConfigWorker::acceptIntent(const ConfigInput &input) {
+    // This is the common authoritative fence for all accepted producers. A
+    // worker-resolved profile group never fabricates a GUI path generation.
+    const auto paths =
+        input.kind == ConfigInput::Kind::Group ? input.edits.keys() : input.pathGenerations.keys();
+    for (const auto &path : paths) {
+        ++m_pathIntents[path];
+        m_pathInputs[path] = qMax(m_pathInputs.value(path), input.sequence);
+    }
+}
 void ConfigWorker::process(const ConfigCommand &command) {
     // Every settled input covers its sequence/generation, including terminal
     // refusal. Retained intent does not keep a rejected local value effective.
-    coverInput(command);
+    if (!command.input || command.input->kind != ConfigInput::Kind::Group || m_failed || m_closed)
+        coverInput(command);
     if (m_failed || m_closed || !m_layers->valid()) {
         auto result = resultFor(command);
         result.status = "failed";
@@ -325,6 +363,10 @@ void ConfigWorker::process(const ConfigCommand &command) {
         return;
     }
     if (!command.input) {
+        if (command.operation == "exportProfile" || command.operation == "importProfile") {
+            profile(command);
+            return;
+        }
         if (command.operation == "retire") {
             auto result = resultFor(command);
             result.status = "nothing_to_save";
@@ -340,11 +382,15 @@ void ConfigWorker::process(const ConfigCommand &command) {
         return;
     }
     const auto &input = *command.input;
+    if (input.kind == ConfigInput::Kind::Group) {
+        processGroup(command);
+        return;
+    }
     auto result = resultFor(command);
     const auto rejection = m_options.admission ? m_options.admission(input) : QString();
     ConfigWriteResult write;
     if (!rejection.isEmpty())
-        write.errors = {{input.path, rejection}};
+        write.errors = {m_options.schema.diagnostics().make(input.path, rejection)};
     else
         switch (input.kind) {
         case ConfigInput::Kind::User:
@@ -368,12 +414,18 @@ void ConfigWorker::process(const ConfigCommand &command) {
         case ConfigInput::Kind::ClearRuntime:
             write = m_layers->clearRuntime(input.path);
             break;
+        case ConfigInput::Kind::Group:
+            break;
         }
     result.maskedBy = m_layers->info(input.path).maskedBy;
     result.status = write.accepted ? "accepted" : "failed";
+    if (write.accepted)
+        acceptIntent(input);
     if (!write.accepted) {
-        result.error = {
-            write.errors.isEmpty() ? QString("admission") : write.errors.first().code, {}, "write"};
+        const auto diagnostic = write.errors.isEmpty()
+                                    ? m_options.schema.diagnostics().make(input.path, "admission")
+                                    : write.errors.first();
+        result.error = m_options.schema.diagnostics().error(diagnostic, {}, "write");
         m_failures.append(result);
     } else if (input.kind == ConfigInput::Kind::User || input.kind == ConfigInput::Kind::Reset ||
                input.kind == ConfigInput::Kind::Initialize) {
@@ -397,6 +449,17 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
     m_autoTimer->stop();
     m_save = command;
     m_saveResult = resultFor(command);
+    if (command.input && command.input->kind == ConfigInput::Kind::Group) {
+        QSet<QString> masks;
+        for (auto it = command.input->edits.cbegin(); it != command.input->edits.cend(); ++it) {
+            const auto mask = m_layers->info(it.key()).maskedBy;
+            m_saveResult.masks[it.key()] = mask;
+            if (!mask.isEmpty())
+                masks.insert(mask);
+        }
+        if (masks.size() == 1)
+            m_saveResult.maskedBy = *masks.cbegin();
+    }
     m_saveRetainedFailure = inheritFailures(m_saveResult);
     if (m_saveRetainedFailure) {
         finishSave();
@@ -591,20 +654,22 @@ void ConfigWorker::armWatches() {
         if (!watched.contains(path))
             m_watcher->addPath(path);
 }
-void ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
+bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
     std::optional<ConfigResult> result;
     if (command) {
         result = resultFor(*command);
         result->status = "reloaded";
     }
     QList<ConfigError> errors;
+    QMap<QString, QList<ConfigSource>> replacements;
     bool changed = false;
     for (auto it = m_files.cbegin(); it != m_files.cend(); ++it) {
         if (!command && (it->watchMode != ConfigWatchMode::Live || !m_json->changed(it.key())))
             continue;
         auto id = m_json->submit({ConfigBackendRequest::Operation::Read, it.key(), {}, {}});
         const auto read = *m_json->take(id);
-        ConfigJsonCodec codec;
+        const auto route = m_fileRoutes.value(it.key());
+        ConfigJsonCodec codec(m_options.schema.diagnostics().at(route.prefix));
         auto decoded =
             read.revision.exists ? codec.decode(read.bytes, it.key()) : ConfigDecodeResult{};
         ConfigError error = !read.success ? read.error : decoded.error;
@@ -615,15 +680,42 @@ void ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
             errors.append(error);
             continue; // Parse/IO failures never destroy last-good layer state.
         }
-        const auto route = m_fileRoutes.value(it.key());
         auto source = *m_layers->source(route.layerId, route.sourceId);
         source.raw = decoded.raw;
         source.bytes = read.bytes;
         source.revision = read.revision.token;
         source.exists = read.revision.exists;
-        m_json->confirm(it.key(), read.revision);
+        if (m_options.schema.version() > 0 && source.exists) {
+            const auto version = ConfigDescriptor::leaf(ConfigDescriptor::Type::SafeInteger, 0)
+                                     .validate(source.raw.value("_configqmlVersion", 0));
+            if (m_dirty.contains(it.key()) &&
+                (!version.ok() || version.value.toInt() != m_options.schema.version())) {
+                errors.append(
+                    {"migration-pending-intent", it.key(), "migration", m_json->path(it.key())});
+                continue;
+            }
+            // Reuse the same transform/backup/publication owner on every load,
+            // including explicit and watched reloads. No facade migration path.
+            m_options.layers = {{route.layerId,
+                                 ConfigLayerKind::File,
+                                 ConfigAdmissionPolicy::FieldFallback,
+                                 {source},
+                                 m_routes.contains(it.key())}};
+            const bool migrated = migrateSources();
+            if (migrated)
+                source = m_options.layers.first().sources.first();
+            else
+                errors.append(
+                    {m_initializationError, it.key(), "migration", m_json->path(it.key())});
+            m_initializationError.clear();
+            m_options.layers.clear();
+            if (!migrated)
+                continue;
+        }
+        const ConfigRevision admittedRevision{source.exists, source.revision};
+        m_json->confirm(it.key(), admittedRevision);
         if (!m_dirty.contains(it.key()))
-            m_baselines[it.key()] = decoded.raw;
+            m_baselines[it.key()] = source.raw;
         for (const auto &edit : m_edits.value(it.key())) {
             if (edit.ifMissing && valueAt(source.raw, edit.path))
                 continue;
@@ -636,12 +728,21 @@ void ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
         }
         if (!m_edits.value(it.key()).isEmpty())
             source.exists = true;
-        const auto admission = m_layers->replaceSource(route.layerId, source);
-        if (!admission.accepted && !admission.errors.isEmpty())
-            errors.append({admission.errors.first().code, it.key(), "admission",
-                           m_json->path(it.key()), admission.errors.first().path});
-        m_revisions[it.key()] = read.revision;
+        replacements[route.layerId].append(source);
+        m_revisions[it.key()] = admittedRevision;
         changed = true;
+    }
+    for (auto it = replacements.cbegin(); it != replacements.cend(); ++it) {
+        const auto admission = m_layers->replaceSources(it.key(), it.value());
+        if (!admission.accepted && !admission.errors.isEmpty()) {
+            const auto diagnostic = admission.errors.first();
+            QString id;
+            for (const auto &source : it.value())
+                if (startsWith(diagnostic.path, source.prefix))
+                    id = source.id;
+            errors.append(m_options.schema.diagnostics().error(diagnostic, id, "admission",
+                                                               m_json->path(id)));
+        }
     }
     armWatches();
     if (result && !errors.isEmpty()) {
@@ -655,5 +756,6 @@ void ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
         packet.sourceError = error;
         post(packet);
     }
+    return errors.isEmpty();
 }
 } // namespace configqml

@@ -15,6 +15,8 @@ class ConfigListModel;
 class ConfigWorkerOwner;
 struct ConfigWorkerPacket;
 class ConfigStoreTestAccess;
+class ConfigDraft;
+class ConfigStoreHandle;
 struct ConfigStoreOptions {
     ConfigSchema schema{ConfigDescriptor::group({})};
     QList<ConfigLayer> layers;
@@ -43,7 +45,7 @@ public:
     ConfigSnapshot snapshot() const {
         return m_admittedSnapshot ? *m_admittedSnapshot : ConfigSnapshot{};
     }
-    QList<ConfigInput> inputs() const { return {m_inputs.cbegin(), m_inputs.cend()}; }
+    QList<ConfigInput> inputs() const;
     QList<ConfigResult> failures() const { return {m_failures.cbegin(), m_failures.cend()}; }
     ConfigSchema schema() const { return m_schema; }
     ConfigListModel *listModel(const ConfigPath &path) const;
@@ -74,17 +76,33 @@ public:
                         ConfigDescriptor::Format format = ConfigDescriptor::Format::Native);
     quint64 flush(QObject *context = nullptr, Callback callback = {});
     quint64 close(QObject *context = nullptr, Callback callback = {});
+    ConfigDraft *draft(const QList<ConfigPath> &paths = {}, QObject *parent = nullptr);
+    ConfigStoreHandle *scope(const ConfigPath &prefix, bool writable = true,
+                             QObject *parent = nullptr);
+    quint64 exportProfile(const QString &name, const QString &file,
+                          const QList<ConfigPath> &paths = {}, QObject *context = nullptr,
+                          Callback callback = {});
+    quint64 importProfile(const QString &file, const QList<ConfigPath> &paths = {},
+                          QObject *context = nullptr, Callback callback = {});
 signals:
     void statusChanged();
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
+    void published(); // All eligible cache/model updates installed, including raw-only changes.
     void inputRejected(const configqml::ConfigPath &path, const QString &code);
     void completed(const configqml::ConfigResult &result);
     void autoSaved(const configqml::ConfigResult &result);
     void sourceError(const configqml::ConfigError &error);
+    void migrationCompleted(const configqml::ConfigResult &result);
 
 private:
     friend class ConfigWorker;
     friend class ConfigStoreTestAccess;
+    friend class ConfigDraft;
+    quint64 applyGroup(const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                       const QMap<ConfigPath, ConfigPathState> &fences, QObject *context,
+                       Callback callback);
+    quint64 profileRequest(const QString &operation, const QString &name, const QString &file,
+                           const QList<ConfigPath> &paths, QObject *context, Callback callback);
     ConfigRequestHandle write(ConfigInput::Kind kind, const ConfigPath &path, const QVariant &value,
                               const QString &target, QObject *context, Callback callback,
                               ConfigDescriptor::Format format = ConfigDescriptor::Format::Native,

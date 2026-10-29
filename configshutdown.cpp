@@ -19,7 +19,7 @@ void ConfigWorkerOwner::acknowledgeModels(const QMap<ConfigPath, quint64> &gener
 namespace {
 bool persistence(const QString &operation) {
     return operation == "save" || operation == "flush" || operation == "close" ||
-           operation == "autosave";
+           operation == "autosave" || operation == "apply" || operation == "importProfile";
 }
 class ShutdownRegistry {
 public:

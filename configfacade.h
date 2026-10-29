@@ -22,5 +22,6 @@ protected:
 private:
     QPointer<ConfigStore> m_store;
     ConfigPath m_prefix;
+    ConfigDiagnosticBuilder m_diagnostics;
 };
 } // namespace configqml
