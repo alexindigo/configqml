@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-29
+
+### Added
+
+- Nonpersisting worker-owned Source projections with exact numeric atoms, ordered
+  effects and preserved original raw data. Conditional whole-source fallback,
+  startup quarantine and accepted-disk source events expose explicit presence and
+  provenance without moving file or merge ownership to the GUI.
+- Declared record-list normalization and generation-fenced field/membership edits
+  preserve hidden raw rows and avoid persisting injected housekeeping defaults.
+- Retained groups reserve selected intent across failures, with immutable captures,
+  explicit Retry, causal dependencies and per-attempt publication evidence.
+- Strict whole-source preimage conflicts and owner-only observation artifacts,
+  plus delete-empty publication that preserves configured symlinks and watches.
+- Two-owner overlay views and detached editors, with declared merge/difference
+  policies, selected asynchronous leases, frozen revision/intent fences and
+  truthful save/refresh receipts. Conflicts retain the editor's dirty preview.
+- Generic schema-compiled full-string `stringPattern` constraints, shared by
+  native/QML and every canonical default, raw, nested and editor producer.
+- Separate `sourceWarning` delivery for nonfatal authored projection diagnostics;
+  `sourceError` remains failures-only.
+
+### Changed
+
+- `ConfigDescriptor` is no longer an aggregate, to own compiled constraint metadata
+  safely. Default construction, factories and `ConfigDescriptor{Type::String}`
+  remain supported through the explicit type constructor.
+
+### Fixed
+
+- Unchanged source preflight preserves accepted pending-intent provenance instead
+  of inventing a foreign displayed generation.
+- Descriptor assignment captures nested source metadata before releasing its
+  owning subtree, including compiled String constraints.
+
 ## [0.1.0] — 2026-10-28
 
 ### Added
@@ -48,5 +83,6 @@
 - Native/QML quick starts, executable standalone examples, complete shipped
   contracts and technical release gates.
 
-[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/alexindigo/configqml/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/alexindigo/configqml/releases/tag/v0.1.0
