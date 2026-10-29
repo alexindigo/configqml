@@ -18,6 +18,7 @@ public:
     bool stopped() const;
     void pollJoin();
     void reclaim(std::shared_ptr<const ConfigSnapshot> snapshot);
+    void acknowledgeModels(const QMap<ConfigPath, quint64> &generations);
     QString description() const;
     ConfigWorker *workerForTest() const { return m_worker; }
 signals:

@@ -13,14 +13,14 @@ class ConfigNamespace final : public QObject {
 public:
     ConfigNamespace(ConfigQmlStore *store, const ConfigDescriptor &descriptor, ConfigPath path,
                     QObject *parent)
-        : QObject(parent), m_store(store), m_path(std::move(path)) {
+        : QObject(parent), m_store(store), m_path(ownPath(path)) {
         QMetaObjectBuilder builder;
         builder.setClassName("ConfigQmlNamespace");
         builder.setSuperClass(&QObject::staticMetaObject);
         for (auto it = descriptor.fields.cbegin(); it != descriptor.fields.cend(); ++it) {
             const bool group = it->type == ConfigDescriptor::Type::Group;
             const auto childPath = m_path + ConfigPath{it.key()};
-            m_names.append(it.key());
+            m_names.append(ownString(it.key()));
             m_groups.append(group);
             m_children.append(group ? createConfigNamespace(store, it.value(), childPath, this)
                                     : nullptr);

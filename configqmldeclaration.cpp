@@ -28,6 +28,7 @@ ConfigDescriptor ConfigQmlValue::compile(QList<ConfigDiagnostic> &errors,
     d.nullable = nullable;
     d.sensitive = sensitive;
     d.forbidden = forbidden;
+    d.idField = idField;
     if (valueType == StringList)
         d.element = {ConfigDescriptor::leaf(T::String, QString())};
     else

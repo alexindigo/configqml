@@ -12,9 +12,10 @@ bool isNull(const QVariant &value) { return value.metaType().id() == QMetaType::
 ConfigPath ownPath(const ConfigPath &path) {
     ConfigPath out;
     for (const auto &key : path)
-        out.append(QString(key.constData(), key.size()));
+        out.append(ownString(key));
     return out;
 }
+QString ownString(const QString &value) { return QString(value.constData(), value.size()); }
 
 static ConfigValueResult capture(const QVariant &in, const ConfigPath &path, int depth) {
     auto fail = [&](const char *code) {
@@ -109,12 +110,12 @@ std::optional<QVariant> valueAt(const QVariantMap &tree, const ConfigPath &path)
 void putValue(QVariantMap &tree, const ConfigPath &path, const QVariant &value) {
     Q_ASSERT(!path.isEmpty());
     if (path.size() == 1) {
-        tree.insert(path.first(), value);
+        tree.insert(ownString(path.first()), value);
         return;
     }
     auto child = tree.value(path.first()).toMap();
     putValue(child, path.mid(1), value);
-    tree.insert(path.first(), child);
+    tree.insert(ownString(path.first()), child);
 }
 
 void removeValue(QVariantMap &tree, const ConfigPath &path) {
@@ -128,6 +129,6 @@ void removeValue(QVariantMap &tree, const ConfigPath &path) {
     auto child = tree.value(path.first()).toMap();
     removeValue(child, path.mid(1));
     // Empty namespaces are retained in raw data; they are not delete tokens.
-    tree.insert(path.first(), child);
+    tree.insert(ownString(path.first()), child);
 }
 } // namespace configqml

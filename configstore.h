@@ -2,6 +2,7 @@
 #pragma once
 #include "configresult.h"
 #include "configjsonbackend.h"
+#include "configlistmodel.h"
 #include <QObject>
 #include <QPointer>
 #include <QThread>
@@ -10,6 +11,7 @@
 
 namespace configqml {
 class ConfigWorker;
+class ConfigListModel;
 class ConfigWorkerOwner;
 struct ConfigWorkerPacket;
 class ConfigStoreTestAccess;
@@ -21,6 +23,7 @@ struct ConfigStoreOptions {
     int autoSaveInterval = 300;
     ConfigJsonBackend::FaultHook fileFault;
     QString storeId;
+    ConfigListModel::Numbers modelNumbers = ConfigListModel::Numbers::Native;
     // Native, worker-only admission. Never pass an engine-bound callback here.
     std::function<QString(const ConfigInput &)> admission;
 };
@@ -35,6 +38,7 @@ public:
     Status status() const { return m_status; }
     QString error() const { return m_error; }
     QVariant value(const ConfigPath &path) const;
+    QVariant presentation(const ConfigPath &path) const;
     ConfigPathState info(const ConfigPath &path) const;
     ConfigSnapshot snapshot() const {
         return m_admittedSnapshot ? *m_admittedSnapshot : ConfigSnapshot{};
@@ -42,19 +46,32 @@ public:
     QList<ConfigInput> inputs() const { return {m_inputs.cbegin(), m_inputs.cend()}; }
     QList<ConfigResult> failures() const { return {m_failures.cbegin(), m_failures.cend()}; }
     ConfigSchema schema() const { return m_schema; }
+    ConfigListModel *listModel(const ConfigPath &path) const;
+    ConfigListModel *keyedModel(const ConfigPath &path) const;
     bool canWriteUser(const ConfigPath &path) const;
     ConfigRequestHandle setUser(const ConfigPath &path, const QVariant &value,
-                                QObject *context = nullptr, Callback callback = {});
-    ConfigRequestHandle setRuntime(const ConfigPath &path, const QVariant &value,
-                                   QObject *context = nullptr, Callback callback = {});
+                                QObject *context = nullptr, Callback callback = {},
+                                ConfigDescriptor::Format format = ConfigDescriptor::Format::Native);
+    ConfigRequestHandle setUser(const ConfigAdmission &value, QObject *context = nullptr,
+                                Callback callback = {});
+    ConfigRequestHandle setRuntime(const ConfigAdmission &value, QObject *context = nullptr,
+                                   Callback callback = {});
+    ConfigRequestHandle initializeIfMissing(const ConfigAdmission &value,
+                                            QObject *context = nullptr, Callback callback = {});
+    ConfigRequestHandle
+    setRuntime(const ConfigPath &path, const QVariant &value, QObject *context = nullptr,
+               Callback callback = {},
+               ConfigDescriptor::Format format = ConfigDescriptor::Format::Native);
     ConfigRequestHandle reset(const ConfigPath &path, const QString &target,
                               QObject *context = nullptr, Callback callback = {});
     ConfigRequestHandle clearRuntime(const ConfigPath &path, QObject *context = nullptr,
                                      Callback callback = {});
     quint64 save(QObject *context = nullptr, Callback callback = {});
     quint64 reload(QObject *context = nullptr, Callback callback = {});
-    ConfigRequestHandle initializeIfMissing(const ConfigPath &path, const QVariant &value,
-                                            QObject *context = nullptr, Callback callback = {});
+    ConfigRequestHandle
+    initializeIfMissing(const ConfigPath &path, const QVariant &value, QObject *context = nullptr,
+                        Callback callback = {},
+                        ConfigDescriptor::Format format = ConfigDescriptor::Format::Native);
     quint64 flush(QObject *context = nullptr, Callback callback = {});
     quint64 close(QObject *context = nullptr, Callback callback = {});
 signals:
@@ -69,7 +86,9 @@ private:
     friend class ConfigWorker;
     friend class ConfigStoreTestAccess;
     ConfigRequestHandle write(ConfigInput::Kind kind, const ConfigPath &path, const QVariant &value,
-                              const QString &target, QObject *context, Callback callback);
+                              const QString &target, QObject *context, Callback callback,
+                              ConfigDescriptor::Format format = ConfigDescriptor::Format::Native,
+                              const ConfigAdmission *admission = nullptr);
     quint64 request(const QString &operation, QObject *context, Callback callback);
     quint64 registerRequest(QObject *context, Callback callback);
     void receive(const ConfigWorkerPacket &packet);
@@ -89,6 +108,7 @@ private:
     QString m_userLayerId;
     QString m_storeId;
     ConfigSnapshot m_cache;
+    mutable QMap<ConfigPath, QVariant> m_presentations;
     std::shared_ptr<const ConfigSnapshot> m_admittedSnapshot;
     Status m_status = Status::Loading;
     QString m_error;
@@ -100,6 +120,10 @@ private:
     QMap<quint64, ConfigResult> m_results;
     QList<ConfigInput> m_inputs;
     QList<ConfigResult> m_failures;
+    QMap<ConfigPath, std::shared_ptr<ConfigListModel>> m_models;
+    bool m_publishingModels = false;
     qint64 m_worstPublicationNanos = 0;
+    qint64 m_lastPlanningNanos = 0;
+    qint64 m_lastLibraryPublicationNanos = 0;
 };
 } // namespace configqml

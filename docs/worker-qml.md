@@ -184,7 +184,8 @@ atomic record nested edits and namespace leaf writes reach real setters. A QML
 `property var/list` copy, component copy or raw Repeater modelData is detached:
 edit it and assign it back to change the setting. No ordinary-copy apply API,
 save-time scan or hidden synchronization exists. Consumer detached-copy lint is
-separate tooling; read-only list models arrive in M4, explicit drafts in M5.
+separate tooling; [read-only collection models](models.md) provide protected
+display projections, and explicit drafts remain M5.
 Unknown dynamic JS properties are not admitted settings; explicit path APIs
 reject undeclared keys. Runtime schema leaves cannot all appear in static
 qmltypes, so dynamic consumers use a var handle; native facades supply static
@@ -197,5 +198,6 @@ with actual bindings for dynamic/native facades, an independent QML-only process
 that links no configqml library, Core-only dependency checks, and private-API
 isolation/exact-version checks. Timing reports worst GUI ingress and publication
 microseconds; it is characterization, not a promised full-shell 16 ms budget.
-File/watcher conflict behavior, models, drafts, profiles and installed-package
-compatibility remain the named downstream milestones.
+File/watcher conflict behavior and collection models are documented in
+[json-files.md](json-files.md) and [models.md](models.md). Drafts, profiles and
+installed-package compatibility remain the named downstream milestones.

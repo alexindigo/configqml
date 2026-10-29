@@ -23,6 +23,7 @@ struct ConfigValueResult {
 // Invalid QVariant is missing/undefined, nullptr is explicit null.
 ConfigValueResult ownValue(const QVariant &input, const ConfigPath &path = {});
 ConfigPath ownPath(const ConfigPath &path);
+QString ownString(const QString &value);
 bool isNull(const QVariant &value);
 bool startsWith(const ConfigPath &path, const ConfigPath &prefix);
 std::optional<QVariant> valueAt(const QVariantMap &tree, const ConfigPath &path);

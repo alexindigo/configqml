@@ -14,6 +14,8 @@ add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp
     configjsoncodec.cpp configjsoncodec.h configjsonbackend.cpp configjsonbackend.h
     configconsumer_p.h configresult.h configstore.h configstore.cpp configworker_p.h configworker.cpp
     configshutdown_p.h configshutdown.cpp)
+target_sources(configqml_core PRIVATE configprojection_p.h configprojection.cpp
+    configlistmodel.h configlistmodel.cpp)
 add_library(configqml::core ALIAS configqml_core)
 set_target_properties(configqml_core PROPERTIES EXPORT_NAME core)
 target_link_libraries(configqml_core PUBLIC Qt6::Core)
@@ -36,11 +38,13 @@ if(CONFIGQML_BUILD_QML)
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/configqml-qt-build.txt"
         "Core=${Qt6Core_VERSION}\nCorePrivate=${Qt6CorePrivate_VERSION}\nQml=${Qt6Qml_VERSION}\n")
     qt_policy(SET QTP0001 NEW)
+    qt_extract_metatypes(configqml_core)
     qt_add_qml_module(configqml SHARED URI ConfigQml VERSION 1.0
         OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/ConfigQml"
         SOURCES configqmldeclaration.h configqmldeclaration.cpp
             configqmlstore.h configqmlstore.cpp configqmlvalue.h configqmlvalue.cpp
             confignamespace.cpp configfacade.h configfacade.cpp)
+    target_sources(configqml PRIVATE configqmlmodel.h)
     add_library(configqml::configqml ALIAS configqml)
     target_link_libraries(configqml PUBLIC configqml::core Qt6::Qml PRIVATE Qt6::CorePrivate)
     target_include_directories(configqml PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
@@ -49,7 +53,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    find_package(Qt6 6.12 REQUIRED COMPONENTS Test)
+    find_package(Qt6 6.12 REQUIRED COMPONENTS Test Gui)
     add_executable(test_schema tests/test_schema.cpp)
     target_link_libraries(test_schema PRIVATE configqml::core Qt6::Test)
     add_test(NAME schema COMMAND test_schema)
@@ -71,6 +75,13 @@ if(BUILD_TESTING)
     add_executable(test_worker tests/test_worker.cpp)
     target_link_libraries(test_worker PRIVATE configqml::core Qt6::Test)
     add_test(NAME worker COMMAND test_worker)
+    add_executable(test_models tests/test_models.cpp)
+    target_link_libraries(test_models PRIVATE configqml::core Qt6::Test Qt6::Gui)
+    add_test(NAME models COMMAND test_models)
+    if(CMAKE_CXX_FLAGS MATCHES "fsanitize")
+        target_compile_definitions(test_models PRIVATE CONFIGQML_INSTRUMENTED_BUILD)
+    endif()
+    set_tests_properties(models PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_executable(file_writer tests/file_writer.cpp)
     target_link_libraries(file_writer PRIVATE configqml::core)
     add_executable(test_json_files tests/test_json_files.cpp)
@@ -81,6 +92,19 @@ if(BUILD_TESTING)
     target_link_libraries(test_consumer_lifetime PRIVATE configqml::core Qt6::Test)
     add_test(NAME consumer_lifetime COMMAND test_consumer_lifetime)
     if(CONFIGQML_BUILD_QML)
+        find_package(Qt6 6.12 REQUIRED COMPONENTS Quick)
+        add_executable(test_qml_models tests/test_qml_models.cpp)
+        target_link_libraries(test_qml_models PRIVATE configqml::configqml Qt6::Test Qt6::Quick)
+        target_compile_definitions(test_qml_models PRIVATE
+            QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
+            QML_MODEL_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_models.qml")
+        add_test(NAME qml_models COMMAND test_qml_models)
+        if(CMAKE_CXX_FLAGS MATCHES "fsanitize")
+            target_compile_definitions(test_qml_models PRIVATE CONFIGQML_INSTRUMENTED_BUILD)
+        endif()
+        set_tests_properties(qml_models PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QSG_RHI_BACKEND=software")
+        add_test(NAME models_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
+            -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_models.qml)
         add_executable(test_qml tests/test_qml.cpp)
         target_link_libraries(test_qml PRIVATE configqml::configqml Qt6::Test)
         target_compile_definitions(test_qml PRIVATE

@@ -35,8 +35,8 @@ ConfigLayers::ConfigLayers(const ConfigSchema &schema, const QList<ConfigLayer> 
                     m_errors.append(ConfigDiagnostic{source.prefix, "overlapping-sources"});
             sourceIds.insert(source.id);
             SourceState owned;
-            owned.source.id = source.id;
-            owned.source.prefix = source.prefix;
+            owned.source.id = ownString(source.id);
+            owned.source.prefix = ownPath(source.prefix);
             const auto result = admit(state, owned, source);
             // Schema-invalid input is retained as raw with diagnostics, not a broken store.
             if (!result.accepted && owned.errors.isEmpty())

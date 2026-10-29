@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configworker_p.h"
+#include <QElapsedTimer>
 #include "confignumber.h"
 #include <QDataStream>
 #include <QIODevice>
@@ -228,6 +229,24 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
             state.provenance.contributions != before.provenance.contributions) {
             packet.snapshot.values[path] = next;
             packet.snapshot.information[path] = state;
+            const auto descriptor = *m_options.schema.descriptor(path);
+            if (descriptor.type == ConfigDescriptor::Type::List ||
+                descriptor.type == ConfigDescriptor::Type::Map) {
+                auto &versions = m_modelVersions[path];
+                QElapsedTimer planningTimer;
+                planningTimer.start();
+                if (versions.isEmpty())
+                    versions[0] = {};
+                const auto rows = projectionRows(descriptor, next);
+                for (auto it = versions.cbegin(); it != versions.cend(); ++it) {
+                    auto plan = reconcileProjection(descriptor, it.value(), rows);
+                    plan.base = it.key();
+                    plan.generation = packet.snapshot.generation;
+                    packet.models[path][it.key()] = std::move(plan);
+                }
+                versions[packet.snapshot.generation] = rows;
+                packet.planningNanos += planningTimer.nsecsElapsed();
+            }
         }
         m_previous.values[path] = next;
         m_previous.information[path] = state;
@@ -236,6 +255,14 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
     m_previous.inputPrefix = m_prefix;
     packet.admitted = std::make_shared<const ConfigSnapshot>(m_previous);
     return packet;
+}
+void ConfigWorker::acknowledgeModels(const QMap<ConfigPath, quint64> &generations) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    for (auto it = generations.cbegin(); it != generations.cend(); ++it) {
+        auto &versions = m_modelVersions[it.key()];
+        auto end = versions.lowerBound(it.value());
+        versions.erase(versions.begin(), end);
+    }
 }
 void ConfigWorker::post(const ConfigWorkerPacket &packet) {
     if (m_holdReplies) {

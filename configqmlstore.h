@@ -4,6 +4,7 @@
 #include "configstore.h"
 #include <QJSValue>
 #include <QQmlParserStatus>
+#include <QAbstractItemModel>
 
 namespace configqml {
 class ConfigQmlStore : public QObject, public QQmlParserStatus {
@@ -43,6 +44,8 @@ public:
                               const QJSValue &callback = {});
     Q_INVOKABLE QString clearRuntime(const QStringList &path, const QJSValue &callback = {});
     Q_INVOKABLE QVariantMap info(const QStringList &path) const;
+    Q_INVOKABLE QAbstractItemModel *listModel(const QStringList &path);
+    Q_INVOKABLE QAbstractItemModel *keyedModel(const QStringList &path);
     Q_INVOKABLE QString save(const QJSValue &callback = {});
     Q_INVOKABLE QString reload(const QJSValue &callback = {});
     Q_INVOKABLE QString initializeIfMissing(const QStringList &path, const QVariant &value,
@@ -61,6 +64,7 @@ signals:
 private:
     ConfigStore::Callback callback(const QJSValue &function);
     void reject(const ConfigPath &path, const QString &code);
+    void raise(const QString &code);
     QPointer<ConfigQmlSchema> m_schema;
     QList<ConfigMemorySource *> m_sources;
     QPointer<ConfigStore> m_core;
@@ -68,6 +72,7 @@ private:
     QString m_error;
     bool m_complete = false;
     bool m_autoSave = true;
+    QMap<ConfigPath, QPointer<QAbstractItemModel>> m_models;
     int m_autoSaveInterval = 300;
 };
 QObject *createConfigNamespace(ConfigQmlStore *store, const ConfigDescriptor &descriptor,

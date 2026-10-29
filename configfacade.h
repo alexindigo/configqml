@@ -5,7 +5,8 @@
 
 namespace configqml {
 // Base for application-authored Q_PROPERTY classes. Properties forward through
-// these methods; no second value cache or persistence owner is introduced.
+// these methods; presentation caching stays with the store, without another
+// admission, value-resolution or persistence owner.
 class ConfigFacade : public QObject {
     Q_OBJECT
 public:
