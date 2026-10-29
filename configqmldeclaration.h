@@ -66,6 +66,7 @@ class ConfigQmlValue : public ConfigDeclaration {
     Q_PROPERTY(bool nullable MEMBER nullable)
     Q_PROPERTY(bool forbidden MEMBER forbidden)
     Q_PROPERTY(QString idField MEMBER idField)
+    Q_PROPERTY(QString stringPattern MEMBER stringPattern)
 public:
     enum ValueType {
         Boolean,
@@ -87,7 +88,7 @@ public:
     QVariant defaultValue;
     QVariantList choices;
     QVariant minimum, maximum;
-    QString idField;
+    QString idField, stringPattern;
     bool optional = false, nullable = false, forbidden = false;
     ConfigDescriptor compile(QList<ConfigDiagnostic> &errors,
                              const ConfigPath &path = {}) const override;

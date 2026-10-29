@@ -14,5 +14,6 @@
 | 10 | [Compatibility views](compatibility-views.md) | Source transforms, conditional fallback, source observations and raw-directed record-list editing |
 | 11 | [Retained groups](retained-groups.md) | Worker reservations, immutable captures, explicit retry and causal suffixes |
 | 12 | [Overlay editors](overlay-editors.md) | Live two-owner views, frozen previews, sparse overrides and selected asynchronous leases |
+| 13 | [String patterns](string-patterns.md) | Owned full-string constraints across canonical admission producers |
 
 The [examples](../examples/README.md) are executable installed consumers.

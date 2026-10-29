@@ -39,6 +39,7 @@ ConfigDescriptor ConfigQmlValue::compile(QList<ConfigDiagnostic> &errors,
     d.admissionPolicy = ConfigDescriptor::AdmissionPolicy(admissionPolicy);
     d.forbidden = forbidden;
     d.idField = idField;
+    d.stringPattern = ownString(stringPattern);
     if (valueType == StringList)
         d.element = {ConfigDescriptor::leaf(T::String, QString())};
     else

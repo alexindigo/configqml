@@ -19,6 +19,7 @@ private slots:
         const bool retained = QString(COMPAT_FIXTURE).endsWith("tst_retained_groups.qml");
         const bool strictEmpty = QString(COMPAT_FIXTURE).endsWith("tst_strict_empty.qml");
         const bool overlay = QString(COMPAT_FIXTURE).endsWith("tst_overlay_editor.qml");
+        const bool pattern = QString(COMPAT_FIXTURE).endsWith("tst_string_pattern.qml");
         const bool sourceEvents = QString(COMPAT_FIXTURE).endsWith("tst_source_events.qml");
         if (sourceEvents)
             QVERIFY(QDir().mkpath(dir.filePath("live")));
@@ -95,7 +96,7 @@ private slots:
                                   qPrintable(root->property("stage").toString()), 10000);
         QCOMPARE(root->property("failure").toString(), QString());
         QVERIFY(root->property("finished").toBool());
-        if (strictEmpty || overlay) {
+        if (strictEmpty || overlay || pattern) {
             if (strictEmpty) {
                 QVERIFY(!QFileInfo::exists(dir.filePath("user.json")));
                 QVERIFY(QFileInfo::exists(dir.filePath("user.json.lock")));
