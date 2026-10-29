@@ -20,6 +20,7 @@ struct ConfigSource {
     bool available = true;
     std::optional<bool> diskExists;
     bool localIntent = false;
+    bool pruneResetNamespaces = false; // Worker compiles JsonFileSource.deleteWhenEmpty here.
 };
 struct ConfigLayer {
     QString id;

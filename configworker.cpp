@@ -83,7 +83,10 @@ void ConfigWorker::initialize() {
     m_backend = std::make_unique<ConfigMemoryBackend>();
     if (!m_options.evidenceDirectory.isEmpty() &&
         (!QDir::isAbsolutePath(m_options.evidenceDirectory) ||
-         QDir::cleanPath(m_options.evidenceDirectory) != m_options.evidenceDirectory))
+         QDir::cleanPath(m_options.evidenceDirectory) != m_options.evidenceDirectory ||
+         (QFileInfo::exists(m_options.evidenceDirectory) &&
+          !QFileInfo(m_options.evidenceDirectory).isDir()) ||
+         QFileInfo(m_options.evidenceDirectory).isSymLink()))
         m_initializationError = "evidence-directory";
     QSet<ConfigPath> observed;
     for (const auto &path : m_options.observedPaths) {
@@ -130,7 +133,8 @@ void ConfigWorker::initialize() {
         state.sourceId = file.sourceId;
         state.path = file.path;
         m_sourceStates.append(state);
-        if (file.startupErrorPolicy == ConfigStartupErrorPolicy::SkipProjectionRetainError &&
+        if ((file.startupErrorPolicy == ConfigStartupErrorPolicy::SkipProjectionRetainError ||
+             file.conflictPolicy == ConfigConflictPolicy::StrictSourcePreimage) &&
             m_options.evidenceDirectory.isEmpty())
             m_initializationError = "evidence-directory";
         bool found = false;
@@ -139,6 +143,8 @@ void ConfigWorker::initialize() {
                 for (auto &source : layer.sources)
                     if (source.id == file.sourceId) {
                         found = true;
+                        if (file.deleteWhenEmpty && !layer.writable)
+                            m_initializationError = "empty-delete-readonly";
                         if (sourceIds.value(file.sourceId) != 1 ||
                             m_files.contains(file.sourceId) ||
                             paths.contains(m_json->path(file.sourceId)))
@@ -151,6 +157,7 @@ void ConfigWorker::initialize() {
                         source.raw.clear();
                         source.exists = false;
                         source.json = true;
+                        source.pruneResetNamespaces = file.deleteWhenEmpty;
                         if (file.watchMode == ConfigWatchMode::Off)
                             continue;
                         const auto id = m_json->submit(
@@ -193,6 +200,7 @@ void ConfigWorker::initialize() {
                         source.diskExists = read.revision.exists;
                         m_baselines[file.sourceId] = source.raw;
                         m_revisions[file.sourceId] = read.revision;
+                        m_sourceBytes[file.sourceId] = read.bytes;
                         m_json->confirm(file.sourceId, read.revision);
                     }
         if (!found)
@@ -277,6 +285,7 @@ bool ConfigWorker::inheritFailures(ConfigResult &result) const {
         if (result.error.empty())
             result.error = failure.error;
         result.publications.append(failure.publications);
+        result.evidence.append(failure.evidence);
         for (auto it = failure.coveredRevisions.cbegin(); it != failure.coveredRevisions.cend();
              ++it)
             result.coveredRevisions[it.key()] = it.value();
@@ -457,7 +466,7 @@ QString ConfigWorker::observeSource(const QString &id, const ConfigBackendResult
     for (auto &state : m_sourceStates) {
         if (state.sourceId != id)
             continue;
-        state.presence = read.success ? (read.revision.exists ? "present" : "absent")
+        state.presence = read.observedPresence ? (*read.observedPresence ? "present" : "absent")
                          : QFileInfo::exists(m_json->path(id)) ? "present"
                                                                : "unknown";
         state.load = !read.success           ? "io_error"
@@ -469,29 +478,53 @@ QString ConfigWorker::observeSource(const QString &id, const ConfigBackendResult
             state.revision = read.revision;
             state.quarantined = false;
         }
-        if (!m_options.evidenceDirectory.isEmpty()) {
-            ConfigEvidenceObservation observation;
-            observation.storeId = m_options.storeId;
-            observation.sourceId = id;
-            observation.phase = "read";
-            observation.presence = state.presence;
-            observation.bytesState =
-                read.success ? (read.revision.exists ? "available" : "absent") : "unavailable";
-            observation.role = startup ? "startup" : "foreign";
-            observation.bytes = read.bytes;
-            observation.revision = read.revision;
-            observation.observationOrder = ++m_observationOrder;
-            const auto evidence = retainEvidence(m_options.evidenceDirectory, observation);
-            if (evidence)
-                state.evidence.append(*evidence);
-            else {
-                if (m_initializationError.isEmpty())
-                    m_initializationError = "evidence-retention";
-                retentionError = "evidence-retention";
-            }
-        }
+    }
+    if (startup) {
+        retentionError = retainObservation(id, read, "read", "startup");
+        if (!retentionError.isEmpty() && m_initializationError.isEmpty())
+            m_initializationError = retentionError;
     }
     return retentionError;
+}
+QString ConfigWorker::retainObservation(const QString &id, const ConfigBackendResult &read,
+                                        const QString &phase, const QString &role,
+                                        const std::optional<ConfigCommand> &command,
+                                        ConfigResult *result) {
+    if (m_options.evidenceDirectory.isEmpty())
+        return {};
+    ConfigEvidenceObservation observation;
+    observation.storeId = m_options.storeId;
+    observation.sourceId = id;
+    observation.phase = phase;
+    observation.role = role;
+    observation.presence = read.observedPresence ? (*read.observedPresence ? "present" : "absent")
+                           : QFileInfo::exists(m_json->path(id)) ? "present"
+                                                                 : "unknown";
+    observation.bytesState = read.bytesAvailable                                ? "available"
+                             : read.observedPresence && !*read.observedPresence ? "absent"
+                                                                                : "unavailable";
+    observation.bytes = read.bytes;
+    observation.revision = read.revision;
+    observation.observationOrder = ++m_observationOrder;
+    if (command) {
+        observation.requestId =
+            command->requestId ? QString::number(command->requestId) : QString();
+        observation.groupToken = command->groupToken;
+        if (!command->groupToken.isEmpty())
+            observation.attemptId =
+                m_groups.value(command->groupToken).info.attempts.isEmpty()
+                    ? QString()
+                    : m_groups.value(command->groupToken).info.attempts.last().attemptId;
+    }
+    const auto reference = retainEvidence(m_options.evidenceDirectory, observation);
+    if (!reference)
+        return "evidence-retention";
+    for (auto &state : m_sourceStates)
+        if (state.sourceId == id)
+            state.evidence.append(*reference);
+    if (result)
+        result->evidence.append(*reference);
+    return {};
 }
 void ConfigWorker::acknowledgeModels(const QMap<ConfigPath, quint64> &generations) {
     Q_ASSERT(QThread::currentThread() == thread());
@@ -680,6 +713,7 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
     m_saveIntents.clear();
     m_saveBases.clear();
     m_saveRevisions.clear();
+    m_saveBytes.clear();
     m_recoveryRead = false;
     m_recoveryChecked.clear();
     m_recoveryWhole.clear();
@@ -720,6 +754,9 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
         m_saveRevisions[id] = command.groupToken.isEmpty()
                                   ? m_pendingRevisions.value(id, m_revisions.value(id))
                                   : m_groups.value(command.groupToken).revisions.value(id);
+        m_saveBytes[id] = command.groupToken.isEmpty()
+                              ? m_pendingBytes.value(id, m_sourceBytes.value(id))
+                              : m_groups.value(command.groupToken).bytes.value(id);
         if (command.groupToken.isEmpty())
             for (const auto &path : m_options.schema.leaves()) {
                 quint64 through = 0;
@@ -803,6 +840,20 @@ void ConfigWorker::continueSave() {
         }
     }
     if (m_files.contains(m_activeSource)) {
+        ConfigBackendResult original;
+        original.success = true;
+        original.revision = m_saveRevisions.value(m_activeSource);
+        original.bytes = m_saveBytes.value(m_activeSource);
+        original.observedPresence = original.revision.exists;
+        original.bytesAvailable = original.revision.exists;
+        auto retentionError = retainObservation(m_activeSource, original, "preflight", "original",
+                                                m_save, &m_saveResult);
+        if (!retentionError.isEmpty()) {
+            m_saveResult.status = "failed";
+            m_saveResult.error = {retentionError, m_activeSource, "preflight"};
+            continueSave();
+            return;
+        }
         QList<ConfigFileEdit> edits;
         for (const auto &intent : m_saveIntents.value(m_activeSource))
             edits.append(intent.edit);
@@ -813,8 +864,17 @@ void ConfigWorker::continueSave() {
             edits = {{{}, raw, false}};
         }
         auto transaction =
-            m_json->reconcile(m_activeSource, m_saveBases.value(m_activeSource), edits);
+            m_json->reconcile(m_activeSource, m_saveBases.value(m_activeSource), edits,
+                              ConfigSourcePreimage{m_saveRevisions.value(m_activeSource),
+                                                   m_saveBytes.value(m_activeSource)});
         const auto &outcome = transaction.outcome;
+        for (const auto &observation : transaction.observations) {
+            const auto error =
+                retainObservation(m_activeSource, observation.result, observation.phase,
+                                  observation.role, m_save, &m_saveResult);
+            if (!error.isEmpty())
+                retentionError = error;
+        }
         const QString state =
             outcome.publicationState == ConfigBackendResult::PublicationState::Known ? "known"
                                                                                      : "uncertain";
@@ -841,6 +901,10 @@ void ConfigWorker::continueSave() {
             m_saveResult.error = outcome.error;
             if (state == "uncertain")
                 m_saveResult.publicationState = state;
+        }
+        if (!retentionError.isEmpty()) {
+            m_saveResult.status = "failed";
+            m_saveResult.error = {retentionError, m_activeSource, "readback"};
         }
         armWatches();
         continueSave();
@@ -1005,8 +1069,11 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
             read.revision.exists ? codec.decode(read.bytes, it.key()) : ConfigDecodeResult{};
         ConfigError error = !read.success ? read.error : decoded.error;
         const auto retention = observeSource(it.key(), read, error, false);
-        if (!retention.isEmpty())
-            error = {retention, it.key(), "read"};
+        const auto retained =
+            retainObservation(it.key(), read, "read", read.success ? "foreign" : "late", command,
+                              result ? &*result : nullptr);
+        if (!retention.isEmpty() || !retained.isEmpty())
+            error = {"evidence-retention", it.key(), "read"};
         if (!read.revision.exists && !it->optional && error.empty())
             error = {"required-file-missing", it.key(), "read"};
         if (!error.empty()) {
@@ -1061,6 +1128,7 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
         source.localIntent = !m_intents.value(it.key()).isEmpty();
         replacements[route.layerId].append(source);
         m_revisions[it.key()] = admittedRevision;
+        m_sourceBytes[it.key()] = source.bytes;
         changed = true;
     }
     m_diskLayers->replaceAllSources(diskReplacements);
@@ -1082,7 +1150,7 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
         result->status = "failed";
         result->error = errors.first();
     }
-    if (changed || result) {
+    if (changed || result || !errors.isEmpty()) {
         if (changed) {
             m_acceptOrigin = "external";
             m_acceptCause = command ? "reload" : "watch";

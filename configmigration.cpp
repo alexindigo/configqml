@@ -95,8 +95,17 @@ bool ConfigWorker::migrateSources() {
         ConfigSource updated = migration.original;
         updated.raw = migration.transformed;
         if (m_files.contains(updated.id)) {
-            const auto transaction = m_json->reconcile(updated.id, migration.original.raw,
-                                                       {{{}, migration.transformed, false}});
+            const auto transaction = m_json->reconcile(
+                updated.id, migration.original.raw, {{{}, migration.transformed, false}},
+                ConfigSourcePreimage{
+                    {migration.original.diskExists.value_or(migration.original.exists),
+                     migration.original.revision},
+                    migration.original.bytes});
+            for (const auto &observation : transaction.observations)
+                if (!retainObservation(updated.id, observation.result, observation.phase,
+                                       observation.role, {}, &result)
+                         .isEmpty())
+                    return finish("evidence-retention", updated.id);
             const auto &outcome = transaction.outcome;
             const QString state =
                 outcome.publicationState == ConfigBackendResult::PublicationState::Known
@@ -113,6 +122,7 @@ bool ConfigWorker::migrateSources() {
             updated.revision = outcome.revision.token;
             m_baselines[updated.id] = transaction.raw;
             m_revisions[updated.id] = outcome.revision;
+            m_sourceBytes[updated.id] = outcome.bytes;
             result.coveredRevisions[updated.id] = outcome.revision;
         } else {
             // The memory backend's seed below is its initial confirmed publication.

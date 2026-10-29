@@ -198,6 +198,7 @@ void ConfigWorker::refreshDirty(const QString &source) {
     if (m_intents.value(source).isEmpty()) {
         m_dirty.remove(source);
         m_pendingRevisions.remove(source);
+        m_pendingBytes.remove(source);
     } else
         m_dirty[source] = prefix;
 }
@@ -225,8 +226,10 @@ void ConfigWorker::recordPersistentEdit(const ConfigRoute &route, const ConfigPa
                                         quint64 input, const ConfigLayers &before) {
     if (!route.valid())
         return;
-    if (!m_dirty.contains(route.sourceId))
+    if (!m_dirty.contains(route.sourceId)) {
         m_pendingRevisions[route.sourceId] = m_revisions.value(route.sourceId);
+        m_pendingBytes[route.sourceId] = m_sourceBytes.value(route.sourceId);
+    }
     const auto relative = path.mid(route.prefix.size());
     auto append = [&](const ConfigPath &absolute, const std::optional<QVariant> &v,
                       const std::optional<ConfigPath> &fence, bool prune) {
@@ -243,7 +246,8 @@ void ConfigWorker::recordPersistentEdit(const ConfigRoute &route, const ConfigPa
         std::function<void(const ConfigDescriptor &, const ConfigPath &, const QVariant &)> expand;
         expand = [&](const ConfigDescriptor &node, const ConfigPath &absolute,
                      const QVariant &original) {
-            if (node.type != ConfigDescriptor::Type::Group) {
+            if (node.type != ConfigDescriptor::Type::Group ||
+                (original.isValid() && original.metaType().id() != QMetaType::QVariantMap)) {
                 append(absolute, {}, relative, false);
                 return;
             }
@@ -256,8 +260,16 @@ void ConfigWorker::recordPersistentEdit(const ConfigRoute &route, const ConfigPa
             append(absolute, {}, relative, true);
         };
         expand(*descriptor, path, raw);
-    } else
+    } else {
         append(path, value, {}, false);
+        if (!value && m_files.value(route.sourceId).deleteWhenEmpty)
+            for (qsizetype n = path.size() - 1; n > route.prefix.size(); --n) {
+                const auto parent = path.mid(0, n);
+                const auto node = m_options.schema.descriptor(parent);
+                if (node && node->type == ConfigDescriptor::Type::Group)
+                    append(parent, {}, relative, true);
+            }
+    }
     refreshDirty(route.sourceId);
 }
 void ConfigWorker::recordPersistent(const ConfigInput &input, const ConfigLayers &before) {
@@ -290,12 +302,15 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
     m_baselines[id] = raw;
     m_revisions[id] = outcome.revision;
     m_pendingRevisions[id] = outcome.revision;
+    m_sourceBytes[id] = outcome.bytes;
+    m_pendingBytes[id] = outcome.bytes;
     for (auto &capture : m_groups)
         if (capture.bases.contains(id)) {
             if (capture.info.groupToken == m_save.groupToken)
                 capture.confirmedRevisions[id] = outcome.revision;
             capture.bases[id] = raw;
             capture.revisions[id] = outcome.revision;
+            capture.bytes[id] = outcome.bytes;
             capture.intents[id].subtract(ids);
             if (capture.uncertain.contains(id)) {
                 if (capture.info.groupToken == m_save.groupToken) {
@@ -327,6 +342,8 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
 }
 bool ConfigWorker::recoverOwnPublication(const QString &source, const ConfigBackendResult &read) {
     QString error;
+    if (m_files.contains(source))
+        error = retainObservation(source, read, "readback", "late", m_save, &m_saveResult);
     for (const auto &capture : m_groups)
         if (capture.uncertain.contains(source) &&
             (!read.success || capture.uncertain.value(source) != read.revision ||
@@ -344,6 +361,7 @@ bool ConfigWorker::recoverOwnPublication(const QString &source, const ConfigBack
                                               : decodeMemoryValue(read.bytes);
     m_saveBases[source] = raw;
     m_saveRevisions[source] = read.revision;
+    m_saveBytes[source] = read.bytes;
     m_recoveryWhole.insert(source);
     return true;
 }
@@ -518,12 +536,22 @@ void ConfigWorker::retainedGroupCommand(const ConfigCommand &command) {
                     capture.bases[source.key()] = m_baselines.value(source.key());
                     capture.revisions[source.key()] =
                         m_pendingRevisions.value(source.key(), m_revisions.value(source.key()));
+                    capture.bytes[source.key()] =
+                        m_pendingBytes.value(source.key(), m_sourceBytes.value(source.key()));
                 }
-        for (const auto &path : leaves)
+        for (const auto &path : leaves) {
+            const auto id = m_layers->info(path).route.sourceId;
+            if (!capture.bases.contains(id)) {
+                capture.bases[id] = m_baselines.value(id);
+                capture.revisions[id] = m_pendingRevisions.value(id, m_revisions.value(id));
+                capture.bytes[id] = m_pendingBytes.value(id, m_sourceBytes.value(id));
+            }
             capture.info.coverage.append({path, m_layers->info(path).route.sourceId,
                                           m_pathInputs.value(path), m_pathIntents.value(path)});
+        }
         capture.originalBases = capture.bases;
         capture.originalRevisions = capture.revisions;
+        capture.originalBytes = capture.bytes;
         m_groups.insert(token, capture);
         m_groupKeys.insert(options.requestKey, token);
         result.status = "retained";
@@ -556,6 +584,8 @@ void ConfigWorker::retainedGroupCommand(const ConfigCommand &command) {
         capture.uncertainBytes.clear();
         capture.originalBases.clear();
         capture.originalRevisions.clear();
+        capture.bytes.clear();
+        capture.originalBytes.clear();
         result.status = "released";
         post(publish(result));
         return;

@@ -123,7 +123,9 @@ void ConfigQmlStore::componentComplete() {
                 errors.append(m_diagnostics.make(source->prefix, "invalid-json-source"));
             options.jsonFiles.append({source->layerId, source->sourceId, file->path, file->optional,
                                       ConfigWatchMode(file->watchMode),
-                                      ConfigStartupErrorPolicy(file->startupErrorPolicy)});
+                                      ConfigStartupErrorPolicy(file->startupErrorPolicy),
+                                      ConfigConflictPolicy(file->conflictPolicy),
+                                      file->deleteWhenEmpty});
         }
     }
     if (!errors.isEmpty()) {

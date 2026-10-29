@@ -126,11 +126,15 @@ class ConfigJsonFileSource : public ConfigMemorySource {
     Q_PROPERTY(WatchMode watchMode MEMBER watchMode)
     Q_PROPERTY(QString fallbackFor MEMBER fallbackFor)
     Q_PROPERTY(StartupErrorPolicy startupErrorPolicy MEMBER startupErrorPolicy)
+    Q_PROPERTY(ConflictPolicy conflictPolicy MEMBER conflictPolicy)
+    Q_PROPERTY(bool deleteWhenEmpty MEMBER deleteWhenEmpty)
 public:
     enum WatchMode { Off, StartupSnapshot, Live };
     Q_ENUM(WatchMode)
     enum StartupErrorPolicy { FailReady, SkipProjectionRetainError };
     Q_ENUM(StartupErrorPolicy)
+    enum ConflictPolicy { PathIntent, StrictSourcePreimage };
+    Q_ENUM(ConflictPolicy)
     explicit ConfigJsonFileSource(QObject *parent = nullptr) : ConfigMemorySource(parent) {
         sourceId = "json";
     }
@@ -139,6 +143,8 @@ public:
     WatchMode watchMode = StartupSnapshot;
     QString fallbackFor;
     StartupErrorPolicy startupErrorPolicy = FailReady;
+    ConflictPolicy conflictPolicy = PathIntent;
+    bool deleteWhenEmpty = false;
 };
 class ConfigQmlProjection : public QObject {
     Q_OBJECT

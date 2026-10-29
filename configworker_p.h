@@ -72,6 +72,7 @@ struct ConfigRetainedCapture {
     QMap<QString, QByteArray> uncertainBytes;
     QMap<QString, QVariantMap> originalBases;
     QMap<QString, ConfigRevision> originalRevisions;
+    QMap<QString, QByteArray> bytes, originalBytes;
     QList<ConfigResult> receipts;
     QMap<QString, ConfigRevision> confirmedRevisions;
 };
@@ -123,6 +124,10 @@ private:
     QString quarantined(const ConfigPath &path) const;
     QString observeSource(const QString &id, const ConfigBackendResult &read,
                           const ConfigError &error, bool startup);
+    QString retainObservation(const QString &id, const ConfigBackendResult &read,
+                              const QString &phase, const QString &role,
+                              const std::optional<ConfigCommand> &command = {},
+                              ConfigResult *result = nullptr);
     void retainedGroupCommand(const ConfigCommand &command);
     void recordPersistent(const ConfigInput &input, const ConfigLayers &before);
     void recordPersistentEdit(const ConfigRoute &route, const ConfigPath &path,
@@ -161,6 +166,7 @@ private:
     QMap<QString, ConfigRetainedCapture> m_groups;
     QMap<QString, QString> m_groupKeys;
     QMap<QString, ConfigRevision> m_pendingRevisions;
+    QMap<QString, QByteArray> m_sourceBytes, m_pendingBytes, m_saveBytes;
     QMap<QString, QList<ConfigPendingIntent>> m_saveIntents;
     QMap<QString, QVariantMap> m_saveBases;
     QMap<QString, ConfigRevision> m_saveRevisions;

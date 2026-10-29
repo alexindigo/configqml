@@ -665,6 +665,16 @@ ConfigWriteResult ConfigLayers::erase(const ConfigPath &path, const QString &lay
                 source.source.raw.clear();
             else
                 removeValue(source.source.raw, path.mid(prefix.size()));
+            if (!runtime && source.source.pruneResetNamespaces)
+                for (qsizetype n = path.size() - 1; n > prefix.size(); --n) {
+                    const auto parent = path.mid(0, n);
+                    const auto descriptor = m_schema.descriptor(parent);
+                    const auto rawPath = parent.mid(prefix.size());
+                    const auto raw = valueAt(source.source.raw, rawPath);
+                    if (descriptor && descriptor->type == ConfigDescriptor::Type::Group && raw &&
+                        raw->metaType().id() == QMetaType::QVariantMap && raw->toMap().isEmpty())
+                        removeValue(source.source.raw, rawPath);
+                }
             for (auto it = source.admitted.begin(); it != source.admitted.end();)
                 if (startsWith(it.key(), path))
                     it = source.admitted.erase(it);
