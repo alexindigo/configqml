@@ -16,7 +16,7 @@ add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp
     configshutdown_p.h configshutdown.cpp)
 target_sources(configqml_core PRIVATE configprojection_p.h configprojection.cpp
     configlistmodel.h configlistmodel.cpp configdraft.h configdraft.cpp configgroup.cpp
-    configstorehandle.h configstorehandle.cpp configmigration.cpp)
+    configstorehandle.h configstorehandle.cpp configmigration.cpp configjsonbackup.cpp)
 add_library(configqml::core ALIAS configqml_core)
 set_target_properties(configqml_core PROPERTIES EXPORT_NAME core)
 target_link_libraries(configqml_core PUBLIC Qt6::Core)

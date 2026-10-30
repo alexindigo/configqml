@@ -13,6 +13,9 @@
 #include <QElapsedTimer>
 #include <atomic>
 #include <QSemaphore>
+#include <QDir>
+#include <QProcess>
+#include <sys/stat.h>
 using namespace configqml;
 using D = ConfigDescriptor;
 using T = D::Type;
@@ -379,6 +382,253 @@ private slots:
         ConfigStore reopened(o);
         QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);
         QCOMPARE(reopened.value({"a", "n"}).toInt(), 7);
+    }
+    void privateBackupAtCreation_data() {
+        QTest::addColumn<bool>("reload");
+        QTest::newRow("startup-symlink") << false;
+        QTest::newRow("reload-symlink") << true;
+    }
+    void privateBackupAtCreation() {
+        QFETCH(bool, reload);
+        QTemporaryDir dir;
+        QVERIFY(QFile::setPermissions(
+            dir.path(), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner | QFile::ReadGroup |
+                            QFile::ExeGroup | QFile::ReadOther | QFile::ExeOther));
+        const QByteArray original = "{\"old\":7,\"synthetic-private\":true}";
+        const auto target = dir.filePath("target.json");
+        const auto configured = dir.filePath("a.json");
+        writeFile(target, reload ? QByteArray("{\"n\":1,\"_configqmlVersion\":1}") : original);
+        QVERIFY(QFile::link(target, configured));
+        auto o = options(dir.path());
+        o.schema =
+            ConfigSchema(*o.schema.descriptor({}), 1, {{0, [](const QVariantMap &input) {
+                                                            auto raw = input;
+                                                            raw["n"] = raw.take("old");
+                                                            return ConfigValueResult{raw, {}};
+                                                        }}});
+        auto entered = std::make_shared<QSemaphore>();
+        auto release = std::make_shared<QSemaphore>();
+        auto stage = std::make_shared<QString>();
+        o.fileFault = [entered, release, stage](const QString &phase, const QString &path) {
+            if (phase == "backup-created") {
+                *stage = path;
+                entered->release();
+                if (!release->tryAcquire(1, 10000))
+                    return QString("test-timeout");
+            }
+            return QString();
+        };
+        const auto mask = ::umask(0022);
+        ConfigStore store(o);
+        if (reload) {
+            QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+            writeFile(target, original);
+            store.reload();
+        }
+        const bool paused = entered->tryAcquire(1, 5000);
+        ::umask(mask);
+        if (!paused)
+            release->release();
+        QVERIFY(paused);
+        struct stat state{};
+        const auto statResult = ::stat(QFile::encodeName(*stage).constData(), &state);
+        // Actually open as another UID, with a readable source as the traversal control.
+        const auto otherUidRead = [](const QString &file) {
+            QProcess child;
+            // Enter the fixture before dropping privileges: a tester's private home
+            // must not make the source traversal control a false permission denial.
+            child.start("sudo", {"-n", "--", "python3", "-c",
+                                 "import os,sys; os.chdir(sys.argv[1]); os.setgroups([]); "
+                                 "os.setgid(65534); os.setuid(65534); "
+                                 "os.close(os.open(sys.argv[2], os.O_RDONLY))",
+                                 QFileInfo(file).absolutePath(), QFileInfo(file).fileName()});
+            if (!child.waitForFinished(5000))
+                return -1;
+            return child.exitCode();
+        };
+        const auto sourceRead = otherUidRead(target);
+        const auto privateRead = otherUidRead(*stage);
+        const auto empty = readFile(*stage).isEmpty();
+        const auto finalAbsent = !QFile::exists(target + ".configqml-v0.bak");
+        release->release(); // Always release before assertions, including failure paths.
+        QCOMPARE(statResult, 0);
+        QCOMPARE(state.st_mode & 0777, mode_t(0600));
+        QCOMPARE(sourceRead, 0);
+        QCOMPARE(privateRead, 1);
+        QVERIFY(empty);
+        QVERIFY(finalAbsent);
+        QTRY_VERIFY(QFile::exists(target + ".configqml-v0.bak"));
+        QCOMPARE(readFile(target + ".configqml-v0.bak"), original);
+        QTRY_COMPARE(store.value({"a", "n"}).toInt(), 7);
+        QVERIFY(QFileInfo(configured).isSymLink());
+        QVERIFY(!QFile::exists(configured + ".configqml-v0.bak"));
+    }
+    void backupFailuresAndDurability_data() {
+        QTest::addColumn<QString>("phase");
+        QTest::addColumn<bool>("reload");
+        for (const auto &phase : {"backup-create", "backup-write", "backup-flush",
+                                  "backup-file-sync", "backup-publish", "backup-directory-sync"})
+            for (bool reload : {false, true})
+                QTest::newRow((QByteArray(phase) + (reload ? "-reload" : "-startup")).constData())
+                    << QString(phase) << reload;
+    }
+    void backupFailuresAndDurability() {
+        QFETCH(QString, phase);
+        QFETCH(bool, reload);
+        QTemporaryDir dir;
+        const QByteArray original = "{\"old\":7,\"padding\":\"" + QByteArray(40000, 'x') + "\"}";
+        const auto file = dir.filePath("a.json");
+        const auto backup = file + ".configqml-v0.bak";
+        writeFile(file, reload ? QByteArray("{\"n\":1,\"_configqmlVersion\":1}") : original);
+        auto o = options(dir.path());
+        o.schema =
+            ConfigSchema(*o.schema.descriptor({}), 1, {{0, [](const QVariantMap &input) {
+                                                            auto raw = input;
+                                                            raw["n"] = raw.take("old");
+                                                            return ConfigValueResult{raw, {}};
+                                                        }}});
+        auto calls = std::make_shared<int>(0);
+        auto stage = std::make_shared<QString>();
+        auto partial = std::make_shared<bool>(false);
+        o.fileFault = [phase, calls, stage, partial](const QString &step, const QString &path) {
+            if (step == "backup-created")
+                *stage = path;
+            if (step != phase)
+                return QString();
+            // Fail after a written prefix, exercising removal of incomplete staging.
+            if (step == "backup-write" && ++*calls <= 2)
+                return QString();
+            if (step == "backup-write") {
+                const auto prefix = readFile(*stage);
+                *partial = !prefix.isEmpty() && prefix.size() < 40000;
+            }
+            return QString("injected-") + phase;
+        };
+        {
+            ConfigStore store(o);
+            QSignalSpy results(&store, &ConfigStore::migrationCompleted);
+            if (reload) {
+                QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+                results.clear();
+                writeFile(file, original);
+                QCOMPARE(request(store, [&] { return store.reload(); }).status, QString("failed"));
+                QCOMPARE(store.value({"a", "n"}).toInt(), 1);
+            } else
+                QTRY_COMPARE(store.status(), ConfigStore::Status::Error);
+            QCOMPARE(results.size(), 1);
+            QCOMPARE(results[0][0].value<ConfigResult>().error.code, "injected-" + phase);
+            QCOMPARE(readFile(file), original);
+            if (phase == "backup-write")
+                QVERIFY(*partial);
+            if (phase == "backup-directory-sync")
+                QCOMPARE(readFile(backup), original); // Complete published evidence is retained.
+            else
+                QVERIFY(!QFile::exists(backup));
+            QCOMPARE(QDir(dir.path()).entryList({"*.stage"}, QDir::Files | QDir::Hidden).size(), 0);
+        }
+        o.fileFault = {};
+        ConfigStore retry(o);
+        QTRY_COMPARE(retry.status(), ConfigStore::Status::Ready);
+        QCOMPARE(retry.value({"a", "n"}).toInt(), 7);
+        QCOMPARE(readFile(backup), original);
+    }
+    void backupOrderingAndExistingEvidence_data() {
+        QTest::addColumn<int>("existing");
+        QTest::newRow("new") << 0;
+        QTest::newRow("reused") << 1;
+        QTest::newRow("conflict") << 2;
+        QTest::newRow("publication-race") << 3;
+        QTest::newRow("reuse-sync-failure") << 4;
+        QTest::newRow("reuse-file-sync-failure") << 5;
+    }
+    void backupOrderingAndExistingEvidence() {
+        QFETCH(int, existing);
+        QTemporaryDir dir;
+        const auto file = dir.filePath("a.json");
+        const auto backup = file + ".configqml-v0.bak";
+        const QByteArray original = "{\"n\":7}";
+        const QByteArray conflict = "preserve-existing-evidence";
+        writeFile(file, original);
+        if (existing == 1 || existing == 2 || existing >= 4) {
+            writeFile(backup, existing == 2 ? conflict : original);
+            QVERIFY(QFile::setPermissions(backup, QFile::ReadOwner | QFile::WriteOwner));
+        }
+        auto o = options(dir.path());
+        o.schema =
+            ConfigSchema(*o.schema.descriptor({}), 1,
+                         {{0, [](const QVariantMap &raw) { return ConfigValueResult{raw, {}}; }}});
+        auto trace = std::make_shared<QStringList>();
+        o.fileFault = [trace, backup, conflict, existing](const QString &phase, const QString &) {
+            trace->append(phase);
+            if (existing == 3 && phase == "backup-publish")
+                writeFile(backup, conflict);
+            if (existing == 4 && phase == "backup-directory-sync")
+                return QString("injected-reuse-sync");
+            if (existing == 5 && phase == "backup-file-sync")
+                return QString("injected-reuse-sync");
+            return QString();
+        };
+        ConfigStore store(o);
+        QSignalSpy results(&store, &ConfigStore::migrationCompleted);
+        QTRY_VERIFY(store.status() != ConfigStore::Status::Loading);
+        QCOMPARE(results.size(), 1);
+        if (existing >= 2) {
+            QCOMPARE(store.status(), ConfigStore::Status::Error);
+            QCOMPARE(readFile(file), original);
+            QCOMPARE(readFile(backup), existing >= 4 ? original : conflict);
+            QCOMPARE(results[0][0].value<ConfigResult>().error.code,
+                     existing >= 4 ? QString("injected-reuse-sync")
+                                   : QString("migration-backup-conflict"));
+            QVERIFY(!trace->contains("rename"));
+        } else {
+            QCOMPARE(store.status(), ConfigStore::Status::Ready);
+            QCOMPARE(readFile(backup), original);
+            const auto sync = trace->indexOf("backup-file-sync");
+            const auto directory = trace->indexOf("backup-directory-sync");
+            const auto rename = trace->indexOf("rename");
+            QVERIFY(sync >= 0 && directory > sync && rename > directory);
+            if (existing == 0) {
+                QVERIFY(trace->indexOf("backup-flush") < sync);
+                QVERIFY(trace->indexOf("backup-publish") > sync);
+                QVERIFY(trace->indexOf("backup-publish") < directory);
+            }
+        }
+    }
+    void backupCleanupFailureReportsOwnedStaging() {
+        QTemporaryDir dir;
+        const auto file = dir.filePath("a.json");
+        const auto backup = file + ".configqml-v0.bak";
+        const QByteArray original = "{\"n\":7}";
+        writeFile(file, original);
+        const auto orphan = dir.filePath(".unrelated.stage");
+        writeFile(orphan, "pre-existing-staging-evidence");
+        auto o = options(dir.path());
+        o.schema =
+            ConfigSchema(*o.schema.descriptor({}), 1,
+                         {{0, [](const QVariantMap &raw) { return ConfigValueResult{raw, {}}; }}});
+        o.fileFault = [](const QString &phase, const QString &) {
+            return phase == "backup-flush" || phase == "backup-cleanup" ? "injected-" + phase
+                                                                        : QString();
+        };
+        {
+            ConfigStore store(o);
+            QSignalSpy results(&store, &ConfigStore::migrationCompleted);
+            QTRY_COMPARE(store.status(), ConfigStore::Status::Error);
+            QCOMPARE(results.size(), 1);
+            const auto error = results[0][0].value<ConfigResult>().error;
+            QCOMPARE(error.code, QString("injected-backup-cleanup"));
+            QCOMPARE(error.operation, QString("backup-cleanup"));
+            QVERIFY(error.file.endsWith(".stage"));
+            QVERIFY(error.file != orphan);
+            QVERIFY(QFile::exists(error.file));
+            QCOMPARE(readFile(file), original);
+            QVERIFY(!QFile::exists(backup));
+        }
+        o.fileFault = {};
+        ConfigStore retry(o);
+        QTRY_COMPARE(retry.status(), ConfigStore::Status::Ready);
+        QCOMPARE(readFile(backup), original);
+        QCOMPARE(readFile(orphan), QByteArray("pre-existing-staging-evidence"));
     }
     void migrationFailureKeepsOriginal_data() {
         QTest::addColumn<bool>("ioFailure");

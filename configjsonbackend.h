@@ -33,6 +33,7 @@ public:
     std::optional<ConfigBackendResult> take(quint64 requestId) override;
     ConfigJsonTransaction reconcile(const QString &sourceId, const QVariantMap &baseline,
                                     const QList<ConfigFileEdit> &edits);
+    ConfigError preserveBackup(const QString &sourceId, int version, const QByteArray &original);
     bool changed(const QString &sourceId) const;
     void confirm(const QString &sourceId, const ConfigRevision &revision);
     QString path(const QString &sourceId) const;

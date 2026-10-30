@@ -75,6 +75,16 @@ covered revisions and per-route/partial/uncertain outcomes. Transform failure
 leaves original files unchanged; publication/readback failures retain backups and
 report what actually reached disk. Multi-file atomicity is not promised.
 
+The worker-owned JSON backend exclusively creates private 0600 same-directory
+staging from its first open, writes the complete original bytes, flushes and syncs
+the file, then publishes the backup name atomically without replacing evidence.
+It syncs the parent directory before any source replacement. Exact, private regular
+backups reused on retry cross the same file and directory sync barriers. A failed
+unpublished attempt removes only its owned staging; cleanup failures report that
+staging path. Complete published backups survive all subsequent failures. Existing
+conflicting or non-private evidence is refused unchanged. These local-filesystem
+ordering guarantees do not claim universal power-loss safety.
+
 Explicit/live reloads run that same migration owner before admission. Old-version
 foreign data cannot be migrated over outstanding local edits: that case reports
 `migration-pending-intent`, retaining the old baseline and pending work. An

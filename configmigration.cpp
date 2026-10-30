@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configworker_p.h"
 #include "confignumber.h"
-#include <QFile>
-#include <QFileInfo>
-#include <unistd.h>
 
 namespace configqml {
 bool ConfigWorker::migrateSources() {
@@ -24,7 +21,8 @@ bool ConfigWorker::migrateSources() {
         if (!code.isEmpty()) {
             m_initializationError = code;
             result.status = "failed";
-            result.error = {code, id, "migration", m_json->path(id)};
+            if (result.error.empty())
+                result.error = {code, id, "migration", m_json->path(id)};
             if (!result.coveredRevisions.isEmpty())
                 result.publicationState = "partial";
         } else
@@ -87,20 +85,10 @@ bool ConfigWorker::migrateSources() {
     for (const auto &migration : planned) {
         if (!m_files.contains(migration.original.id))
             continue;
-        const auto target = QFileInfo(m_json->path(migration.original.id)).canonicalFilePath();
-        if (target.isEmpty())
-            return finish("migration-target", migration.original.id);
-        const auto backupPath = target + QString(".configqml-v%1.bak").arg(migration.fromVersion);
-        QFile backup(backupPath);
-        if (backup.exists()) {
-            if (!backup.open(QIODevice::ReadOnly) || backup.readAll() != migration.original.bytes)
-                return finish("migration-backup-conflict", migration.original.id);
-        } else {
-            if (!backup.open(QIODevice::WriteOnly | QIODevice::NewOnly) ||
-                !backup.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner) ||
-                backup.write(migration.original.bytes) != migration.original.bytes.size() ||
-                !backup.flush() || ::fsync(backup.handle()) != 0)
-                return finish("migration-backup", migration.original.id);
+        result.error = m_json->preserveBackup(migration.original.id, migration.fromVersion,
+                                              migration.original.bytes);
+        if (!result.error.empty()) {
+            return finish(result.error.code, migration.original.id);
         }
     }
     for (const auto &migration : planned) {
