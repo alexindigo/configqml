@@ -1,5 +1,5 @@
 # Maintainer: Alex Indigo <ai at aegis dot one>
-# Rebuild on Qt minor bumps: the QML metadata adapter uses private QtCore API.
+# Rebuild and reverify the private adapter gate before changing the Qt version.
 
 pkgname=qt6-configqml
 _projname=configqml
@@ -9,7 +9,7 @@ pkgdesc="Layered configuration for Qt and QML"
 arch=('x86_64')
 url="https://github.com/alexindigo/configqml"
 license=('LGPL-3.0-or-later')
-depends=('qt6-base' 'qt6-declarative' 'libgcc' 'libstdc++' 'glibc')
+depends=('qt6-base=6.12.0' 'qt6-declarative=6.12.0' 'libgcc' 'libstdc++' 'glibc')
 makedepends=('cmake' 'ninja')
 provides=("qt6-configqml=${pkgver}")
 conflicts=('qt6-configqml-git')

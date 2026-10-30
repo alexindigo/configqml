@@ -163,6 +163,16 @@ if(BUILD_TESTING)
         get_target_property(_qmllint Qt6::qmllint IMPORTED_LOCATION)
         get_filename_component(_qt_tools_dir "${_qmllint}" DIRECTORY)
         find_program(_qml NAMES qml qml6 HINTS "${_qt_tools_dir}" REQUIRED NO_DEFAULT_PATH)
+        execute_process(COMMAND "${_qtpaths}" --query QT_INSTALL_PLUGINS
+            OUTPUT_VARIABLE _qt_plugins OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+        # Host tools can come from another prefix; the loader needs the Qt we link.
+        get_target_property(_qt_core_library Qt6::Core IMPORTED_LOCATION)
+        if(NOT _qt_core_library)
+            get_target_property(_qt_core_configs Qt6::Core IMPORTED_CONFIGURATIONS)
+            list(GET _qt_core_configs 0 _qt_core_config)
+            get_target_property(_qt_core_library Qt6::Core "IMPORTED_LOCATION_${_qt_core_config}")
+        endif()
+        get_filename_component(_qt_runtime_libs "${_qt_core_library}" DIRECTORY)
         configure_file(tests/installed_prefix.cmake.in installed_prefix.cmake @ONLY)
         add_test(NAME installed_prefix COMMAND ${CMAKE_COMMAND}
             -P ${CMAKE_CURRENT_BINARY_DIR}/installed_prefix.cmake)

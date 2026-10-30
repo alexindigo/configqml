@@ -44,10 +44,47 @@ foreach(required "${includedir}/configstore.h" "${cmakedir}/configqmlConfig.cmak
         message(FATAL_ERROR "Missing installed artifact: ${required}")
     endif()
 endforeach()
+# Supplying the prefix's libdir below must not mask broken installed RPATHs.
+if(NOT "@CMAKE_SKIP_RPATH@")
+    foreach(library configqml configqml_core)
+        file(READ_ELF "${libdir}/@CMAKE_SHARED_LIBRARY_PREFIX@${library}@CMAKE_SHARED_LIBRARY_SUFFIX@"
+            RPATH rpath RUNPATH runpath)
+        if(NOT "${rpath}${runpath}" STREQUAL "$ORIGIN")
+            message(FATAL_ERROR "Unexpected installed ${library} RPATH: ${rpath}${runpath}")
+        endif()
+    endforeach()
+    file(READ_ELF "${module}/@CMAKE_SHARED_MODULE_PREFIX@configqmlplugin@CMAKE_SHARED_MODULE_SUFFIX@"
+        RPATH rpath RUNPATH runpath)
+    if(NOT "${rpath}${runpath}" STREQUAL "$ORIGIN/@_plugin_to_lib@")
+        message(FATAL_ERROR "Unexpected installed plugin RPATH: ${rpath}${runpath}")
+    endif()
+endif()
 file(COPY "@CMAKE_CURRENT_SOURCE_DIR@/examples/" DESTINATION "${root}/examples")
-set(clean "@CMAKE_COMMAND@" -E env --unset=LD_LIBRARY_PATH --unset=QML_IMPORT_PATH
-    --unset=QML2_IMPORT_PATH --unset=CMAKE_PREFIX_PATH --unset=configqml_DIR
-    QT_FORCE_STDERR_LOGGING=1)
+# The staged libraries take precedence even if system Qt shares a directory
+# with another installed configqml. Only the discovered Qt may supplement them.
+# Never retain inherited loader/import paths: those can hide build-tree leaks.
+set(clean "@CMAKE_COMMAND@" -E env --unset=QML2_IMPORT_PATH
+    --unset=CMAKE_PREFIX_PATH --unset=configqml_DIR
+    "LD_LIBRARY_PATH=${libdir}:@_qt_runtime_libs@" "QML_IMPORT_PATH=@_qt_qml@"
+    "QT_PLUGIN_PATH=@_qt_plugins@" QT_FORCE_STDERR_LOGGING=1)
+foreach(mode optional required default)
+    foreach(unavailable TRUE FALSE)
+        execute_process(COMMAND ${clean} "@CMAKE_COMMAND@"
+            -S "@CMAKE_CURRENT_SOURCE_DIR@/tests/package_components"
+            -B "${root}/components-${mode}-${unavailable}" -G Ninja
+            "-DQt6_DIR=@Qt6_DIR@" "-Dconfigqml_DIR=${cmakedir}" "-DMODE=${mode}"
+            "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+            "-DCMAKE_DISABLE_FIND_PACKAGE_Qt6Qml=${unavailable}"
+            RESULT_VARIABLE status OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 30)
+        if(unavailable AND NOT mode STREQUAL "optional")
+            if(status EQUAL 0 OR NOT "${out}${err}" MATCHES "Qt6")
+                message(FATAL_ERROR "Missing required Qml was not rejected: ${mode}\n${out}${err}")
+            endif()
+        elseif(NOT status EQUAL 0)
+            message(FATAL_ERROR "Component discovery failed: ${mode}/${unavailable}\n${out}${err}")
+        endif()
+    endforeach()
+endforeach()
 run(${clean} "@CMAKE_COMMAND@" -S "${root}/examples/native" -B "${root}/native"
     -G Ninja "-DQt6_DIR=@Qt6_DIR@"
     "-Dconfigqml_DIR=${cmakedir}"
@@ -89,7 +126,7 @@ if("@CMAKE_CXX_FLAGS@" MATCHES "fsanitize=address")
         OUTPUT_VARIABLE asan OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
     set(preload "LD_PRELOAD=${asan}")
 endif()
-run(${clean} ${preload} "QML_IMPORT_PATH=${qmldir}" QT_QPA_PLATFORM=offscreen
+run(${clean} ${preload} "QML_IMPORT_PATH=${qmldir}:@_qt_qml@" QT_QPA_PLATFORM=offscreen
     "@_qml@" -a core "${root}/examples/qml/Settings.qml")
 if(NOT last_output MATCHES "CONFIGQML_QML_OK: DP-1,HDMI-A-1")
     message(FATAL_ERROR "QML example did not observe the saved outputs")
