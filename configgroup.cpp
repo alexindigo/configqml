@@ -105,6 +105,7 @@ void ConfigWorker::processGroup(const ConfigCommand &command) {
         auto result = resultFor(command);
         result.status = "failed";
         result.error = {error, {}, "apply"};
+        result.rejectedPathGenerations = input.pathGenerations;
         post(publish(result));
         return;
     }

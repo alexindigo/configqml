@@ -167,6 +167,78 @@ private slots:
         QCOMPARE(draft->value({"a", "n"}).toInt(), 9);
         QCOMPARE(store.value({"a", "n"}).toInt(), 3);
     }
+    void rejectedDraftRetry_data() {
+        QTest::addColumn<int>("intervening");
+        QTest::newRow("publication") << 0;
+        QTest::newRow("disjoint-intent") << 1;
+        QTest::newRow("equal-same-path-intent") << 2;
+        QTest::newRow("newer-local-input") << 3;
+    }
+    void rejectedDraftRetry() {
+        QFETCH(int, intervening);
+        QTemporaryDir dir;
+        auto o = options(dir.path());
+        o.admission = [](const ConfigInput &input) {
+            return input.value.toInt() == 7 ? QString("policy") : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *draft = store.draft({{"a", "n"}});
+        QVERIFY(draft->setValue({"a", "n"}, 7).accepted);
+        QSignalSpy results(&store, &ConfigStore::completed);
+        ConfigStoreTestAccess::run(store, [](auto &worker) { worker.holdReplies(true); });
+        const auto rejected = draft->apply();
+        if (intervening == 3)
+            ConfigStoreTestAccess::run(store, [](auto &worker) { worker.holdInputs(true); });
+        if (intervening == 0)
+            store.reload();
+        else
+            store.setUser(intervening == 1 ? ConfigPath{"b", "n"} : ConfigPath{"a", "n"}, 0);
+        ConfigStoreTestAccess::run(store, [](auto &worker) {
+            worker.holdReplies(false);
+            worker.holdInputs(false);
+        });
+        QTRY_COMPARE(results.size(), 2);
+        QCOMPARE(results[0][0].value<ConfigResult>().requestId, rejected);
+        QCOMPARE(results[0][0].value<ConfigResult>().error.code, QString("policy"));
+        QVERIFY(draft->dirty());
+        QCOMPARE(draft->value({"a", "n"}).toInt(), 7);
+        QVERIFY(draft->setValue({"a", "n"}, 8).accepted);
+        const auto retry = request(store, [&] { return draft->apply(); });
+        if (intervening <= 1) {
+            QCOMPARE(retry.status, QString("saved"));
+            QVERIFY(!draft->dirty());
+            ConfigStore reopened(o);
+            QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);
+            QCOMPARE(reopened.value({"a", "n"}).toInt(), 8);
+        } else {
+            QCOMPARE(retry.error.code, QString("draft-conflict"));
+            QVERIFY(draft->conflicted());
+            QVERIFY(draft->dirty());
+        }
+    }
+    void correctedDraftAfterRejection() {
+        QTemporaryDir dir;
+        auto o = options(dir.path());
+        o.admission = [](const ConfigInput &input) {
+            return input.value.toInt() == 7 ? QString("policy") : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *draft = store.draft({{"a", "n"}});
+        draft->setValue({"a", "n"}, 7);
+        QCOMPARE(request(store, [&] { return draft->apply(); }).error.code, QString("policy"));
+        QVERIFY(draft->dirty());
+        QCOMPARE(draft->value({"a", "n"}).toInt(), 7);
+        QCOMPARE(request(store, [&] { return store.reload(); }).status, QString("reloaded"));
+        QVERIFY(!draft->conflicted());
+        draft->setValue({"a", "n"}, 8);
+        QCOMPARE(request(store, [&] { return draft->apply(); }).status, QString("saved"));
+        QCOMPARE(store.value({"a", "n"}).toInt(), 8);
+        ConfigStore reopened(o);
+        QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);
+        QCOMPARE(reopened.value({"a", "n"}).toInt(), 8);
+    }
     void partialFailureRetainsDraft() {
         QTemporaryDir dir;
         auto o = options(dir.path());
@@ -185,6 +257,14 @@ private slots:
         QCOMPARE(result.publications.size(), 2);
         QVERIFY(draft->dirty());
         QCOMPARE(draft->value({"b", "n"}).toInt(), 8);
+        const auto acceptedIntent = store.info({"b", "n"}).intentRevision;
+        QVERIFY(acceptedIntent > 0);
+        QVERIFY(result.rejectedPathGenerations.isEmpty());
+        QCOMPARE(request(store, [&] { return draft->apply(); }).error.code,
+                 QString("draft-conflict"));
+        QVERIFY(draft->dirty() && draft->conflicted());
+        QCOMPARE(store.info({"b", "n"}).intentRevision, acceptedIntent);
+        QVERIFY(!store.failures().isEmpty());
         o.fileFault = {};
         ConfigStore reopened(o);
         QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);

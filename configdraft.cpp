@@ -115,9 +115,26 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
                 guard->m_edits.clear();
                 guard->m_conflicted = false;
                 guard->refresh();
-            } else if (result.error.code == "draft-conflict" ||
-                       result.error.code == "path-conflict")
-                guard->m_conflicted = true;
+            } else {
+                // Admission rejection covers ingress, but accepts no intent. Reconcile only
+                // this attempt's single generation step, never a changed baseline or a later
+                // local write. Persistence failures deliberately carry no such settlement.
+                for (auto it = result.rejectedPathGenerations.cbegin();
+                     guard->m_store && it != result.rejectedPathGenerations.cend(); ++it) {
+                    auto fence = guard->m_fences.find(it.key());
+                    const auto state = guard->m_store->info(it.key());
+                    if (fence != guard->m_fences.end() && fence->pathGeneration + 1 == it.value() &&
+                        state.pathGeneration == it.value() &&
+                        state.latestInput == result.inputPrefix &&
+                        state.workerCovered >= result.inputPrefix &&
+                        state.intentRevision == fence->intentRevision &&
+                        state.contentRevision == fence->contentRevision)
+                        fence->pathGeneration = it.value();
+                }
+                if (result.error.code == "draft-conflict" || result.error.code == "path-conflict")
+                    guard->m_conflicted = true;
+                guard->observe(); // Publications skipped while busy still count as foreign work.
+            }
             ConfigConsumerGuard boundary(guard);
             const auto paths = guard->paths();
             if (!boundary.invoke([&] { emit guard->valuesChanged(paths); }) ||

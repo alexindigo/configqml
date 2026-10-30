@@ -53,6 +53,36 @@ struct Fixture {
 class QmlEditorsTest : public QObject {
     Q_OBJECT
 private slots:
+    void correctedRejectedDraftReachesConsumers() {
+        QTemporaryDir dir;
+        Fixture f(dir.path());
+        QTRY_VERIFY(f.store->ready());
+        ConfigStoreTestAccess::run(*f.store->core(), [](auto &worker) {
+            worker.setAdmission([](const ConfigInput &input) {
+                return input.value.toInt() == 7 ? QString("policy") : QString();
+            });
+        });
+        QVERIFY(f.boolean("edit"));
+        f.call("apply");
+        QTRY_COMPARE(f.number("calls"), 1);
+        QCOMPARE(f.receipt().value("error").toMap().value("code").toString(), QString("policy"));
+        QVERIFY(f.editor()->dirty());
+        QCOMPARE(f.number("preview"), 7);
+        QVERIFY(!f.editor()->conflicted());
+        const auto correct = f.engine.evaluate("(function(editor) { editor.values.a.n = 9; })");
+        QVERIFY(!correct.call({f.engine.newQObject(f.editor())}).isError());
+        f.call("apply");
+        QTRY_COMPARE(f.number("calls"), 2);
+        QCOMPARE(f.receipt().value("status").toString(), QString("saved"));
+        QCOMPARE(f.number("observed"), 9);
+        QCOMPARE(f.number("other"), 8);
+        QCOMPARE(f.store->core()->value({"a", "n"}).toInt(), 9);
+        QVERIFY(!f.editor()->dirty());
+        Fixture reopened(dir.path());
+        QTRY_VERIFY(reopened.store->ready());
+        QCOMPARE(reopened.number("observed"), 9);
+        QCOMPARE(reopened.number("other"), 8);
+    }
     void draftConsumerAndRestart() {
         QTemporaryDir dir;
         Fixture f(dir.path());

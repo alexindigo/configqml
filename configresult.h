@@ -43,6 +43,8 @@ struct ConfigResult {
     ConfigError error;
     QString maskedBy;
     QMap<ConfigPath, QString> masks; // Grouped paths, never setting values.
+    // Only an unaccepted group can release its own covered ingress fence.
+    QMap<ConfigPath, quint64> rejectedPathGenerations;
     QString description() const {
         return maskedBy.isEmpty() ? QString() : QStringLiteral("masked by ") + maskedBy;
     }

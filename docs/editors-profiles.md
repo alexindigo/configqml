@@ -47,6 +47,12 @@ while apply is busy. The apply callback observes the settled draft state; ordina
 store completed signals precede callbacks as before. Deleting an editor cancels
 its callback delivery, never its already accepted publication.
 
+An admission-rejected attempt settles only its own covered ingress generations;
+it does not change the draft baseline or drop edits. Correcting the edit can then
+apply again without discard. Foreign accepted intent (even equal values), changed
+content and newer local ingress still conflict. An accepted group with a failed
+IO/partial receipt does not get this rejection settlement or erase failure history.
+
 Worker-accepted per-path **intent revisions** are distinct from object-thread
 ingress generations. Every accepted writer (direct commands, draft groups and
 worker-resolved profile imports, including equal/no-op intent) advances the same
