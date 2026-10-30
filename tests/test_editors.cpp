@@ -442,19 +442,22 @@ private slots:
                                  "os.setgid(65534); os.setuid(65534); "
                                  "os.close(os.open(sys.argv[2], os.O_RDONLY))",
                                  QFileInfo(file).absolutePath(), QFileInfo(file).fileName()});
-            if (!child.waitForFinished(5000))
+            if (!child.waitForStarted(5000))
                 return -1;
-            return child.exitCode();
+            if (!child.waitForFinished(5000)) {
+                child.kill();
+                child.waitForFinished(5000);
+                return -1;
+            }
+            return child.exitStatus() == QProcess::NormalExit ? child.exitCode() : -1;
         };
         const auto sourceRead = otherUidRead(target);
-        const auto privateRead = otherUidRead(*stage);
+        const auto privateRead = sourceRead == 0 ? otherUidRead(*stage) : -1;
         const auto empty = readFile(*stage).isEmpty();
         const auto finalAbsent = !QFile::exists(target + ".configqml-v0.bak");
         release->release(); // Always release before assertions, including failure paths.
         QCOMPARE(statResult, 0);
         QCOMPARE(state.st_mode & 0777, mode_t(0600));
-        QCOMPARE(sourceRead, 0);
-        QCOMPARE(privateRead, 1);
         QVERIFY(empty);
         QVERIFY(finalAbsent);
         QTRY_VERIFY(QFile::exists(target + ".configqml-v0.bak"));
@@ -462,6 +465,10 @@ private slots:
         QTRY_COMPARE(store.value({"a", "n"}).toInt(), 7);
         QVERIFY(QFileInfo(configured).isSymLink());
         QVERIFY(!QFile::exists(configured + ".configqml-v0.bak"));
+        if (sourceRead != 0 || privateRead < 0)
+            QSKIP("Other-user read probe unavailable: requires runnable sudo/python3 and "
+                  "passwordless sudo; 0600 and completed migration were checked.");
+        QCOMPARE(privateRead, 1);
     }
     void backupFailuresAndDurability_data() {
         QTest::addColumn<QString>("phase");
