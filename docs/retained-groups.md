@@ -95,7 +95,7 @@ Manual full save/flush/close fails `unresolved-group` while covered retained/sto
 work remains, even when eligible routes published. Such refusal does not poison
 future saves after explicit resolution. Autosave reports its eligible subset and
 excluded groups; it never claims full-prefix durability for excluded work.
-Group failures remain separate from unrelated ordinary M8 failure history.
+Group failures remain separate from the failure history of unrelated ordinary saves.
 
 Success resolves that capture's reservation; newer accepted local intent remains
 pending independently. `releaseGroup` is asynchronous `released | failed`, allowed
