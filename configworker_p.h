@@ -131,6 +131,9 @@ private:
     void beginSave(const ConfigCommand &command);
     void continueSave();
     void finishSave();
+    static void recordPublication(ConfigResult &result, const QString &source,
+                                  const ConfigBackendResult &outcome, bool published = true);
+    static void finalizePublicationState(ConfigResult &result);
     bool reloadFiles(const std::optional<ConfigCommand> &command = {});
     void armWatches();
     void scheduleAutoSave();

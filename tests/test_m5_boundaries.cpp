@@ -17,6 +17,8 @@
 #include <QEventLoop>
 #include <QTimer>
 #include <QMutexLocker>
+#include <QDir>
+#include <atomic>
 using namespace configqml;
 using D = ConfigDescriptor;
 using T = D::Type;
@@ -487,6 +489,133 @@ private slots:
         QCOMPARE(reopened->property("observed").toInt(), expected);
         QCOMPARE(reopenedStore->core()->value({"a", "other"}).toInt(), 6);
         QCOMPARE(reopened->property("sibling").toInt(), operation == 2 ? 8 : 40);
+    }
+    void migrationRetentionKeepsPublicationFacts_data() {
+        QTest::addColumn<int>("outcome");
+        QTest::addColumn<bool>("priorShard");
+        for (int outcome = 0; outcome < 3; ++outcome)
+            for (bool prior : {false, true}) {
+                const auto name = QByteArray::number(outcome) + '-' + QByteArray::number(prior);
+                QTest::newRow(name.constData()) << outcome << prior;
+            }
+    }
+    void migrationRetentionKeepsPublicationFacts() {
+        QFETCH(int, outcome);
+        QFETCH(bool, priorShard);
+        QTemporaryDir dir;
+        const QByteArray original = "{\"n\":1,\"opaque\":18446744073709551615}";
+        const auto a = dir.filePath("a.json"), b = dir.filePath("b.json");
+        put(b, original);
+        auto o = options();
+        o.evidenceDirectory = dir.filePath("evidence");
+        o.schema = ConfigSchema(D::group({{"a", D::group({{"n", D::leaf(T::SafeInteger, 0)}})},
+                                          {"b", D::group({{"n", D::leaf(T::SafeInteger, 0)}})}}),
+                                1, {{0, [](const QVariantMap &raw) {
+                                         auto changed = raw;
+                                         changed["n"] = 7;
+                                         return ConfigValueResult{changed, {}};
+                                     }}});
+        o.layers[0].sources = {{"b", {"b"}, {}}};
+        o.jsonFiles = {{"user", "b", b}};
+        o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy::StrictSourcePreimage;
+        if (priorShard) {
+            put(a, original);
+            o.layers[0].sources.prepend({"a", {"a"}, {}});
+            o.jsonFiles.prepend({"user", "a", a});
+            o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy::StrictSourcePreimage;
+        }
+        const auto evidence = o.evidenceDirectory;
+        auto faults = std::make_shared<std::atomic<int>>(0);
+        o.fileFault = [evidence, b, outcome, faults](const QString &phase, const QString &file) {
+            if (file != b || phase != (outcome == 2 ? "rename" : "readback"))
+                return QString();
+            ++*faults;
+            // Reconcile has already read its preimage; obstruct retention before it returns.
+            if (!QDir().rename(evidence, evidence + ".retained"))
+                qFatal("evidence obstruction rename");
+            put(evidence, "not a directory");
+            if (outcome == 2)
+                put(b, "{\"n\":99}"); // Strict publication must keep this foreign replacement.
+            return outcome == 1 ? QString("migration-readback-fault") : QString();
+        };
+        ConfigStore store(o);
+        QSignalSpy migrated(&store, &ConfigStore::migrationCompleted);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Error);
+        QCOMPARE(migrated.size(), 1);
+        QCOMPARE(faults->load(), 1);
+        const auto receipt = migrated.first().first().value<ConfigResult>();
+        QCOMPARE(receipt.status, QString("failed"));
+        QCOMPARE(receipt.error.code, QString("evidence-retention"));
+        QCOMPARE(store.error(), QString("evidence-retention"));
+        QCOMPARE(receipt.publications.size(), priorShard ? 2 : 1);
+        const auto route = receipt.publications.last();
+        QCOMPARE(route.sourceId, QString("b"));
+        QCOMPARE(route.success, outcome == 0);
+        QCOMPARE(route.state, outcome == 1 ? QString("uncertain") : QString("known"));
+        const auto routeError = outcome == 1   ? QString("migration-readback-fault")
+                                : outcome == 2 ? QString("source-preimage-conflict")
+                                               : QString();
+        QCOMPARE(route.error.code, routeError);
+        QCOMPARE(receipt.coveredRevisions.contains("b"), outcome == 0);
+        QCOMPARE(receipt.coveredRevisions.contains("a"), priorShard);
+        QCOMPARE(receipt.publicationState, priorShard || outcome == 0 ? QString("partial")
+                                           : outcome == 1             ? QString("uncertain")
+                                                                      : QString("known"));
+        QCOMPARE(bytes(b + ".configqml-v0.bak"), original);
+        if (priorShard) {
+            QCOMPARE(bytes(a + ".configqml-v0.bak"), original);
+            QVERIFY(receipt.publications.first().success);
+        }
+        ConfigJsonCodec codec;
+        const auto disk = codec.decode(bytes(b), "b");
+        QVERIFY(disk.ok());
+        QCOMPARE(D::leaf(T::SafeInteger, 0).validate(disk.raw.value("n")).value.toInt(),
+                 outcome == 2 ? 99 : 7);
+        QCOMPARE(disk.raw.contains("_configqmlVersion"), outcome != 2);
+        ConfigJsonBackend reader(o.jsonFiles);
+        for (auto it = receipt.coveredRevisions.cbegin(); it != receipt.coveredRevisions.cend();
+             ++it) {
+            const auto id =
+                reader.submit({ConfigBackendRequest::Operation::Read, it.key(), {}, {}});
+            QCOMPARE(reader.take(id)->revision, it.value());
+        }
+        QVERIFY(QFileInfo(evidence + ".retained").isDir());
+        // Deliver the real native transaction receipt through the production QML adapter.
+        QQmlEngine engine;
+        engine.addImportPath(QML_IMPORT_ROOT);
+        QQmlComponent component(&engine);
+        // A lexical root reference keeps the observer independent of the store internals.
+        component.setData(
+            "import QtQml\nimport ConfigQml 1.0\nQtObject { id: root; "
+            "property var receipt: null; property ConfigStore store: ConfigStore { "
+            "autoSave: false; schema: ConfigSchema { ConfigValue { key: 'n'; "
+            "valueType: ConfigValue.Integer; defaultValue: 0 } } sources: [MemorySource {}] "
+            "onMigrationCompleted: function(r) { root.receipt = r; } } }",
+            QUrl("file:///migration-receipt.qml"));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        std::unique_ptr<QObject> consumer(component.create());
+        QVERIFY(consumer);
+        auto *adapter = consumer->property("store").value<ConfigQmlStore *>();
+        QTRY_VERIFY(adapter->ready());
+        ConfigWorkerPacket packet;
+        packet.migrationResult = receipt;
+        ConfigStoreTestAccess::inject(*adapter->core(), packet);
+        const auto delivered = engine.newQObject(consumer.get()).property("receipt");
+        QCOMPARE(delivered.property("error").property("code").toString(),
+                 QString("evidence-retention"));
+        QCOMPARE(delivered.property("status").toString(), QString("failed"));
+        QCOMPARE(delivered.property("publicationState").toString(), receipt.publicationState);
+        const auto publications = delivered.property("publications");
+        QCOMPARE(publications.property("length").toInt(), receipt.publications.size());
+        const auto last = publications.property(receipt.publications.size() - 1);
+        QCOMPARE(last.property("success").toBool(), outcome == 0);
+        QCOMPARE(last.property("publicationState").toString(), route.state);
+        QCOMPARE(last.property("error").toString(), routeError);
+        QCOMPARE(last.property("phase").toString(), route.error.operation);
+        QCOMPARE(last.property("file").toString(), route.error.file);
+        const auto coverage = delivered.property("coveredRevisions");
+        QCOMPARE(coverage.hasOwnProperty("b"), outcome == 0);
+        QCOMPARE(coverage.hasOwnProperty("a"), priorShard);
     }
     void inheritedStrictNativeInitialization() {
         auto o = options();

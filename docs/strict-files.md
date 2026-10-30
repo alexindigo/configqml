@@ -30,6 +30,10 @@ An own publication witness is separate from confirmed durability. A failed
 readback can therefore retain both the actual own output and a foreign replacement.
 Evidence failure reports `evidence-retention`, including after known publication;
 successful route facts and covered revisions are still reported truthfully.
+This also applies to versioned migrations: an underlying publication or conflict
+error remains in its route entry while the overall error is `evidence-retention`.
+Only confirmed readback contributes covered revisions; uncertain routes stay
+uncertain even when earlier shards succeeded and the aggregate result is partial.
 
 ## Opt-in deletion
 

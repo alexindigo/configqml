@@ -816,13 +816,8 @@ void ConfigWorker::continueSave() {
             outcome->publicationState = ConfigBackendResult::PublicationState::Uncertain;
             outcome->error = {"readback-mismatch", m_activeSource, "readback"};
         }
-        const auto state = outcome->publicationState == ConfigBackendResult::PublicationState::Known
-                               ? "known"
-                               : "uncertain";
-        m_saveResult.publications.append(
-            {m_activeSource, outcome->success, outcome->revision, state, outcome->error});
+        recordPublication(m_saveResult, m_activeSource, *outcome);
         if (outcome->success) {
-            m_saveResult.coveredRevisions[m_activeSource] = outcome->revision;
             confirmed(m_activeSource, decodeMemoryValue(outcome->bytes), *outcome);
         } else {
             if (!m_save.groupToken.isEmpty() && outcome->publicationWitness) {
@@ -830,10 +825,6 @@ void ConfigWorker::continueSave() {
                 capture.uncertain[m_activeSource] = *outcome->publicationWitness;
                 capture.uncertainBytes[m_activeSource] = m_activeBytes;
             }
-            m_saveResult.status = "failed";
-            m_saveResult.error = outcome->error;
-            if (QString(state) == "uncertain")
-                m_saveResult.publicationState = "uncertain";
         }
     }
     if (m_saveSources.isEmpty()) {
@@ -896,12 +887,7 @@ void ConfigWorker::continueSave() {
             if (!error.isEmpty())
                 retentionError = error;
         }
-        const QString state =
-            outcome.publicationState == ConfigBackendResult::PublicationState::Known ? "known"
-                                                                                     : "uncertain";
-        if (transaction.published || !outcome.success)
-            m_saveResult.publications.append(
-                {m_activeSource, outcome.success, outcome.revision, state, outcome.error});
+        recordPublication(m_saveResult, m_activeSource, outcome, transaction.published);
         if (outcome.success) {
             confirmed(m_activeSource, transaction.raw, outcome);
             const auto retention = observeSource(m_activeSource, outcome, {}, false);
@@ -911,17 +897,12 @@ void ConfigWorker::continueSave() {
             }
             m_acceptOrigin = "own_save";
             m_acceptCause = "save";
-            m_saveResult.coveredRevisions[m_activeSource] = outcome.revision;
         } else {
             if (!m_save.groupToken.isEmpty() && outcome.publicationWitness) {
                 auto &capture = m_groups[m_save.groupToken];
                 capture.uncertain[m_activeSource] = *outcome.publicationWitness;
                 capture.uncertainBytes[m_activeSource] = transaction.candidateBytes;
             }
-            m_saveResult.status = "failed";
-            m_saveResult.error = outcome.error;
-            if (state == "uncertain")
-                m_saveResult.publicationState = state;
         }
         if (!retentionError.isEmpty()) {
             m_saveResult.status = "failed";
@@ -939,6 +920,27 @@ void ConfigWorker::continueSave() {
                                          m_activeBytes, m_saveRevisions.value(m_activeSource)});
     continueSave(); // Immediate memory completion or deterministic delayed operation.
 }
+void ConfigWorker::recordPublication(ConfigResult &result, const QString &source,
+                                     const ConfigBackendResult &outcome, bool published) {
+    const QString state = outcome.publicationState == ConfigBackendResult::PublicationState::Known
+                              ? "known"
+                              : "uncertain";
+    if (published || !outcome.success)
+        result.publications.append(
+            {source, outcome.success, outcome.revision, state, outcome.error});
+    if (outcome.success)
+        result.coveredRevisions[source] = outcome.revision;
+    else {
+        result.status = "failed";
+        result.error = outcome.error;
+        if (state == "uncertain")
+            result.publicationState = state;
+    }
+}
+void ConfigWorker::finalizePublicationState(ConfigResult &result) {
+    if (result.status == "failed" && !result.coveredRevisions.isEmpty())
+        result.publicationState = "partial";
+}
 void ConfigWorker::finishSave() {
     if (m_saveResult.status.isEmpty())
         m_saveResult.status = m_saveResult.publications.isEmpty() ? "nothing_to_save" : "saved";
@@ -951,11 +953,7 @@ void ConfigWorker::finishSave() {
         m_saveResult.error = {"unresolved-group", {}, m_save.operation};
     }
     if (m_saveResult.status == "failed") {
-        bool success = false;
-        for (const auto &p : m_saveResult.publications)
-            success |= p.success;
-        if (success)
-            m_saveResult.publicationState = "partial";
+        finalizePublicationState(m_saveResult);
         if (!m_saveRetainedFailure && !refusal && m_save.groupToken.isEmpty())
             m_failures.append(m_saveResult);
     }
