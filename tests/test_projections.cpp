@@ -11,6 +11,41 @@ using T = D::Type;
 class ProjectionTest : public QObject {
     Q_OBJECT
 private slots:
+    void rejectedLocalProjectionNeverReportsAcceptance_data() {
+        QTest::addColumn<int>("operation");
+        QTest::newRow("set") << 0;
+        QTest::newRow("reset") << 1;
+        QTest::newRow("group") << 2;
+    }
+    void rejectedLocalProjectionNeverReportsAcceptance() {
+        QFETCH(int, operation);
+        auto n = D::leaf(T::SafeInteger, 0);
+        n.admissionPolicy = D::AdmissionPolicy::Strict;
+        ConfigProjectionSpec projection{
+            "checked", {"user"}, {}, [](const ConfigProjectionInput &input) {
+                auto values = input.values;
+                if (input.raw.value("n").toInt() != 1)
+                    values["n"] = false;
+                return ConfigProjectionResult{values, input.compatibilityRaw, {}, {}};
+            }};
+        ConfigLayers layers(ConfigSchema(D::group({{"n", n}})),
+                            {{"user",
+                              ConfigLayerKind::File,
+                              ConfigAdmissionPolicy::FieldFallback,
+                              {{"user", {}, {{"n", 1}}}},
+                              true}},
+                            {projection});
+        const auto before = layers.source("user", "user")->raw;
+        const auto revision = layers.info({"n"}).intentRevision;
+        const auto result = operation == 0   ? layers.setUser({"n"}, 7)
+                            : operation == 1 ? layers.reset({"n"}, "user")
+                                             : layers.applyEdits({{{"n"}, QVariant(7)}});
+        QVERIFY(!result.accepted);
+        QVERIFY(!result.errors.isEmpty());
+        QCOMPARE(layers.value({"n"})->toInt(), 1);
+        QCOMPARE(layers.source("user", "user")->raw, before);
+        QCOMPARE(layers.info({"n"}).intentRevision, revision);
+    }
     void authoredWarningsAreNotFailures() {
         QTemporaryDir dir;
         const auto file = dir.filePath("user.json");

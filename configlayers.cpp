@@ -3,6 +3,7 @@
 #include "configjsoncodec.h"
 #include "configsourceprojection_p.h"
 #include <QSet>
+#include <QScopeGuard>
 #include <limits>
 #include <algorithm>
 
@@ -43,6 +44,10 @@ ConfigLayers::ConfigLayers(const ConfigSchema &schema, const QList<ConfigLayer> 
             owned.source.id = ownString(source.id);
             owned.source.prefix = ownPath(source.prefix);
             const auto result = admit(state, owned, source);
+            owned.admissionSource = owned.source;
+            owned.admissionSource.raw.clear();
+            owned.admissionSource.exists = false;
+            owned.admissionSource.localIntent = false;
             // Schema-invalid input is retained as raw with diagnostics, not a broken store.
             if (!result.accepted && owned.errors.isEmpty())
                 m_errors.append(result.errors);
@@ -165,21 +170,47 @@ QVariantMap sourceOverlay(const ConfigDescriptor &descriptor, QVariantMap lower,
     return lower;
 }
 } // namespace
-void ConfigLayers::projectSources(const QList<LayerState> *previous) {
+QList<ConfigDiagnostic> ConfigLayers::projectSources(const QList<LayerState> *previous,
+                                                     bool local) {
+    QList<ConfigDiagnostic> failures;
     auto lower = m_schema.defaults();
     for (qsizetype layerIndex = 0; layerIndex < m_layers.size(); ++layerIndex) {
         auto &layer = m_layers[layerIndex];
         const auto lowerBefore = lower;
         QList<ConfigProjectionEffectsEvent> layerEvents;
         QList<QPair<QString, ConfigDiagnostic>> layerWarnings;
-        for (auto &state : layer.sources) {
-            const auto original = state.source;
-            if (!participates(state))
+        bool rejected = false;
+        for (auto &stored : layer.sources) {
+            if (!participates(stored))
                 continue;
+            auto state = stored;
+            const auto original = local ? stored.admissionSource : stored.source;
+            // Evaluate this operation, not the historical observation's rejection flag.
+            state.rejected = false;
+            state.projectionError.clear();
+            const auto settle = qScopeGuard([&] {
+                rejected |= state.rejected;
+                if (local && (state.rejected || !state.projectionError.isEmpty()))
+                    failures.append(state.errors);
+                if (local)
+                    for (auto it = state.admitted.begin(); it != state.admitted.end(); ++it) {
+                        const auto prior = stored.admitted.constFind(it.key());
+                        if (prior != stored.admitted.cend() && prior->value == it->value)
+                            it.value() = prior.value();
+                    }
+                stored.admitted = state.admitted;
+                if (!local) {
+                    stored.errors = state.errors;
+                    stored.rejected = state.rejected;
+                    stored.projectionError = state.projectionError;
+                }
+            });
             bool selected = false;
             for (const auto &spec : m_projections)
                 selected |= spec.sourceIds.contains(original.id);
-            if (selected && (original.exists || original.localIntent)) {
+            if (!selected || (!original.exists && !original.localIntent))
+                admit(layer, state, original, true);
+            else {
                 ConfigProjectionInput input;
                 input.raw = original.raw;
                 const auto prior = input.raw.take("_configqmlVersion");
@@ -306,14 +337,14 @@ void ConfigLayers::projectSources(const QList<LayerState> *previous) {
                 }
             }
         }
-        bool rejected = false;
-        for (const auto &state : layer.sources)
-            rejected |= participates(state) && state.rejected;
         if (rejected) {
             for (qsizetype i = 0; i < layer.sources.size(); ++i)
                 layer.sources[i].admitted = previous ? (*previous)[layerIndex].sources[i].admitted
                                                      : QMap<ConfigPath, AdmittedValue>{};
         } else {
+            for (auto &state : layer.sources)
+                if (!local)
+                    state.admissionSource = state.source;
             for (const auto &event : layerEvents) {
                 m_effectRuns.insert(event.runId);
                 m_effects.append(event);
@@ -326,6 +357,22 @@ void ConfigLayers::projectSources(const QList<LayerState> *previous) {
                 for (auto it = state.admitted.cbegin(); it != state.admitted.cend(); ++it)
                     putValue(lower, it.key(), it->value);
     }
+    return failures;
+}
+void ConfigLayers::refreshRejection(const LayerState &layer, SourceState &source) {
+    source.rejected = false;
+    for (const auto &error : source.errors)
+        source.rejected |= rejects(layer, error.path);
+    if (source.errors.isEmpty())
+        source.projectionError.clear();
+}
+QList<ConfigDiagnostic> ConfigLayers::commitLocal(const ConfigLayers &before) {
+    if (m_deferProjections)
+        return {};
+    const auto errors = projectSources(&before.m_layers, true);
+    if (!errors.isEmpty())
+        *this = before;
+    return errors;
 }
 bool ConfigLayers::rejects(const LayerState &layer, const ConfigPath &path) const {
     const auto policy = m_schema.policy(path);
@@ -588,10 +635,7 @@ ConfigInfo ConfigLayers::info(const ConfigPath &path) const {
 }
 
 ConfigWriteResult ConfigLayers::write(const ConfigPath &path, const QVariant &value, bool runtime) {
-    const auto previousLayers = m_layers;
-    std::optional<ConfigLayers> before;
-    if (!m_projections.isEmpty())
-        before = *this;
+    const auto before = *this;
     if (!valid())
         return {false, m_errors, {}, {}, m_intentRevision};
     const auto checked = m_schema.validate(path, value);
@@ -613,23 +657,20 @@ ConfigWriteResult ConfigLayers::write(const ConfigPath &path, const QVariant &va
                 putValue(source.source.raw, path.mid(target.prefix.size()), checked.value);
                 source.source.exists = true;
                 source.source.localIntent = true;
+                putValue(source.admissionSource.raw, path.mid(target.prefix.size()), checked.value);
+                source.admissionSource.exists = true;
+                source.admissionSource.localIntent = true;
                 source.admitted.insert(path, {checked.value, {}, m_intentRevision + 1});
                 for (auto it = source.errors.begin(); it != source.errors.end();)
                     if (startsWith(it->path, path) || startsWith(path, it->path))
                         it = source.errors.erase(it);
                     else
                         ++it;
+                refreshRejection(layer, source);
                 ++m_intentRevision; // Equal-valued assignment remains a new explicit choice.
-                if (!m_deferProjections)
-                    projectSources(&previousLayers);
-                for (const auto &projectedLayer : m_layers)
-                    for (const auto &state : projectedLayer.sources)
-                        if (!m_deferProjections && participates(state) &&
-                            !state.projectionError.isEmpty()) {
-                            const auto errors = state.errors;
-                            *this = std::move(*before);
-                            return {false, errors, {}, {}, m_intentRevision};
-                        }
+                const auto errors = commitLocal(before);
+                if (!errors.isEmpty())
+                    return {false, errors, {}, {}, m_intentRevision};
                 return {
                     true, {}, target, runtime ? QString() : info(path).maskedBy, m_intentRevision};
             }
@@ -661,19 +702,26 @@ ConfigWriteResult ConfigLayers::erase(const ConfigPath &path, const QString &lay
                 continue;
             routed = true;
             source.source.localIntent = true;
-            if (startsWith(prefix, path))
+            source.admissionSource.localIntent = true;
+            if (startsWith(prefix, path)) {
                 source.source.raw.clear();
-            else
+                source.admissionSource.raw.clear();
+            } else {
                 removeValue(source.source.raw, path.mid(prefix.size()));
+                removeValue(source.admissionSource.raw, path.mid(prefix.size()));
+            }
             if (!runtime && source.source.pruneResetNamespaces)
                 for (qsizetype n = path.size() - 1; n > prefix.size(); --n) {
                     const auto parent = path.mid(0, n);
                     const auto descriptor = m_schema.descriptor(parent);
                     const auto rawPath = parent.mid(prefix.size());
-                    const auto raw = valueAt(source.source.raw, rawPath);
-                    if (descriptor && descriptor->type == ConfigDescriptor::Type::Group && raw &&
-                        raw->metaType().id() == QMetaType::QVariantMap && raw->toMap().isEmpty())
-                        removeValue(source.source.raw, rawPath);
+                    for (auto *raw : {&source.source.raw, &source.admissionSource.raw}) {
+                        const auto value = valueAt(*raw, rawPath);
+                        if (descriptor && descriptor->type == ConfigDescriptor::Type::Group &&
+                            value && value->metaType().id() == QMetaType::QVariantMap &&
+                            value->toMap().isEmpty())
+                            removeValue(*raw, rawPath);
+                    }
                 }
             for (auto it = source.admitted.begin(); it != source.admitted.end();)
                 if (startsWith(it.key(), path))
@@ -685,6 +733,7 @@ ConfigWriteResult ConfigLayers::erase(const ConfigPath &path, const QString &lay
                     it = source.errors.erase(it);
                 else
                     ++it;
+            refreshRejection(layer, source);
         }
         if (!routed)
             return {false,
@@ -693,16 +742,9 @@ ConfigWriteResult ConfigLayers::erase(const ConfigPath &path, const QString &lay
                     {},
                     m_intentRevision};
         ++m_intentRevision;
-        if (!m_deferProjections)
-            projectSources(&before.m_layers);
-        for (const auto &projectedLayer : m_layers)
-            for (const auto &state : projectedLayer.sources)
-                if (!m_deferProjections && participates(state) &&
-                    !state.projectionError.isEmpty()) {
-                    const auto errors = state.errors;
-                    *this = before;
-                    return {false, errors, {}, {}, m_intentRevision};
-                }
+        const auto errors = commitLocal(before);
+        if (!errors.isEmpty())
+            return {false, errors, {}, {}, m_intentRevision};
         return {true,
                 {},
                 route(path, layerId),
@@ -731,11 +773,9 @@ ConfigWriteResult ConfigLayers::applyEdits(const QMap<ConfigPath, std::optional<
             return result;
     }
     candidate.m_deferProjections = false;
-    candidate.projectSources(&m_layers);
-    for (const auto &layer : candidate.m_layers)
-        for (const auto &state : layer.sources)
-            if (candidate.participates(state) && !state.projectionError.isEmpty())
-                return {false, state.errors, {}, {}, m_intentRevision};
+    const auto errors = candidate.commitLocal(*this);
+    if (!errors.isEmpty())
+        return {false, errors, {}, {}, m_intentRevision};
     *this = std::move(candidate);
     result.accepted = true;
     result.intentRevision = m_intentRevision;

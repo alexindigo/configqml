@@ -117,6 +117,9 @@ private:
     };
     struct SourceState {
         ConfigSource source;
+        // Raw input underlying the last committed layer admission, plus checked local edits.
+        // Rejected observations remain in source, never become a local transaction's base.
+        ConfigSource admissionSource;
         QMap<ConfigPath, AdmittedValue> admitted;
         QList<ConfigDiagnostic> errors;
         bool rejected = false;
@@ -133,7 +136,10 @@ private:
     ConfigWriteResult write(const ConfigPath &path, const QVariant &value, bool runtime);
     ConfigWriteResult erase(const ConfigPath &path, const QString &layerId, bool runtime);
     bool participates(const SourceState &source) const;
-    void projectSources(const QList<LayerState> *previous = nullptr);
+    QList<ConfigDiagnostic> projectSources(const QList<LayerState> *previous = nullptr,
+                                           bool local = false);
+    QList<ConfigDiagnostic> commitLocal(const ConfigLayers &before);
+    void refreshRejection(const LayerState &layer, SourceState &source);
     QList<ConfigProjectionSpec> m_projections;
     QList<ConfigProjectionEffectsEvent> m_effects;
     QList<QPair<QString, ConfigDiagnostic>> m_projectionDiagnostics;

@@ -365,6 +365,129 @@ private slots:
         QCOMPARE(store.value({"n"}).toInt(), 1);
         QVERIFY(draft->dirty());
     }
+    void localEditsAfterStrictRejection_data() {
+        QTest::addColumn<bool>("projection");
+        QTest::addColumn<int>("operation");
+        QTest::addColumn<bool>("remainingError");
+        QTest::addColumn<bool>("masked");
+        for (bool projection : {false, true})
+            for (int operation = 0; operation < 3; ++operation)
+                for (bool remaining : {false, true})
+                    for (bool masked : {false, true}) {
+                        const auto name =
+                            QByteArray::number(projection) + '-' + QByteArray::number(operation) +
+                            '-' + QByteArray::number(remaining) + '-' + QByteArray::number(masked);
+                        QTest::newRow(name.constData())
+                            << projection << operation << remaining << masked;
+                    }
+    }
+    void localEditsAfterStrictRejection() {
+        QFETCH(bool, projection);
+        QFETCH(int, operation);
+        QFETCH(bool, remainingError);
+        QFETCH(bool, masked);
+        QTemporaryDir dir;
+        const auto a = dir.filePath("a.json"), b = dir.filePath("b.json");
+        put(a, "{\"n\":1,\"other\":2}");
+        put(b, "{\"n\":3}");
+        QQmlEngine engine;
+        engine.addImportPath(QML_IMPORT_ROOT);
+        QQmlComponent component(&engine);
+        const QByteArray code =
+            QByteArray(
+                "import QtQml\nimport ConfigQml 1.0\nQtObject { id: root; "
+                "required property string directory; "
+                "readonly property int observed: store.ready ? store.values.a.n : -1; "
+                "readonly property int sibling: store.ready ? store.values.b.n : -1; "
+                "property ConfigStore store: ConfigStore { id: store; autoSave: false; "
+                "schema: ConfigSchema { ConfigGroup { key: 'a'; "
+                "ConfigValue { key: 'n'; valueType: ConfigValue.Integer; defaultValue: 0; "
+                "admissionPolicy: ConfigValue.Strict } "
+                "ConfigValue { key: 'other'; valueType: ConfigValue.Integer; defaultValue: 0; "
+                "admissionPolicy: ConfigValue.Strict } } "
+                "ConfigGroup { key: 'b'; ConfigValue { key: 'n'; valueType: ConfigValue.Integer; "
+                "defaultValue: 0 } } } sources: [ "
+                "JsonFileSource { sourceId: 'a'; prefix: ['a']; path: root.directory+'/a.json' }, "
+                "JsonFileSource { sourceId: 'b'; prefix: ['b']; path: root.directory+'/b.json' }") +
+            (masked ? ", MemorySource { sourceId: 'mask'; layerId: 'runtime'; "
+                      "kind: MemorySource.Runtime; writable: false; data: ({a:{n:99}}) }"
+                    : "") +
+            "] " +
+            (projection ? "projections: [ConfigProjection { projectionId: 'identity'; "
+                          "sourceIds: ['a','b']; transform: `function(i) { return "
+                          "{values:i.values,compatibilityRaw:i.compatibilityRaw,"
+                          "effects:[],diagnostics:[]}; }` }] "
+                        : "") +
+            "} }";
+        component.setData(code, QUrl("file:///strict-local.qml"));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        auto create = [&] {
+            return std::unique_ptr<QObject>(
+                component.createWithInitialProperties({{"directory", dir.path()}}));
+        };
+        auto consumer = create();
+        QVERIFY2(consumer, qPrintable(component.errorString()));
+        auto *qml = consumer->property("store").value<ConfigQmlStore *>();
+        QVERIFY(qml);
+        QTRY_VERIFY(qml->ready());
+        auto &store = *qml->core();
+        for (int batch = 0; batch < 2; ++batch) {
+            put(a, remainingError ? "{\"n\":\"bad\",\"other\":\"bad\"}"
+                                  : "{\"n\":\"bad\",\"other\":20}");
+            put(b, batch ? "{\"n\":40}" : "{\"n\":30}");
+            QCOMPARE(request(store, [&] { return store.reload(); }).status, QString("failed"));
+            QCOMPARE(store.value({"a", "n"}).toInt(), masked ? 99 : 1);
+            QCOMPARE(consumer->property("observed").toInt(), masked ? 99 : 1);
+            QCOMPARE(consumer->property("sibling").toInt(), 3);
+            QCOMPARE(store.value({"a", "other"}).toInt(), 2);
+        }
+        QString token;
+        ConfigResult edited;
+        if (operation == 2) {
+            edited = request(store, [&] {
+                return store.retainGroup({"repair",
+                                          {{"a", "n"}, {"b", "n"}},
+                                          {{{"a", "n"}, true, 7}, {{"b", "n"}, true, 8}},
+                                          {}});
+            });
+            QCOMPARE(edited.status, QString("retained"));
+            token = edited.groupToken;
+        } else {
+            edited = request(store, [&] {
+                return operation == 0 ? store.setUser({"a", "n"}, 7).requestId
+                                      : store.reset({"a", "n"}, "user").requestId;
+            });
+            QVERIFY(edited.status != "failed");
+        }
+        const int expected = masked ? 99 : operation == 1 ? 0 : 7;
+        QCOMPARE(store.value({"a", "n"}).toInt(), expected);
+        QCOMPARE(store.snapshot().values.value({"a", "n"}).toInt(), expected);
+        QCOMPARE(consumer->property("observed").toInt(), expected);
+        QCOMPARE(consumer->property("sibling").toInt(), operation == 2 ? 8 : 3);
+        QCOMPARE(store.value({"a", "other"}).toInt(), 2);
+        QVERIFY(bytes(a).contains("bad")); // Settlement, not a save repairing the getter.
+        QCOMPARE(store.info({"a", "n"}).provenance.maskedBy,
+                 masked ? QString("runtime") : QString());
+        QVERIFY(store.info({"a", "n"}).provenance.contributions[1].valid);
+        QCOMPARE(store.info({"a", "other"}).provenance.contributions[1].valid, !remainingError);
+        // Repair the remaining raw field explicitly; unrelated foreign 20 must not leak earlier.
+        QVERIFY(request(store, [&] { return store.setUser({"a", "other"}, 6).requestId; }).status !=
+                "failed");
+        if (!token.isEmpty()) {
+            QCOMPARE(request(store, [&] { return store.saveGroup(token); }).status,
+                     QString("saved"));
+            QCOMPARE(request(store, [&] { return store.releaseGroup(token); }).status,
+                     QString("released"));
+        }
+        QCOMPARE(request(store, [&] { return store.save(); }).status, QString("saved"));
+        auto reopened = create();
+        QVERIFY(reopened);
+        auto *reopenedStore = reopened->property("store").value<ConfigQmlStore *>();
+        QTRY_VERIFY(reopenedStore->ready());
+        QCOMPARE(reopened->property("observed").toInt(), expected);
+        QCOMPARE(reopenedStore->core()->value({"a", "other"}).toInt(), 6);
+        QCOMPARE(reopened->property("sibling").toInt(), operation == 2 ? 8 : 40);
+    }
     void inheritedStrictNativeInitialization() {
         auto o = options();
         o.layers[0].policy = ConfigAdmissionPolicy::RejectInput;
