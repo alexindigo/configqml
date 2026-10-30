@@ -24,7 +24,11 @@ QtObject {
         sources: [JsonFileSource { sourceId: "user"; path: root.directory + "/blocked/user.json" }]
         onStatusChanged: { if (status === ConfigStore.Error) root.failure = error; }
         onCompleted: function(result) {
-            if (result.operation === "saveGroup" && result.status === "failed") root.stopped = true;
+            if (result.operation === "saveGroup" && result.status === "failed") {
+                if (result.error.code !== "lock-failed" || result.attemptNumber !== "1"
+                        || store.groupInfo(root.token).state !== "stopped") root.failure = "wrong-save-fault";
+                root.stopped = true;
+            }
             if (result.operation === "retryGroup") {
                 root.signalSeen = true;
                 if (store.groupInfo(root.token).state !== "succeeded") root.failure = "group-cache-order";
@@ -71,7 +75,10 @@ QtObject {
                 return;
             }
             store.releaseGroup(root.token, function(released) {
-                if (released.status !== "released" || store.groupInfo(root.token).attempts.length !== 2)
+                const attempts = store.groupInfo(root.token).attempts;
+                if (released.status !== "released" || attempts.length !== 2
+                        || attempts[0].status !== "failed" || attempts[0].error.code !== "lock-failed"
+                        || attempts[1].status !== "saved")
                     root.failure = "group-history";
                 else root.finished = true;
             });

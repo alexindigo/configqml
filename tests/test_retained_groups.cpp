@@ -169,17 +169,24 @@ private slots:
     }
     void staleDependencyRefusalDoesNotStrandTheNextExplicitRequest() {
         QTemporaryDir dir;
-        ConfigStore store(options(dir.path()));
+        auto o = options(dir.path());
+        auto writes = std::make_shared<std::atomic<int>>(0);
+        o.fileFault = [writes](const QString &phase, const QString &) {
+            return phase == "write" && ++*writes == 1 ? QString("initial-head-write-fault")
+                                                      : QString();
+        };
+        ConfigStore store(o);
         QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
         const auto head = compat::request(store, [&] {
                               return store.retainGroup(choice("generation-head", 1));
                           }).groupToken;
-        // Use a real file fault once, then repair permissions explicitly.
-        QVERIFY(QFile::setPermissions(dir.path(), QFileDevice::ReadOwner | QFileDevice::ExeOwner));
         const auto failed = compat::request(store, [&] { return store.saveGroup(head); });
-        QVERIFY(QFile::setPermissions(dir.path(), QFileDevice::ReadOwner | QFileDevice::WriteOwner |
-                                                      QFileDevice::ExeOwner));
         QCOMPARE(failed.status, QString("failed"));
+        QCOMPARE(failed.error.code, QString("initial-head-write-fault"));
+        QCOMPARE(failed.error.sourceId, QString("user"));
+        QCOMPARE(failed.attemptNumber, quint64(1));
+        QCOMPARE(writes->load(), 1);
+        QCOMPARE(store.groupInfo(head).state, QString("stopped"));
         const auto suffix = compat::request(store, [&] {
                                 return store.retainGroup(choice("generation-suffix", 2, {head}));
                             }).groupToken;
@@ -192,13 +199,24 @@ private slots:
         control(store, [](auto &w) { w.holdInputs(false); });
         QTRY_VERIFY(results.contains(retry) && results.contains(stale));
         QCOMPARE(results[retry].status, QString("saved"));
+        QCOMPARE(results[retry].groupToken, head);
+        QCOMPARE(results[retry].attemptNumber, quint64(2));
+        QVERIFY(results[retry].attemptId != failed.attemptId);
+        QCOMPARE(results[stale].status, QString("failed"));
         QCOMPARE(results[stale].error.code, QString("group-state"));
+        QCOMPARE(writes->load(), 2);
+        QCOMPARE(store.groupInfo(head).attempts.size(), 2);
+        QCOMPARE(store.groupInfo(head).attempts.first().error.code,
+                 QString("initial-head-write-fault"));
         QCOMPARE(store.groupInfo(suffix).state, QString("retained"));
         QVERIFY(store.groupInfo(suffix).attempts.isEmpty());
         QCOMPARE(disk(dir.filePath("user.json"), "choice"), 1);
         const auto fresh = compat::request(store, [&] { return store.saveGroup(suffix); });
         QCOMPARE(fresh.status, QString("saved"));
         QCOMPARE(fresh.attemptNumber, quint64(1));
+        QCOMPARE(fresh.groupToken, suffix);
+        QCOMPARE(store.groupInfo(suffix).attempts.size(), 1);
+        QCOMPARE(writes->load(), 3);
         QCOMPARE(disk(dir.filePath("user.json"), "choice"), 2);
         QCOMPARE(compat::request(store, [&] { return store.releaseGroup(suffix); }).status,
                  QString("released"));

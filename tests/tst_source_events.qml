@@ -1,7 +1,7 @@
 import QtQml
 import ConfigQml 1.0
 
-// The driver performs foreign file operations/permission changes only. All
+// The driver performs foreign file operations/file-type obstructions only. All
 // acceptance/deployment decisions and assertions run in this real QML consumer.
 QtObject {
     id: root
@@ -153,7 +153,8 @@ QtObject {
             cfg.a.n = 11;
             check(observed === 11 && deployments === 3, "failed-save-local-invalidation");
             store.save(function(result) {
-                if (root.check(result.status === "failed" && root.deployments === 3
+                if (root.check(result.status === "failed" && result.error.code === "lock-failed"
+                               && root.deployments === 3
                                && root.observed === 11, "origin-local-failed-save-invalidation"))
                     root.action = "unblock";
             });

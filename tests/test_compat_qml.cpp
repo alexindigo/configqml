@@ -8,6 +8,46 @@
 #include <QSaveFile>
 #include <QElapsedTimer>
 using namespace configqml;
+namespace {
+// A directory cannot be opened as an O_RDWR regular lock file, even with DAC override.
+// Preserve any existing sidecar and restore only our own obstruction on every exit.
+class LockObstruction {
+public:
+    explicit LockObstruction(QString path) : m_path(std::move(path)), m_saved(m_path + ".saved") {}
+    ~LockObstruction() {
+        if (!restore())
+            qFatal("lock obstruction restoration failed");
+    }
+    bool block() {
+        if (m_blocked || m_preserved || QFileInfo::exists(m_saved))
+            return false;
+        if (QFileInfo::exists(m_path)) {
+            if (!QFileInfo(m_path).isFile() || !QFile::rename(m_path, m_saved))
+                return false;
+            m_preserved = true;
+        }
+        m_blocked = QDir().mkdir(m_path);
+        return m_blocked;
+    }
+    bool restore() {
+        if (m_blocked) {
+            if (!QDir().rmdir(m_path))
+                return false;
+            m_blocked = false;
+        }
+        if (m_preserved) {
+            if (!QFile::rename(m_saved, m_path))
+                return false;
+            m_preserved = false;
+        }
+        return true;
+    }
+
+private:
+    QString m_path, m_saved;
+    bool m_blocked = false, m_preserved = false;
+};
+} // namespace
 class CompatibilityQmlTest : public QObject {
     Q_OBJECT
 private slots:
@@ -23,11 +63,10 @@ private slots:
         const bool sourceEvents = QString(COMPAT_FIXTURE).endsWith("tst_source_events.qml");
         if (sourceEvents)
             QVERIFY(QDir().mkpath(dir.filePath("live")));
-        if (retained) {
+        if (retained)
             QVERIFY(QDir().mkpath(dir.filePath("blocked")));
-            QVERIFY(QFile::setPermissions(dir.filePath("blocked"),
-                                          QFileDevice::ReadOwner | QFileDevice::ExeOwner));
-        }
+        LockObstruction obstruction(
+            dir.filePath(retained ? "blocked/user.json.lock" : "live/user.json.lock"));
         QQmlEngine engine;
         engine.addImportPath(QML_IMPORT_ROOT);
         QQmlComponent component(&engine, QUrl::fromLocalFile(COMPAT_FIXTURE));
@@ -38,6 +77,8 @@ private slots:
                                      !root->property("failure").toString().isEmpty(),
                                  10000);
         QCOMPARE(root->property("failure").toString(), QString());
+        if (retained)
+            QVERIFY(obstruction.block()); // After Ready; startup remains a real successful load.
         QVERIFY(QMetaObject::invokeMethod(root.get(), "run"));
         if (sourceEvents) {
             QElapsedTimer deadline;
@@ -64,12 +105,9 @@ private slots:
                 else if (action == "repair")
                     replace("live/user.json", "{\"n\":7}");
                 else if (action == "block")
-                    QVERIFY(QFile::setPermissions(dir.filePath("live"),
-                                                  QFileDevice::ReadOwner | QFileDevice::ExeOwner));
+                    QVERIFY(obstruction.block());
                 else if (action == "unblock") {
-                    QVERIFY(QFile::setPermissions(dir.filePath("live"),
-                                                  QFileDevice::ReadOwner | QFileDevice::WriteOwner |
-                                                      QFileDevice::ExeOwner));
+                    QVERIFY(obstruction.restore());
                     replace("live/user.json", "{\"n\":8}");
                 } else if (action == "fallback")
                     replace("plugin.json", "{\"a\":3}");
@@ -80,15 +118,11 @@ private slots:
                                                       Q_ARG(QVariant, action)));
                 QTest::qWait(1);
             }
-            QVERIFY(QFile::setPermissions(dir.filePath("live"), QFileDevice::ReadOwner |
-                                                                    QFileDevice::WriteOwner |
-                                                                    QFileDevice::ExeOwner));
+            QVERIFY(obstruction.restore());
         }
         if (retained) {
             QTRY_VERIFY_WITH_TIMEOUT(root->property("stopped").toBool(), 10000);
-            QVERIFY(QFile::setPermissions(dir.filePath("blocked"), QFileDevice::ReadOwner |
-                                                                       QFileDevice::WriteOwner |
-                                                                       QFileDevice::ExeOwner));
+            QVERIFY(obstruction.restore());
             QVERIFY(QMetaObject::invokeMethod(root.get(), "retry"));
         }
         QTRY_VERIFY2_WITH_TIMEOUT(root->property("finished").toBool() ||
