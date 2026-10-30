@@ -185,7 +185,8 @@ atomic record nested edits and namespace leaf writes reach real setters. A QML
 edit it and assign it back to change the setting. No ordinary-copy apply API,
 save-time scan or hidden synchronization exists. Consumer detached-copy lint is
 separate tooling; [read-only collection models](models.md) provide protected
-display projections, and explicit drafts remain M5.
+display projections. [Explicit drafts and scopes](editors-profiles.md) provide
+separately named editor previews without changing ordinary-copy semantics.
 Unknown dynamic JS properties are not admitted settings; explicit path APIs
 reject undeclared keys. Runtime schema leaves cannot all appear in static
 qmltypes, so dynamic consumers use a var handle; native facades supply static
@@ -199,5 +200,7 @@ that links no configqml library, Core-only dependency checks, and private-API
 isolation/exact-version checks. Timing reports worst GUI ingress and publication
 microseconds; it is characterization, not a promised full-shell 16 ms budget.
 File/watcher conflict behavior and collection models are documented in
-[json-files.md](json-files.md) and [models.md](models.md). Drafts, profiles and
-installed-package compatibility remain the named downstream milestones.
+[json-files.md](json-files.md) and [models.md](models.md). Drafts/profiles are
+documented in [editors-profiles.md](editors-profiles.md), and migrations/admission/
+secrets in [evolution-secrets.md](evolution-secrets.md). Installed-package
+compatibility remains the distribution milestone.

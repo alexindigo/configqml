@@ -24,6 +24,10 @@ The following describes production key provenance and the audited boundaries.
 | 10 | JSON layout/order metadata | decode owns its root path before producing layout keys. Decoded object keys are owned parser values. |
 | 11 | Row-ID index hashes and protected nodes | IDs/keys derive from admitted owned rows; nodes retain only immutable owned schema/value data. Public node construction uses the schema-owned factory. |
 | 12 | Process shutdown registry | Keys are primitive QObject pointer identities; shared worker owners own their store IDs. No borrowed text key is stored. |
+| 13 | Drafts and asynchronous scopes | Draft paths derive from the owned schema; edits use canonical owned validation/sealed admission. Scope prefixes and profile command paths/names are captured before retention. Detaching consumers cannot cancel worker-owned groups. |
+| 14 | Raw migrations | Native callbacks own worker-safe captures; QML compiles explicit owned source strings in a worker-local engine. Only captured plain data leaves that stack frame. Original bytes/backups and confirmed publication revisions remain worker-owned. |
+| 15 | Diagnostic schema context | ConfigDiagnosticBuilder retains immutable descriptor metadata and owned base/source prefixes. One implementation identifies authored versus content-derived segments; capture, codecs, layers and native/QML delivery share it. Detached scopes retain the context, never a raw value/merge owner. |
+| 16 | Accepted intent fences | The worker advances one per-path accepted-intent revision for every successful command/group producer. Object-thread path generations remain ingress fences, and cannot be synthesized by a worker-built profile group. |
 
 Environment/descriptor compilation has temporary lookup tables over its inputs;
 only owned output paths/values and the frozen schema cross the compilation

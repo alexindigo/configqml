@@ -21,6 +21,7 @@ struct ConfigLayer {
     ConfigAdmissionPolicy policy = ConfigAdmissionPolicy::FieldFallback;
     QList<ConfigSource> sources;
     bool writable = false;
+    bool shippedDefaults = false;
 };
 struct ConfigOperation {
     bool accepted = false;
@@ -83,7 +84,9 @@ public:
     std::optional<QVariant> value(const ConfigPath &path) const;
     std::optional<ConfigSource> source(const QString &layerId, const QString &sourceId) const;
     QList<ConfigDiagnostic> diagnostics(const QString &layerId, const QString &sourceId) const;
+    QList<ConfigDiagnostic> rejectedDiagnostics() const;
     ConfigOperation replaceSource(const QString &layerId, const ConfigSource &source);
+    ConfigOperation replaceSources(const QString &layerId, const QList<ConfigSource> &sources);
     ConfigInfo info(const ConfigPath &path) const;
     ConfigWriteResult setUser(const ConfigPath &path, const QVariant &value);
     ConfigWriteResult reset(const ConfigPath &path, const QString &targetLayer);
@@ -100,12 +103,14 @@ private:
         ConfigSource source;
         QMap<ConfigPath, AdmittedValue> admitted;
         QList<ConfigDiagnostic> errors;
+        bool rejected = false;
     };
     struct LayerState {
         ConfigLayer descriptor;
         QList<SourceState> sources;
     };
     ConfigOperation admit(LayerState &layer, SourceState &state, const ConfigSource &source);
+    bool rejects(const LayerState &layer, const ConfigPath &path) const;
     ConfigRoute route(const ConfigPath &path, const QString &layerId) const;
     ConfigWriteResult write(const ConfigPath &path, const QVariant &value, bool runtime);
     ConfigWriteResult erase(const ConfigPath &path, const QString &layerId, bool runtime);

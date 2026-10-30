@@ -17,9 +17,10 @@ ConfigPath ownPath(const ConfigPath &path) {
 }
 QString ownString(const QString &value) { return QString(value.constData(), value.size()); }
 
-static ConfigValueResult capture(const QVariant &in, const ConfigPath &path, int depth) {
+static ConfigValueResult capture(const QVariant &in, const ConfigPath &path, int depth,
+                                 const ConfigDiagnosticBuilder &diagnostics) {
     auto fail = [&](const char *code) {
-        return ConfigValueResult{{}, {{path, QString::fromLatin1(code)}}};
+        return ConfigValueResult{{}, {diagnostics.make(path, QString::fromLatin1(code))}};
     };
     if (depth > 64)
         return fail("value-depth");
@@ -59,7 +60,8 @@ static ConfigValueResult capture(const QVariant &in, const ConfigPath &path, int
         ConfigValueResult result;
         const auto list = in.toList();
         for (qsizetype i = 0; i < list.size(); ++i) {
-            auto item = capture(list[i], path + ConfigPath{QString::number(i)}, depth + 1);
+            auto item =
+                capture(list[i], path + ConfigPath{QString::number(i)}, depth + 1, diagnostics);
             result.errors.append(item.errors);
             out.append(item.value);
         }
@@ -72,7 +74,7 @@ static ConfigValueResult capture(const QVariant &in, const ConfigPath &path, int
         ConfigValueResult result;
         const auto map = in.toMap();
         for (auto it = map.cbegin(); it != map.cend(); ++it) {
-            auto item = capture(it.value(), path + ConfigPath{it.key()}, depth + 1);
+            auto item = capture(it.value(), path + ConfigPath{it.key()}, depth + 1, diagnostics);
             result.errors.append(item.errors);
             out.insert(QString(it.key().constData(), it.key().size()), item.value);
         }
@@ -85,8 +87,9 @@ static ConfigValueResult capture(const QVariant &in, const ConfigPath &path, int
     }
 }
 
-ConfigValueResult ownValue(const QVariant &input, const ConfigPath &path) {
-    return capture(input, path, 0);
+ConfigValueResult ownValue(const QVariant &input, const ConfigPath &path,
+                           const ConfigDiagnosticBuilder &diagnostics) {
+    return capture(input, path, 0, diagnostics);
 }
 
 bool startsWith(const ConfigPath &path, const ConfigPath &prefix) {

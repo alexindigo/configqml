@@ -97,10 +97,11 @@ private:
     QList<QJSValue> &m_ancestors;
 };
 } // namespace
-ConfigValueResult captureQmlValue(const QVariant &value, const ConfigPath &path) {
+ConfigValueResult captureQmlValue(const QVariant &value, const ConfigPath &path,
+                                  const ConfigDiagnosticBuilder &diagnostics) {
     QList<QJSValue> ancestors;
     QmlInput input(value, ancestors);
-    return captureValue(input, path);
+    return captureValue(input, path, diagnostics);
 }
 ConfigAdmission admitQmlInput(const ConfigSchema &schema, const ConfigPath &path,
                               const QVariant &value) {
@@ -118,11 +119,15 @@ ConfigValueResult admitQmlValue(const ConfigDescriptor &d, const QVariant &input
 QVariant qmlValue(const ConfigDescriptor &d, const QVariant &v) {
     return collectionPresentation(d, v);
 }
-QVariantMap qmlResult(const ConfigResult &r) {
+QVariantMap qmlResult(const ConfigResult &input, const ConfigDiagnosticBuilder &diagnostics) {
+    const auto r = diagnostics.sanitize(input);
     QVariantMap covered;
     for (auto it = r.coveredRevisions.cbegin(); it != r.coveredRevisions.cend(); ++it)
         covered[it.key()] = QString::fromLatin1(it->token);
     QVariantList publications;
+    QVariantList masks;
+    for (auto it = r.masks.cbegin(); it != r.masks.cend(); ++it)
+        masks.append(QVariantMap{{"path", it.key()}, {"maskedBy", it.value()}});
     for (const auto &p : r.publications)
         publications.append(QVariantMap{{"sourceId", p.sourceId},
                                         {"success", p.success},
@@ -146,6 +151,7 @@ QVariantMap qmlResult(const ConfigResult &r) {
                                   {"line", r.error.line},
                                   {"operation", r.error.operation}}},
             {"maskedBy", r.maskedBy},
+            {"masks", masks},
             {"description", r.description()}};
 }
 } // namespace configqml

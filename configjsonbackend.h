@@ -26,12 +26,14 @@ struct ConfigJsonTransaction {
 class ConfigJsonBackend : public ConfigBackend {
 public:
     using FaultHook = std::function<QString(const QString &phase, const QString &file)>;
-    explicit ConfigJsonBackend(const QList<ConfigJsonFile> &files, FaultHook hook = {});
+    explicit ConfigJsonBackend(const QList<ConfigJsonFile> &files, FaultHook hook = {},
+                               const QMap<QString, ConfigDiagnosticBuilder> &diagnostics = {});
     ConfigBackendCapabilities capabilities() const override;
     quint64 submit(const ConfigBackendRequest &request) override;
     std::optional<ConfigBackendResult> take(quint64 requestId) override;
     ConfigJsonTransaction reconcile(const QString &sourceId, const QVariantMap &baseline,
                                     const QList<ConfigFileEdit> &edits);
+    ConfigError preserveBackup(const QString &sourceId, int version, const QByteArray &original);
     bool changed(const QString &sourceId) const;
     void confirm(const QString &sourceId, const ConfigRevision &revision);
     QString path(const QString &sourceId) const;
@@ -52,6 +54,7 @@ private:
     QString fault(const QString &phase, const QString &target) const;
     QList<ConfigJsonFile> m_files;
     FaultHook m_hook;
+    QMap<QString, ConfigDiagnosticBuilder> m_diagnostics;
     QMap<QString, QByteArray> m_confirmed;
     QMap<QString, QString> m_sourceTargets;
     QMap<QString, quint64> m_reads;

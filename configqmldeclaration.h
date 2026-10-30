@@ -5,6 +5,7 @@
 #include <QObject>
 #include <QQmlListProperty>
 #include <QtQml/qqmlregistration.h>
+#include <QJSValue>
 
 namespace configqml {
 class ConfigDeclaration : public QObject {
@@ -12,9 +13,16 @@ class ConfigDeclaration : public QObject {
     QML_ANONYMOUS
     Q_CLASSINFO("DefaultProperty", "children")
     Q_PROPERTY(QString key MEMBER key)
+    Q_PROPERTY(bool sensitive MEMBER sensitive)
+    Q_PROPERTY(bool machineLocal MEMBER machineLocal)
+    Q_PROPERTY(AdmissionPolicy admissionPolicy MEMBER admissionPolicy)
     Q_PROPERTY(QQmlListProperty<configqml::ConfigDeclaration> children READ children)
 public:
     using QObject::QObject;
+    enum AdmissionPolicy { Inherit, Strict, Tolerant };
+    Q_ENUM(AdmissionPolicy)
+    bool sensitive = false, machineLocal = false;
+    AdmissionPolicy admissionPolicy = Inherit;
     QString key;
     QQmlListProperty<ConfigDeclaration> children() { return {this, &m_children}; }
     virtual ConfigDescriptor compile(QList<ConfigDiagnostic> &errors,
@@ -34,8 +42,15 @@ public:
 class ConfigQmlSchema : public ConfigQmlGroup {
     Q_OBJECT
     QML_NAMED_ELEMENT(ConfigSchema)
+    Q_PROPERTY(int version MEMBER version)
+    Q_PROPERTY(QJSValue migrations READ migrationFunctions WRITE setMigrationFunctions)
 public:
     using ConfigQmlGroup::ConfigQmlGroup;
+    int version = 0;
+    QJSValue migrations;
+    QJSValue migrationFunctions() const { return migrations; }
+    void setMigrationFunctions(const QJSValue &value) { migrations = value; }
+    QList<ConfigMigration> compileMigrations(QList<ConfigDiagnostic> &errors) const;
 };
 class ConfigQmlValue : public ConfigDeclaration {
     Q_OBJECT
@@ -47,7 +62,6 @@ class ConfigQmlValue : public ConfigDeclaration {
     Q_PROPERTY(QVariant maximum MEMBER maximum)
     Q_PROPERTY(bool optional MEMBER optional)
     Q_PROPERTY(bool nullable MEMBER nullable)
-    Q_PROPERTY(bool sensitive MEMBER sensitive)
     Q_PROPERTY(bool forbidden MEMBER forbidden)
     Q_PROPERTY(QString idField MEMBER idField)
 public:
@@ -62,7 +76,8 @@ public:
         List,
         StringList,
         Record,
-        Map
+        Map,
+        SecretRef
     };
     Q_ENUM(ValueType)
     using ConfigDeclaration::ConfigDeclaration;
@@ -71,7 +86,7 @@ public:
     QVariantList choices;
     QVariant minimum, maximum;
     QString idField;
-    bool optional = false, nullable = false, sensitive = false, forbidden = false;
+    bool optional = false, nullable = false, forbidden = false;
     ConfigDescriptor compile(QList<ConfigDiagnostic> &errors,
                              const ConfigPath &path = {}) const override;
 };
@@ -85,15 +100,21 @@ class ConfigMemorySource : public QObject {
     Q_PROPERTY(bool writable MEMBER writable)
     Q_PROPERTY(bool exists MEMBER exists)
     Q_PROPERTY(Kind kind MEMBER kind)
+    Q_PROPERTY(bool shippedDefaults MEMBER shippedDefaults)
+    Q_PROPERTY(AdmissionPolicy admissionPolicy MEMBER admissionPolicy)
 public:
     enum Kind { File, Environment, Runtime };
     Q_ENUM(Kind)
+    enum AdmissionPolicy { RejectInput, FieldFallback, RetainLastGood };
+    Q_ENUM(AdmissionPolicy)
+    AdmissionPolicy admissionPolicy = FieldFallback;
     using QObject::QObject;
     QString layerId = "user", sourceId = "memory";
     QStringList prefix;
     QVariantMap data;
     bool writable = true, exists = true;
     Kind kind = File;
+    bool shippedDefaults = false;
 };
 class ConfigJsonFileSource : public ConfigMemorySource {
     Q_OBJECT
@@ -101,18 +122,14 @@ class ConfigJsonFileSource : public ConfigMemorySource {
     Q_PROPERTY(QString path MEMBER path)
     Q_PROPERTY(bool optional MEMBER optional)
     Q_PROPERTY(WatchMode watchMode MEMBER watchMode)
-    Q_PROPERTY(AdmissionPolicy admissionPolicy MEMBER admissionPolicy)
 public:
     enum WatchMode { Off, StartupSnapshot, Live };
     Q_ENUM(WatchMode)
-    enum AdmissionPolicy { RejectInput, FieldFallback, RetainLastGood };
-    Q_ENUM(AdmissionPolicy)
     explicit ConfigJsonFileSource(QObject *parent = nullptr) : ConfigMemorySource(parent) {
         sourceId = "json";
     }
     QString path;
     bool optional = true;
     WatchMode watchMode = StartupSnapshot;
-    AdmissionPolicy admissionPolicy = FieldFallback;
 };
 } // namespace configqml

@@ -37,7 +37,9 @@ static bool less(const QVariant &a, const QVariant &b, Type type) {
 }
 
 static bool supportedConstraints(const ConfigDescriptor &d) {
-    if (d.type < Type::Group || d.type > Type::SafeInteger)
+    if (d.type < Type::Group || d.type > Type::SecretRef ||
+        d.admissionPolicy < ConfigDescriptor::AdmissionPolicy::Inherit ||
+        d.admissionPolicy > ConfigDescriptor::AdmissionPolicy::Tolerant)
         return false;
     const bool numeric = d.type == Type::Integer || d.type == Type::SafeInteger ||
                          d.type == Type::UnsignedInteger || d.type == Type::Real;
@@ -64,7 +66,8 @@ static bool supportedConstraints(const ConfigDescriptor &d) {
               (d.defaultValue || d.optional || d.nullable || d.forbidden || !d.choices.isEmpty())));
 }
 
-static ConfigValueResult numericValue(const QVariant &input, Type type, const ConfigPath &path) {
+static ConfigValueResult numericValue(const QVariant &input, Type type, const ConfigPath &path,
+                                      const ConfigDiagnosticBuilder &diagnostics) {
     ConfigValueResult result{input, {}};
     // Scalar normalization only. The owned tree is captured once by validate(),
     // never recaptured recursively for every descriptor level.
@@ -80,7 +83,7 @@ static ConfigValueResult numericValue(const QVariant &input, Type type, const Co
         [[fallthrough]];
     case QMetaType::Double:
         if (!std::isfinite(input.toDouble()))
-            return {{}, {{path, "non-finite"}}};
+            return {{}, {diagnostics.make(path, "non-finite")}};
         break;
     default:
         break;
@@ -88,27 +91,30 @@ static ConfigValueResult numericValue(const QVariant &input, Type type, const Co
     if (result.ok() && result.value.metaType() == QMetaType::fromType<ConfigNumber>()) {
         const auto number = result.value.value<ConfigNumber>();
         if (type == Type::Integer || type == Type::SafeInteger || type == Type::UnsignedInteger)
-            return number.integer(type == Type::UnsignedInteger, path);
+            return number.integer(type == Type::UnsignedInteger, path, diagnostics);
         if (type == Type::Real)
-            return number.real(path);
+            return number.real(path, diagnostics);
     }
     return result;
 }
 
 static ConfigValueResult validateNative(const ConfigDescriptor &, const QVariant &,
                                         const ConfigPath &, ConfigDescriptor::Format,
-                                        bool ownedDescriptor = false);
+                                        bool ownedDescriptor = false,
+                                        const ConfigDiagnosticBuilder *diagnostics = nullptr);
 ConfigValueResult ConfigDescriptor::validate(const QVariant &input, const ConfigPath &path,
                                              Format format) const {
     return validateNative(*this, input, path, format);
 }
-ConfigValueResult ConfigDescriptor::validateCaptured(const QVariant &input, const ConfigPath &path,
-                                                     Format format, bool childrenAdmitted) const {
-    auto owned = numericValue(input, type, path);
+ConfigValueResult
+ConfigDescriptor::validateCaptured(const QVariant &input, const ConfigPath &path, Format format,
+                                   bool childrenAdmitted,
+                                   const ConfigDiagnosticBuilder &diagnostics) const {
+    auto owned = numericValue(input, type, path, diagnostics);
     if (!owned.ok())
         return owned;
     auto fail = [&](const char *code) {
-        return ConfigValueResult{{}, {{path, QString::fromLatin1(code)}}};
+        return ConfigValueResult{{}, {diagnostics.make(path, QString::fromLatin1(code))}};
     };
     if (format == Format::Qml && !isNull(input)) {
         if (type == Type::Integer || type == Type::UnsignedInteger) {
@@ -163,6 +169,7 @@ ConfigValueResult ConfigDescriptor::validateCaptured(const QVariant &input, cons
         matches = id == QMetaType::Double;
         break;
     case Type::String:
+    case Type::SecretRef:
         matches = id == QMetaType::QString;
         break;
     case Type::Url:
@@ -189,14 +196,14 @@ ConfigValueResult ConfigDescriptor::validateCaptured(const QVariant &input, cons
             QSet<QString> identities;
             for (qsizetype i = 0; i < list.size(); ++i) {
                 auto checked = element.first().validateCaptured(
-                    list[i], path + ConfigPath{QString::number(i)}, format);
+                    list[i], path + ConfigPath{QString::number(i)}, format, false, diagnostics);
                 result.errors.append(checked.errors);
                 list[i] = checked.value;
                 if (checked.ok() && !idField.isEmpty()) {
                     const auto key = checked.value.toMap().value(idField).toString();
                     if (identities.contains(key))
-                        result.errors.append(
-                            {path + ConfigPath{QString::number(i), idField}, "duplicate-row-id"});
+                        result.errors.append(diagnostics.make(
+                            path + ConfigPath{QString::number(i), idField}, "duplicate-row-id"));
                     identities.insert(key);
                 }
             }
@@ -205,7 +212,7 @@ ConfigValueResult ConfigDescriptor::validateCaptured(const QVariant &input, cons
             auto map = v.toMap();
             for (auto it = map.begin(); it != map.end(); ++it) {
                 auto checked = element.first().validateCaptured(
-                    it.value(), path + ConfigPath{it.key()}, format);
+                    it.value(), path + ConfigPath{it.key()}, format, false, diagnostics);
                 result.errors.append(checked.errors);
                 it.value() = checked.value;
             }
@@ -216,11 +223,12 @@ ConfigValueResult ConfigDescriptor::validateCaptured(const QVariant &input, cons
         for (auto it = fields.cbegin(); it != fields.cend(); ++it) {
             const auto childPath = path + ConfigPath{it.key()};
             if (map.contains(it.key())) {
-                auto checked = it->validateCaptured(map.value(it.key()), childPath, format);
+                auto checked = it->validateCaptured(map.value(it.key()), childPath, format, false,
+                                                    diagnostics);
                 result.errors.append(checked.errors);
                 map[it.key()] = checked.value;
             } else if (!it->optional && !it->forbidden)
-                result.errors.append({childPath, "required"});
+                result.errors.append(diagnostics.make(childPath, "required"));
         }
         result.value = map;
     }
@@ -235,7 +243,8 @@ ConfigValueResult ConfigDescriptor::validateCaptured(const QVariant &input, cons
         unconstrained.maximum.reset();
         bool found = false;
         for (const auto &choice : choices) {
-            const auto c = unconstrained.validateCaptured(choice, path, Format::Native);
+            const auto c =
+                unconstrained.validateCaptured(choice, path, Format::Native, false, diagnostics);
             found |=
                 c.ok() && c.value.metaType() == result.value.metaType() && c.value == result.value;
         }
@@ -247,7 +256,7 @@ ConfigValueResult ConfigDescriptor::validateCaptured(const QVariant &input, cons
             const auto bound = lower ? minimum : maximum;
             if (!bound)
                 continue;
-            const auto b = numericValue(*bound, type, path);
+            const auto b = numericValue(*bound, type, path, diagnostics);
             if (!b.ok() || b.value.metaType() != v.metaType())
                 return fail("range-descriptor");
             if (lower ? less(v, b.value, type) : less(b.value, v, type))
@@ -297,11 +306,12 @@ private:
 struct ConfigCapture {
     static ConfigValueResult read(const ConfigDescriptor *d, const ConfigValueInput &input,
                                   ConfigPath &path, ConfigDescriptor::Format format, int depth,
-                                  bool ownedDescriptor) {
+                                  bool ownedDescriptor,
+                                  const ConfigDiagnosticBuilder &diagnostics) {
         using F = ConfigDescriptor::Format;
         using K = ConfigValueInput::Kind;
         auto fail = [&](const QString &code) {
-            return ConfigValueResult{{}, {{path, ownString(code)}}};
+            return ConfigValueResult{{}, {diagnostics.make(path, code)}};
         };
         if (depth > 64)
             return fail("value-depth");
@@ -321,10 +331,11 @@ struct ConfigCapture {
             // string/tree is retained. All other leaves cross ownValue once.
             if (d && format == F::Qml && raw.isValid() &&
                 (d->type == Type::Integer || d->type == Type::UnsignedInteger))
-                return d->validateCaptured(raw, path, format, true);
-            const auto captured = ownValue(raw, path);
-            return d && captured.ok() ? d->validateCaptured(captured.value, path, format, true)
-                                      : captured;
+                return d->validateCaptured(raw, path, format, true, diagnostics);
+            const auto captured = ownValue(raw, path, diagnostics);
+            return d && captured.ok()
+                       ? d->validateCaptured(captured.value, path, format, true, diagnostics)
+                       : captured;
         }
         if (d) {
             if (kind == K::List && d->type != Type::List)
@@ -357,13 +368,15 @@ struct ConfigCapture {
             if (key.isNull())
                 key = ownString(inputKey);
             path.append(key);
-            auto value = read(childDescriptor, child, path, format, depth + 1, ownedDescriptor);
+            auto value =
+                read(childDescriptor, child, path, format, depth + 1, ownedDescriptor, diagnostics);
             result.errors.append(value.errors);
             if (kind == K::List) {
                 if (value.ok() && d && !d->idField.isEmpty()) {
                     const auto id = value.value.toMap().value(d->idField).toString();
                     if (identities.contains(id))
-                        result.errors.append({path + ConfigPath{d->idField}, "duplicate-row-id"});
+                        result.errors.append(
+                            diagnostics.make(path + ConfigPath{d->idField}, "duplicate-row-id"));
                     identities.insert(id);
                 }
                 list.append(value.value);
@@ -374,44 +387,51 @@ struct ConfigCapture {
         if (d && (d->type == Type::Record || d->type == Type::Group))
             for (auto field = d->fields.cbegin(); field != d->fields.cend(); ++field)
                 if (!map.contains(field.key()) && !field->optional && !field->forbidden)
-                    result.errors.append({path + ConfigPath{ownString(field.key())}, "required"});
+                    result.errors.append(
+                        diagnostics.make(path + ConfigPath{field.key()}, "required"));
         if (!result.ok())
             return result;
         const QVariant value = kind == K::List ? QVariant(list) : QVariant(map);
-        return d ? d->validateCaptured(value, path, format, true) : ConfigValueResult{value, {}};
+        return d ? d->validateCaptured(value, path, format, true, diagnostics)
+                 : ConfigValueResult{value, {}};
     }
 };
 static ConfigValueResult validateNative(const ConfigDescriptor &d, const QVariant &value,
                                         const ConfigPath &path, ConfigDescriptor::Format format,
-                                        bool ownedDescriptor) {
+                                        bool ownedDescriptor,
+                                        const ConfigDiagnosticBuilder *diagnostics) {
     NativeInput input(value);
     auto ownedPath = ownPath(path);
-    return ConfigCapture::read(&d, input, ownedPath, format, 0, ownedDescriptor);
+    const auto bound = diagnostics ? *diagnostics : ConfigDiagnosticBuilder(d, path);
+    return ConfigCapture::read(&d, input, ownedPath, format, 0, ownedDescriptor, bound);
 }
-ConfigValueResult captureValue(const ConfigValueInput &input, const ConfigPath &path) {
+ConfigValueResult captureValue(const ConfigValueInput &input, const ConfigPath &path,
+                               const ConfigDiagnosticBuilder &diagnostics) {
     auto ownedPath = ownPath(path);
     return ConfigCapture::read(nullptr, input, ownedPath, ConfigDescriptor::Format::Native, 0,
-                               false);
+                               false, diagnostics);
 }
 ConfigValueResult ConfigDescriptor::validate(const ConfigValueInput &input, const ConfigPath &path,
                                              Format format) const {
     auto ownedPath = ownPath(path);
-    return ConfigCapture::read(this, input, ownedPath, format, 0, false);
+    return ConfigCapture::read(this, input, ownedPath, format, 0, false,
+                               ConfigDiagnosticBuilder(*this, path));
 }
 
 static ConfigDescriptor ownDescriptor(const ConfigDescriptor &input, const ConfigPath &path,
-                                      QList<ConfigDiagnostic> &errors) {
+                                      QList<ConfigDiagnostic> &errors,
+                                      const ConfigDiagnosticBuilder &diagnostics) {
     auto out = input;
     out.idField = QString(input.idField.constData(), input.idField.size());
     out.fields.clear();
     out.element.clear();
     out.choices.clear();
     if (path.size() > 64) {
-        errors.append(ConfigDiagnostic{path, "schema-depth"});
+        errors.append(diagnostics.make(path, "schema-depth"));
         return out;
     }
     auto capture = [&](const QVariant &v) {
-        auto result = ownValue(v, path);
+        auto result = ownValue(v, path, diagnostics);
         errors.append(result.errors);
         return result.value;
     };
@@ -425,66 +445,84 @@ static ConfigDescriptor ownDescriptor(const ConfigDescriptor &input, const Confi
         out.choices.append(capture(choice));
     for (auto it = input.fields.cbegin(); it != input.fields.cend(); ++it) {
         const QString key(it.key().constData(), it.key().size());
-        out.fields.insert(key, ownDescriptor(it.value(), path + ConfigPath{key}, errors));
+        out.fields.insert(key,
+                          ownDescriptor(it.value(), path + ConfigPath{key}, errors, diagnostics));
     }
     for (const auto &element : input.element)
-        out.element.append(ownDescriptor(element, path + ConfigPath{"*"}, errors));
+        out.element.append(ownDescriptor(element, path + ConfigPath{"*"}, errors, diagnostics));
     return out;
 }
 
-ConfigSchema::ConfigSchema(const ConfigDescriptor &root) {
-    m_root = ownDescriptor(root, {}, m_errors);
+ConfigSchema::ConfigSchema(const ConfigDescriptor &root, int version,
+                           QList<ConfigMigration> migrations)
+    : m_version(version), m_migrations(std::move(migrations)) {
+    const ConfigDiagnosticBuilder diagnostics(root);
+    if (version < 0)
+        m_errors.append(diagnostics.make({}, "schema-version"));
+    QSet<int> versions;
+    for (const auto &migration : m_migrations) {
+        if (migration.fromVersion < 0 || migration.fromVersion >= version || !migration.transform ||
+            versions.contains(migration.fromVersion))
+            m_errors.append(diagnostics.make({}, "migration-descriptor"));
+        versions.insert(migration.fromVersion);
+    }
+    m_root = ownDescriptor(root, {}, m_errors, diagnostics);
     if (root.type != Type::Group) {
-        m_errors.append(ConfigDiagnostic{{}, "root-group"});
+        m_errors.append(diagnostics.make({}, "root-group"));
         return;
     }
     std::function<void(const ConfigDescriptor &, ConfigPath, bool)> inspect;
     inspect = [&](const ConfigDescriptor &d, ConfigPath path, bool setting) {
         if (path.size() > 64) {
-            m_errors.append({path, "schema-depth"});
+            m_errors.append(diagnostics.make(path, "schema-depth"));
             return;
         }
         const bool numeric = d.type == Type::Integer || d.type == Type::SafeInteger ||
                              d.type == Type::UnsignedInteger || d.type == Type::Real;
         if (!supportedConstraints(d))
-            m_errors.append({path, "descriptor"});
+            m_errors.append(diagnostics.make(path, "descriptor"));
         auto unconstrained = d;
         unconstrained.choices.clear();
         unconstrained.minimum.reset();
         unconstrained.maximum.reset();
         unconstrained.forbidden = false;
         for (const auto &c : d.choices)
-            m_errors.append(unconstrained.validate(c, path).errors);
+            m_errors.append(validateNative(unconstrained, c, path, ConfigDescriptor::Format::Native,
+                                           true, &diagnostics)
+                                .errors);
         for (const auto &b : {d.minimum, d.maximum})
             if (b) {
-                m_errors.append(unconstrained.validate(*b, path).errors);
+                m_errors.append(validateNative(unconstrained, *b, path,
+                                               ConfigDescriptor::Format::Native, true, &diagnostics)
+                                    .errors);
                 if (isNull(*b))
-                    m_errors.append({path, "range-descriptor"});
+                    m_errors.append(diagnostics.make(path, "range-descriptor"));
             }
         if (d.minimum && d.maximum && numeric) {
-            const auto low = numericValue(*d.minimum, d.type, path);
-            const auto high = numericValue(*d.maximum, d.type, path);
+            const auto low = numericValue(*d.minimum, d.type, path, diagnostics);
+            const auto high = numericValue(*d.maximum, d.type, path, diagnostics);
             if (low.ok() && high.ok() && less(high.value, low.value, d.type))
-                m_errors.append({path, "range-order"});
+                m_errors.append(diagnostics.make(path, "range-order"));
         }
         if (d.defaultValue) {
-            const auto checked = d.validate(*d.defaultValue, path);
+            const auto checked = validateNative(
+                d, *d.defaultValue, path, ConfigDescriptor::Format::Native, true, &diagnostics);
             m_errors.append(checked.errors);
             if (setting && checked.ok())
                 putValue(m_defaults, path, checked.value);
         } else if (setting && d.type != Type::Group && !d.optional && !d.forbidden) {
-            m_errors.append({path, "required-default"});
+            m_errors.append(diagnostics.make(path, "required-default"));
         }
         if (setting && d.type != Type::Group)
             m_leaves.append(path);
         for (auto it = d.fields.cbegin(); it != d.fields.cend(); ++it) {
-            if (it.key().isEmpty())
-                m_errors.append({path, "empty-key"});
+            if (it.key().isEmpty() || it.key() == "_configqmlVersion")
+                m_errors.append(diagnostics.make(path, "empty-key"));
             inspect(it.value(), path + ConfigPath{it.key()}, setting && d.type == Type::Group);
         }
         for (const auto &item : d.element) {
             if (item.optional)
-                m_errors.append({path, "optional-element"});
+                m_errors.append(diagnostics.make(path, "optional-element"));
             inspect(item, path + ConfigPath{"*"}, false);
         }
     };
@@ -504,12 +542,13 @@ std::optional<ConfigDescriptor> ConfigSchema::descriptor(const ConfigPath &path)
 }
 ConfigValueResult ConfigSchema::validate(const ConfigPath &path, const QVariant &value,
                                          ConfigDescriptor::Format format) const {
+    const auto builder = diagnostics();
     if (!valid())
-        return {{}, {{{}, "invalid-schema"}}};
+        return {{}, {builder.make({}, "invalid-schema")}};
     const auto d = descriptor(path);
     if (!d || d->type == Type::Group)
-        return {{}, {{path, "undeclared-leaf"}}};
-    return validateNative(*d, value, path, format, true);
+        return {{}, {builder.make(path, "undeclared-leaf")}};
+    return validateNative(*d, value, path, format, true, &builder);
 }
 ConfigAdmission ConfigSchema::admit(const ConfigPath &path, const ConfigValueInput &input,
                                     ConfigDescriptor::Format format) const {
@@ -518,16 +557,82 @@ ConfigAdmission ConfigSchema::admit(const ConfigPath &path, const ConfigValueInp
     result.m_identity = m_identity;
     const auto d = descriptor(path);
     if (!valid())
-        result.m_result.errors = {{{}, "invalid-schema"}};
+        result.m_result.errors = {diagnostics().make({}, "invalid-schema")};
     else if (!d || d->type == Type::Group)
-        result.m_result.errors = {{result.m_path, "undeclared-leaf"}};
+        result.m_result.errors = {diagnostics().make(result.m_path, "undeclared-leaf")};
     else
-        result.m_result = ConfigCapture::read(&*d, input, result.m_path, format, 0, true);
+        result.m_result =
+            ConfigCapture::read(&*d, input, result.m_path, format, 0, true, diagnostics());
     return result;
 }
 ConfigValueResult ConfigSchema::admitted(const ConfigAdmission &input) const {
     if (!input.m_identity || !m_identity || input.m_identity != m_identity)
-        return {{}, {{input.m_path, "schema-mismatch"}}};
+        return {{}, {diagnostics().make(input.m_path, "schema-mismatch")}};
     return input.m_result;
+}
+ConfigDescriptor::AdmissionPolicy ConfigSchema::policy(const ConfigPath &path) const {
+    auto node = m_root;
+    auto result = node.admissionPolicy;
+    for (const auto &key : path) {
+        if ((node.type == Type::List || node.type == Type::Map) && node.element.size() == 1)
+            node = node.element.first();
+        else {
+            if (!node.fields.contains(key))
+                break;
+            node = node.fields.value(key);
+        }
+        if (node.admissionPolicy != ConfigDescriptor::AdmissionPolicy::Inherit)
+            result = node.admissionPolicy;
+    }
+    return result;
+}
+static bool excluded(const ConfigDescriptor &node) {
+    if (node.sensitive || node.machineLocal || node.forbidden ||
+        node.type == ConfigDescriptor::Type::SecretRef)
+        return true;
+    for (const auto &child : node.fields)
+        if (excluded(child))
+            return true;
+    for (const auto &child : node.element)
+        if (excluded(child))
+            return true;
+    return false;
+}
+bool ConfigSchema::portable(const ConfigPath &path) const {
+    auto node = m_root;
+    if (node.sensitive || node.machineLocal || node.forbidden)
+        return false;
+    for (const auto &key : path) {
+        if (node.type != Type::Group || !node.fields.contains(key))
+            return false;
+        node = node.fields.value(key);
+        if (node.sensitive || node.machineLocal || node.forbidden)
+            return false;
+    }
+    return node.type != Type::Group && !excluded(node);
+}
+static bool hasSensitive(const ConfigDescriptor &node) {
+    if (node.sensitive || node.type == Type::SecretRef)
+        return true;
+    for (const auto &child : node.fields)
+        if (hasSensitive(child))
+            return true;
+    for (const auto &child : node.element)
+        if (hasSensitive(child))
+            return true;
+    return false;
+}
+bool ConfigSchema::sensitive(const ConfigPath &path) const {
+    auto node = m_root;
+    if (node.sensitive)
+        return true;
+    for (const auto &key : path) {
+        if (node.type != Type::Group || !node.fields.contains(key))
+            return false;
+        node = node.fields.value(key);
+        if (node.sensitive)
+            return true;
+    }
+    return hasSensitive(node);
 }
 } // namespace configqml

@@ -10,8 +10,10 @@ public:
     ConfigNumber() = default;
     static std::optional<ConfigNumber> fromJson(const QString &token);
     QString token() const { return m_token; }
-    ConfigValueResult integer(bool unsignedType, const ConfigPath &path = {}) const;
-    ConfigValueResult real(const ConfigPath &path = {}) const;
+    ConfigValueResult integer(bool unsignedType, const ConfigPath &path = {},
+                              const ConfigDiagnosticBuilder &diagnostics = {}) const;
+    ConfigValueResult real(const ConfigPath &path = {},
+                           const ConfigDiagnosticBuilder &diagnostics = {}) const;
     bool operator==(const ConfigNumber &other) const { return m_token == other.m_token; }
 
 private:
@@ -30,7 +32,9 @@ struct ConfigJsonLayout {
     qsizetype errorOffset = 0;
 };
 ConfigValueResult decodeJsonValue(const QByteArray &bytes, const ConfigPath &path = {},
-                                  ConfigJsonLayout *layout = nullptr);
-ConfigJsonEncodeResult encodeJsonValue(const QVariant &value, const ConfigPath &path = {});
+                                  ConfigJsonLayout *layout = nullptr,
+                                  const ConfigDiagnosticBuilder &diagnostics = {});
+ConfigJsonEncodeResult encodeJsonValue(const QVariant &value, const ConfigPath &path = {},
+                                       const ConfigDiagnosticBuilder &diagnostics = {});
 } // namespace configqml
 Q_DECLARE_METATYPE(configqml::ConfigNumber)

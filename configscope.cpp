@@ -5,12 +5,16 @@
 namespace configqml {
 ConfigScope::ConfigScope(std::shared_ptr<ConfigLayers> owner, ConfigPath prefix, bool writable)
     : m_owner(std::move(owner)), m_prefix(ownPath(prefix)), m_writable(writable) {
+    if (m_owner)
+        m_diagnostics = m_owner->schema().diagnostics();
     const auto d = m_owner ? m_owner->schema().descriptor(m_prefix) : std::nullopt;
     if (!m_owner || !m_owner->valid() || !d || d->type != ConfigDescriptor::Type::Group)
         m_owner.reset();
 }
 ConfigScope ConfigScope::scope(const ConfigPath &relative, bool writable) const {
-    return ConfigScope(m_owner, m_prefix + relative, m_writable && writable);
+    auto child = ConfigScope(m_owner, m_prefix + relative, m_writable && writable);
+    child.m_diagnostics = m_diagnostics;
+    return child;
 }
 std::optional<QVariant> ConfigScope::value(const ConfigPath &relative) const {
     return m_owner ? m_owner->value(m_prefix + relative) : std::nullopt;
@@ -23,7 +27,11 @@ ConfigInfo ConfigScope::info(const ConfigPath &relative) const {
 }
 ConfigWriteResult ConfigScope::denied(const ConfigPath &relative) const {
     return {
-        false, {{m_prefix + relative, m_owner ? "read-only-scope" : "detached-scope"}}, {}, {}, 0};
+        false,
+        {m_diagnostics.make(m_prefix + relative, m_owner ? "read-only-scope" : "detached-scope")},
+        {},
+        {},
+        0};
 }
 ConfigWriteResult ConfigScope::setUser(const ConfigPath &relative, const QVariant &value) {
     return m_owner && m_writable ? m_owner->setUser(m_prefix + relative, value) : denied(relative);

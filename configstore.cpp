@@ -38,7 +38,7 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
         for (auto &source : layer.sources) {
             source.id = QString(source.id.constData(), source.id.size());
             source.prefix = ownPath(source.prefix);
-            const auto raw = ownValue(source.raw);
+            const auto raw = ownValue(source.raw, source.prefix, m_schema.diagnostics());
             if (raw.ok())
                 source.raw = raw.value.toMap();
             else {
@@ -104,6 +104,17 @@ ConfigPathState ConfigStore::info(const ConfigPath &path) const {
     Q_ASSERT(QThread::currentThread() == thread());
     return m_cache.information.value(path);
 }
+QList<ConfigInput> ConfigStore::inputs() const {
+    auto result = m_inputs;
+    for (auto &input : result) {
+        if (m_schema.sensitive(input.path))
+            input.value.clear();
+        for (auto it = input.edits.begin(); it != input.edits.end(); ++it)
+            if (m_schema.sensitive(it.key()))
+                it.value() = QVariant(); // Redacted, not a reset command.
+    }
+    return result;
+}
 ConfigListModel *ConfigStore::listModel(const ConfigPath &path) const {
     Q_ASSERT(QThread::currentThread() == thread());
     auto *model = m_models.value(path).get();
@@ -132,6 +143,7 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
                                        const ConfigAdmission *admission) {
     Q_ASSERT(QThread::currentThread() == thread());
     const auto path = ownPath(queryPath);
+    const auto diagnostics = m_schema.diagnostics();
     ConfigRequestHandle handle;
     ConfigConsumerGuard boundary(this);
     auto checked = admission ? m_schema.admitted(*admission)
@@ -140,22 +152,22 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
                        ? m_schema.validate(path, value, format)
                        : ConfigValueResult{};
     if (!m_accepting || !m_owner->accepting() || m_status != Status::Ready)
-        checked.errors = {
-            {path, m_accepting && m_owner->accepting() ? "not-ready" : "store-closed"}};
+        checked.errors = {diagnostics.make(
+            path, m_accepting && m_owner->accepting() ? "not-ready" : "store-closed")};
     if (!m_error.isEmpty())
-        checked.errors = {{path, m_error}};
+        checked.errors = {diagnostics.make(path, m_error)};
     if ((kind == ConfigInput::Kind::Reset || kind == ConfigInput::Kind::ClearRuntime) &&
         !m_schema.descriptor(path))
-        checked.errors = {{path, "undeclared-path"}};
+        checked.errors = {diagnostics.make(path, "undeclared-path")};
     if (checked.ok() &&
         (kind == ConfigInput::Kind::User || kind == ConfigInput::Kind::Initialize) &&
         !canWriteUser(path))
-        checked.errors = {{path, "read-only-path"}};
+        checked.errors = {diagnostics.make(path, "read-only-path")};
     if (checked.ok() && kind == ConfigInput::Kind::Reset) {
         const auto route = m_userRoutes.lowerBound(path);
         const bool coversSource = route != m_userRoutes.cend() && startsWith(route.key(), path);
         if (target != m_userLayerId || (!canWriteUser(path) && !coversSource))
-            checked.errors = {{path, "read-only-path"}};
+            checked.errors = {diagnostics.make(path, "read-only-path")};
     }
     handle.requestId = registerRequest(context, std::move(callback));
     if (!checked.ok()) {
@@ -166,10 +178,10 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
         result.operation = "write";
         result.status = "failed";
         result.inputPrefix = m_sequence;
-        result.error = {checked.errors.first().code, {}, "ingress"};
+        result.error = diagnostics.error(checked.errors.first(), {}, "ingress");
         QMetaObject::invokeMethod(
             this, [this, result] { receiveResult(result); }, Qt::QueuedConnection);
-        boundary.invoke([&] { emit inputRejected(path, result.error.code); });
+        boundary.invoke([&] { emit inputRejected(diagnostics.path(path), result.error.code); });
         return handle;
     }
     ConfigInput input;
@@ -188,7 +200,7 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
         }
     ConfigCommand command{handle.requestId, input.sequence, "write", input};
     if (!m_owner->dispatch(command)) {
-        handle.errors = {{path, "store-closed"}};
+        handle.errors = {diagnostics.make(path, "store-closed")};
         ConfigResult result;
         result.requestId = handle.requestId;
         result.storeId = m_storeId;
@@ -198,7 +210,7 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
         result.error = {"store-closed", {}, "ingress"};
         QMetaObject::invokeMethod(
             this, [this, result] { receiveResult(result); }, Qt::QueuedConnection);
-        boundary.invoke([&] { emit inputRejected(path, result.error.code); });
+        boundary.invoke([&] { emit inputRejected(diagnostics.path(path), result.error.code); });
         return handle;
     }
     m_sequence = input.sequence;
@@ -323,7 +335,7 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
             m_cache.values[it.key()] = next;
             const auto latest = state.latestInput;
             state = it.value();
-            state.latestInput = latest;
+            state.latestInput = qMax(latest, it->latestInput);
             if (auto *model = m_models.value(it.key()).get()) {
                 const auto plans = packet.models.value(it.key());
                 const auto base = model->m_generation;
@@ -361,6 +373,8 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
     }
     m_publishingModels = false;
     m_owner->acknowledgeModels(acknowledgements);
+    if (packet.admitted && !boundary.invoke([&] { emit published(); }))
+        return;
     if (!changed.isEmpty() && !boundary.invoke([&] { emit valuesChanged(changed); }))
         return;
     if (statusChange && !boundary.invoke([&] { emit statusChanged(); }))
@@ -372,7 +386,12 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
         } else if (!boundary.invoke([&] { receiveResult(*packet.result); }))
             return;
     }
-    if (packet.sourceError && !boundary.invoke([&] { emit sourceError(*packet.sourceError); }))
+    if (packet.sourceError && !boundary.invoke([&] {
+            emit sourceError(m_schema.diagnostics().sanitize(*packet.sourceError));
+        }))
+        return;
+    if (packet.migrationResult &&
+        !boundary.invoke([&] { emit migrationCompleted(*packet.migrationResult); }))
         return;
     if (packet.autoSaveRequested && m_accepting && m_status == Status::Ready)
         request("autosave", this, {});
@@ -380,7 +399,8 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
     if (!packet.models.isEmpty())
         m_lastLibraryPublicationNanos = publicationTimer.nsecsElapsed() - modelNotifications;
 }
-void ConfigStore::receiveResult(const ConfigResult &result) {
+void ConfigStore::receiveResult(const ConfigResult &input) {
+    const auto result = m_schema.diagnostics().sanitize(input);
     if (result.requestId < m_nextCompletion || !m_pending.contains(result.requestId))
         return;
     m_results[result.requestId] = result;

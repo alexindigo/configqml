@@ -17,9 +17,10 @@ std::optional<ConfigNumber> ConfigNumber::fromJson(const QString &token) {
     return number;
 }
 
-ConfigValueResult ConfigNumber::integer(bool unsignedType, const ConfigPath &path) const {
+ConfigValueResult ConfigNumber::integer(bool unsignedType, const ConfigPath &path,
+                                        const ConfigDiagnosticBuilder &diagnostics) const {
     auto fail = [&](const char *code) {
-        return ConfigValueResult{{}, {{path, QString::fromLatin1(code)}}};
+        return ConfigValueResult{{}, {diagnostics.make(path, QString::fromLatin1(code))}};
     };
     if (!fromJson(m_token))
         return fail("number-syntax");
@@ -81,19 +82,21 @@ ConfigValueResult ConfigNumber::integer(bool unsignedType, const ConfigPath &pat
     return ok ? ConfigValueResult{value, {}} : fail("integer-range");
 }
 
-ConfigValueResult ConfigNumber::real(const ConfigPath &path) const {
+ConfigValueResult ConfigNumber::real(const ConfigPath &path,
+                                     const ConfigDiagnosticBuilder &diagnostics) const {
     bool ok = false;
     const double value = m_token.toDouble(&ok);
     if (!fromJson(m_token) || !ok || !std::isfinite(value))
-        return {{}, {{path, "real-range"}}};
+        return {{}, {diagnostics.make(path, "real-range")}};
     return {value, {}};
 }
 
 namespace {
 class JsonReader {
 public:
-    explicit JsonReader(const QByteArray &bytes, ConfigJsonLayout *layout)
-        : bytes(bytes), layout(layout) {}
+    explicit JsonReader(const QByteArray &bytes, ConfigJsonLayout *layout,
+                        const ConfigDiagnosticBuilder &diagnostics)
+        : bytes(bytes), layout(layout), diagnostics(diagnostics) {}
     ConfigValueResult run(const ConfigPath &path) {
         auto value = read(path, 0);
         space();
@@ -105,6 +108,7 @@ public:
 private:
     const QByteArray &bytes;
     ConfigJsonLayout *layout;
+    const ConfigDiagnosticBuilder &diagnostics;
     qsizetype offset = 0;
     QList<ConfigDiagnostic> errors;
     void space() {
@@ -122,7 +126,7 @@ private:
     }
     QVariant fail(const ConfigPath &path, const char *code = "json-syntax") {
         if (errors.isEmpty()) {
-            errors.append({path, QString::fromLatin1(code)});
+            errors.append(diagnostics.make(path, QString::fromLatin1(code)));
             if (layout)
                 layout->errorOffset = offset;
         }
@@ -245,7 +249,8 @@ QByteArray quote(const QString &text) {
     const auto encoded = QJsonDocument(QJsonArray{text}).toJson(QJsonDocument::Compact);
     return encoded.mid(1, encoded.size() - 2);
 }
-ConfigJsonEncodeResult encode(const QVariant &value, const ConfigPath &path) {
+ConfigJsonEncodeResult encode(const QVariant &value, const ConfigPath &path,
+                              const ConfigDiagnosticBuilder &diagnostics) {
     if (value.metaType() == QMetaType::fromType<ConfigNumber>())
         return {value.value<ConfigNumber>().token().toLatin1(), {}};
     switch (value.metaType().id()) {
@@ -270,7 +275,7 @@ ConfigJsonEncodeResult encode(const QVariant &value, const ConfigPath &path) {
         QByteArray bytes = "[";
         const auto list = value.toList();
         for (qsizetype i = 0; i < list.size(); ++i) {
-            const auto item = encode(list[i], path + ConfigPath{QString::number(i)});
+            const auto item = encode(list[i], path + ConfigPath{QString::number(i)}, diagnostics);
             if (!item.ok())
                 return item;
             if (i)
@@ -283,7 +288,7 @@ ConfigJsonEncodeResult encode(const QVariant &value, const ConfigPath &path) {
         QByteArray bytes = "{";
         const auto map = value.toMap();
         for (auto it = map.cbegin(); it != map.cend(); ++it) {
-            const auto item = encode(it.value(), path + ConfigPath{it.key()});
+            const auto item = encode(it.value(), path + ConfigPath{it.key()}, diagnostics);
             if (!item.ok())
                 return item;
             if (it != map.cbegin())
@@ -293,17 +298,20 @@ ConfigJsonEncodeResult encode(const QVariant &value, const ConfigPath &path) {
         return {bytes + '}', {}};
     }
     default:
-        return {{}, {{path, "json-unsupported-value"}}};
+        return {{}, {diagnostics.make(path, "json-unsupported-value")}};
     }
 }
 } // namespace
 
 ConfigValueResult decodeJsonValue(const QByteArray &bytes, const ConfigPath &path,
-                                  ConfigJsonLayout *layout) {
-    return JsonReader(bytes, layout).run(ownPath(path));
+                                  ConfigJsonLayout *layout,
+                                  const ConfigDiagnosticBuilder &diagnostics) {
+    return JsonReader(bytes, layout, diagnostics).run(ownPath(path));
 }
-ConfigJsonEncodeResult encodeJsonValue(const QVariant &value, const ConfigPath &path) {
-    const auto owned = ownValue(value, path);
-    return owned.ok() ? encode(owned.value, path) : ConfigJsonEncodeResult{{}, owned.errors};
+ConfigJsonEncodeResult encodeJsonValue(const QVariant &value, const ConfigPath &path,
+                                       const ConfigDiagnosticBuilder &diagnostics) {
+    const auto owned = ownValue(value, path, diagnostics);
+    return owned.ok() ? encode(owned.value, path, diagnostics)
+                      : ConfigJsonEncodeResult{{}, owned.errors};
 }
 } // namespace configqml

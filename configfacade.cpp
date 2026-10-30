@@ -6,13 +6,16 @@
 namespace configqml {
 ConfigFacade::ConfigFacade(ConfigStore *store, ConfigPath prefix, QObject *parent)
     : QObject(parent), m_store(store), m_prefix(ownPath(prefix)) {
-    connect(store, &ConfigStore::valuesChanged, this, [this](const auto &paths) {
-        ConfigConsumerGuard boundary(this);
-        for (const auto &path : paths)
-            if (startsWith(path, m_prefix))
-                if (!boundary.invoke([&] { emit settingChanged(path.mid(m_prefix.size())); }))
-                    return;
-    });
+    if (store) {
+        m_diagnostics = store->schema().diagnostics();
+        connect(store, &ConfigStore::valuesChanged, this, [this](const auto &paths) {
+            ConfigConsumerGuard boundary(this);
+            for (const auto &path : paths)
+                if (startsWith(path, m_prefix))
+                    if (!boundary.invoke([&] { emit settingChanged(path.mid(m_prefix.size())); }))
+                        return;
+        });
+    }
 }
 QVariant ConfigFacade::readSetting(const ConfigPath &relativePath) const {
     if (!m_store)
@@ -33,9 +36,10 @@ ConfigRequestHandle ConfigFacade::writeSetting(const ConfigPath &relativePath,
         if (!boundary.invoke([&] { handle = m_store->setUser(checked); }))
             return handle;
     } else
-        handle.errors = {{path, "detached-or-undeclared"}};
+        handle.errors = {m_diagnostics.make(path, "detached-or-undeclared")};
     if (!handle.accepted) {
-        if (!boundary.invoke([&] { emit inputRejected(relativePath, handle.errors.first().code); }))
+        const auto safePath = m_diagnostics.path(path).mid(m_prefix.size());
+        if (!boundary.invoke([&] { emit inputRejected(safePath, handle.errors.first().code); }))
             return handle;
         boundary.invoke([&] {
             if (auto *engine = qjsEngine(this))
