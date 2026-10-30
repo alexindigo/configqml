@@ -1,0 +1,34 @@
+set(root "@CMAKE_CURRENT_BINARY_DIR@/install-layouts/${LAYOUT}")
+set(prefix "${root}/installed-consumer/original")
+set(options)
+if(LAYOUT STREQUAL "gnu_dirs")
+    set(options -DCMAKE_INSTALL_LIBDIR=lib64 -DCMAKE_INSTALL_INCLUDEDIR=headers/versioned
+        -DCMAKE_INSTALL_DATADIR=resources)
+elseif(LAYOUT STREQUAL "relative_qml")
+    # Deliberately untyped: CACHE PATH must not rewrite this ordinary input.
+    set(options -DCONFIGQML_QML_INSTALL_DIR=imports/qml)
+elseif(LAYOUT STREQUAL "absolute_qml")
+    set(options "-DCONFIGQML_QML_INSTALL_DIR=${prefix}/imports/qml")
+elseif(LAYOUT STREQUAL "absolute_dirs")
+    set(options "-DCMAKE_INSTALL_LIBDIR=${prefix}/libraries"
+        "-DCMAKE_INSTALL_INCLUDEDIR=${prefix}/headers"
+        "-DCMAKE_INSTALL_DATADIR=${prefix}/resources"
+        -DCONFIGQML_QML_INSTALL_DIR=imports/qml)
+else()
+    message(FATAL_ERROR "Unknown install layout: ${LAYOUT}")
+endif()
+function(run)
+    execute_process(COMMAND ${ARGN} RESULT_VARIABLE status TIMEOUT 480)
+    if(NOT status EQUAL 0)
+        message(FATAL_ERROR "${ARGN}: ${status}")
+    endif()
+endfunction()
+run("@CMAKE_COMMAND@" -S "@CMAKE_CURRENT_SOURCE_DIR@" -B "${root}" -G Ninja
+    -DBUILD_TESTING=ON "-DCMAKE_BUILD_TYPE=@CMAKE_BUILD_TYPE@"
+    "-DCMAKE_INSTALL_PREFIX=${prefix}" "-DQt6_DIR=@Qt6_DIR@"
+    "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+    "-DCMAKE_CXX_FLAGS=@CMAKE_CXX_FLAGS@"
+    "-DCMAKE_EXE_LINKER_FLAGS=@CMAKE_EXE_LINKER_FLAGS@"
+    "-DCMAKE_SHARED_LINKER_FLAGS=@CMAKE_SHARED_LINKER_FLAGS@" ${options})
+run("@CMAKE_COMMAND@" --build "${root}" --target configqmlplugin --parallel 4)
+run("@CMAKE_CTEST_COMMAND@" --test-dir "${root}" -R "^installed_prefix$" -V --no-tests=error)

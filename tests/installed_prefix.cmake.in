@@ -1,0 +1,133 @@
+# Install, relocate, and exercise only public installed artifacts in new processes.
+set(root "@CMAKE_CURRENT_BINARY_DIR@/installed-consumer")
+include("@CMAKE_CURRENT_SOURCE_DIR@/cmake/ConfigQmlInstallPath.cmake")
+set(relocatable TRUE)
+foreach(destination "@CMAKE_INSTALL_LIBDIR@" "@_configqml_include_dir@"
+        "@_configqml_cmake_dir@" "@_configqml_data_dir@" "@_configqml_license_dir@"
+        "@CONFIGQML_QML_INSTALL_DIR@")
+    if(IS_ABSOLUTE "${destination}")
+        # Absolute destinations stay pinned, as with GNUInstallDirs. Matrix
+        # configurations stage them under this disposable installation prefix.
+        cmake_path(IS_PREFIX root "${destination}" NORMALIZE staged)
+        if(NOT staged)
+            message(FATAL_ERROR "Absolute test destination is outside its staged prefix: ${destination}")
+        endif()
+        set(relocatable FALSE)
+    endif()
+endforeach()
+file(REMOVE_RECURSE "${root}")
+file(MAKE_DIRECTORY "${root}")
+function(run)
+    execute_process(COMMAND ${ARGN} RESULT_VARIABLE status OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 90)
+    if(NOT status EQUAL 0)
+        message(FATAL_ERROR "${ARGN}\nexit=${status}\n${out}\n${err}")
+    endif()
+    message(STATUS "${out}${err}")
+    set(last_output "${out}${err}" PARENT_SCOPE)
+endfunction()
+run("@CMAKE_COMMAND@" --install "@CMAKE_CURRENT_BINARY_DIR@" --prefix "${root}/original")
+set(prefix "${root}/original")
+if(relocatable)
+    file(RENAME "${prefix}" "${root}/prefix")
+    set(prefix "${root}/prefix")
+endif()
+configqml_install_path(libdir "@CMAKE_INSTALL_LIBDIR@" "${prefix}")
+configqml_install_path(includedir "@_configqml_include_dir@" "${prefix}")
+configqml_install_path(cmakedir "@_configqml_cmake_dir@" "${prefix}")
+configqml_install_path(qmldir "@CONFIGQML_QML_INSTALL_DIR@" "${prefix}")
+configqml_install_path(module "@_configqml_module_dir@" "${prefix}")
+configqml_install_path(datadir "@_configqml_data_dir@" "${prefix}")
+configqml_install_path(licensedir "@_configqml_license_dir@" "${prefix}")
+foreach(required "${includedir}/configstore.h" "${cmakedir}/configqmlConfig.cmake"
+        "${datadir}/configqml-qt-build.txt" "${licensedir}/COPYING" "${licensedir}/COPYING.LESSER")
+    if(NOT EXISTS "${required}")
+        message(FATAL_ERROR "Missing installed artifact: ${required}")
+    endif()
+endforeach()
+# Supplying the prefix's libdir below must not mask broken installed RPATHs.
+if(NOT "@CMAKE_SKIP_RPATH@")
+    foreach(library configqml configqml_core)
+        file(READ_ELF "${libdir}/@CMAKE_SHARED_LIBRARY_PREFIX@${library}@CMAKE_SHARED_LIBRARY_SUFFIX@"
+            RPATH rpath RUNPATH runpath)
+        if(NOT "${rpath}${runpath}" STREQUAL "$ORIGIN")
+            message(FATAL_ERROR "Unexpected installed ${library} RPATH: ${rpath}${runpath}")
+        endif()
+    endforeach()
+    file(READ_ELF "${module}/@CMAKE_SHARED_MODULE_PREFIX@configqmlplugin@CMAKE_SHARED_MODULE_SUFFIX@"
+        RPATH rpath RUNPATH runpath)
+    if(NOT "${rpath}${runpath}" STREQUAL "$ORIGIN/@_plugin_to_lib@")
+        message(FATAL_ERROR "Unexpected installed plugin RPATH: ${rpath}${runpath}")
+    endif()
+endif()
+file(COPY "@CMAKE_CURRENT_SOURCE_DIR@/examples/" DESTINATION "${root}/examples")
+# The staged libraries take precedence even if system Qt shares a directory
+# with another installed configqml. Only the discovered Qt may supplement them.
+# Never retain inherited loader/import paths: those can hide build-tree leaks.
+set(clean "@CMAKE_COMMAND@" -E env --unset=QML2_IMPORT_PATH
+    --unset=CMAKE_PREFIX_PATH --unset=configqml_DIR
+    "LD_LIBRARY_PATH=${libdir}:@_qt_runtime_libs@" "QML_IMPORT_PATH=@_qt_qml@"
+    "QT_PLUGIN_PATH=@_qt_plugins@" QT_FORCE_STDERR_LOGGING=1)
+foreach(mode optional required default)
+    foreach(unavailable TRUE FALSE)
+        execute_process(COMMAND ${clean} "@CMAKE_COMMAND@"
+            -S "@CMAKE_CURRENT_SOURCE_DIR@/tests/package_components"
+            -B "${root}/components-${mode}-${unavailable}" -G Ninja
+            "-DQt6_DIR=@Qt6_DIR@" "-Dconfigqml_DIR=${cmakedir}" "-DMODE=${mode}"
+            "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+            "-DCMAKE_DISABLE_FIND_PACKAGE_Qt6Qml=${unavailable}"
+            RESULT_VARIABLE status OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 30)
+        if(unavailable AND NOT mode STREQUAL "optional")
+            if(status EQUAL 0 OR NOT "${out}${err}" MATCHES "Qt6")
+                message(FATAL_ERROR "Missing required Qml was not rejected: ${mode}\n${out}${err}")
+            endif()
+        elseif(NOT status EQUAL 0)
+            message(FATAL_ERROR "Component discovery failed: ${mode}/${unavailable}\n${out}${err}")
+        endif()
+    endforeach()
+endforeach()
+run(${clean} "@CMAKE_COMMAND@" -S "${root}/examples/native" -B "${root}/native"
+    -G Ninja "-DQt6_DIR=@Qt6_DIR@"
+    "-Dconfigqml_DIR=${cmakedir}"
+    "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+    "-DCMAKE_CXX_FLAGS=@CMAKE_CXX_FLAGS@" "-DCMAKE_EXE_LINKER_FLAGS=@CMAKE_EXE_LINKER_FLAGS@")
+run("@CMAKE_COMMAND@" --build "${root}/native" --parallel 2)
+run(${clean} "${root}/native/configqml-native")
+if(NOT last_output MATCHES "CONFIGQML_NATIVE_OK")
+    message(FATAL_ERROR "Native example did not observe the admitted value")
+endif()
+# Also compile/link the installed QML target and its public header closure.
+file(WRITE "${root}/qml-native/CMakeLists.txt" "cmake_minimum_required(VERSION 3.21)\nproject(qml_consumer LANGUAGES CXX)\nfind_package(configqml 0.1 REQUIRED COMPONENTS Qml)\nadd_executable(qml-consumer main.cpp)\ntarget_link_libraries(qml-consumer PRIVATE configqml::configqml)\n")
+file(WRITE "${root}/qml-native/main.cpp" "#include <configqmlstore.h>\n#include <configqmlvalue.h>\n#include <configqmlmodel.h>\n#include <configfacade.h>\n#include <cstring>\nint main() { return std::strcmp(configqml::ConfigQmlStore::staticMetaObject.className(), \"configqml::ConfigQmlStore\"); }\n")
+run(${clean} "@CMAKE_COMMAND@" -S "${root}/qml-native" -B "${root}/qml-native-build" -G Ninja
+    "-DQt6_DIR=@Qt6_DIR@" "-Dconfigqml_DIR=${cmakedir}"
+    "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+    "-DCMAKE_CXX_FLAGS=@CMAKE_CXX_FLAGS@" "-DCMAKE_EXE_LINKER_FLAGS=@CMAKE_EXE_LINKER_FLAGS@")
+run("@CMAKE_COMMAND@" --build "${root}/qml-native-build" --parallel 2)
+run(${clean} "${root}/qml-native-build/qml-consumer")
+execute_process(COMMAND ${clean} ldd "${root}/native/configqml-native" OUTPUT_VARIABLE links RESULT_VARIABLE status)
+if(NOT status EQUAL 0 OR links MATCHES "libQt6(Qml|Quick|Gui|Widgets|DBus|Concurrent)" OR
+    NOT links MATCHES "${libdir}/@CMAKE_SHARED_LIBRARY_PREFIX@configqml_core")
+    message(FATAL_ERROR "Core consumer linkage escaped installed prefix: ${links}")
+endif()
+execute_process(COMMAND ${clean} ldd "${module}/@CMAKE_SHARED_MODULE_PREFIX@configqmlplugin@CMAKE_SHARED_MODULE_SUFFIX@"
+    OUTPUT_VARIABLE links RESULT_VARIABLE status)
+foreach(library configqml configqml_core)
+    if(NOT status EQUAL 0 OR NOT links MATCHES "${prefix}/[^\n]*lib${library}\\.so")
+        message(FATAL_ERROR "Plugin linkage escaped installed prefix: ${links}")
+    endif()
+endforeach()
+run(${clean} "@_qmllint@" -I "${qmldir}"
+    "${root}/examples/qml/Settings.qml")
+# qml's own Qt runtime is uninstrumented; preload the compiler's ASan runtime only
+# when testing the instrumented installed plugin, not as a library-path fallback.
+set(preload)
+if("@CMAKE_CXX_FLAGS@" MATCHES "fsanitize=address")
+    execute_process(COMMAND "@CMAKE_CXX_COMPILER@" -print-file-name=libasan.so
+        OUTPUT_VARIABLE asan OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+    set(preload "LD_PRELOAD=${asan}")
+endif()
+run(${clean} ${preload} "QML_IMPORT_PATH=${qmldir}:@_qt_qml@" QT_QPA_PLATFORM=offscreen
+    "@_qml@" -a core "${root}/examples/qml/Settings.qml")
+if(NOT last_output MATCHES "CONFIGQML_QML_OK: DP-1,HDMI-A-1")
+    message(FATAL_ERROR "QML example did not observe the saved outputs")
+endif()
