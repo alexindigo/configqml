@@ -88,12 +88,40 @@ private:
 class NativeFacade : public ConfigFacade {
 public:
     using ConfigFacade::ConfigFacade;
+    using ConfigFacade::readSetting;
     using ConfigFacade::writeSetting;
 };
 
 class M5Boundaries : public QObject {
     Q_OBJECT
 private slots:
+    void nullableFacadeAndDestroyedOwner() {
+        NativeFacade detached(nullptr);
+        QVERIFY(!detached.readSetting({"n"}).isValid());
+        QSignalSpy rejected(&detached, &ConfigFacade::inputRejected);
+        const auto write = detached.writeSetting({"n"}, 1);
+        QVERIFY(!write.accepted);
+        QCOMPARE(write.errors.first().code, QString("detached-or-undeclared"));
+        QCOMPARE(rejected.size(), 1);
+        QCOMPARE(rejected[0][1].toString(), QString("detached-or-undeclared"));
+
+        auto o = options();
+        auto secret = D::leaf(T::Map, QVariantMap{});
+        secret.element = {D::leaf(T::SafeInteger, 0)};
+        secret.sensitive = true;
+        o.schema = ConfigSchema(D::group({{"credentials", secret}}));
+        auto owner = std::make_unique<ConfigStore>(o);
+        QTRY_COMPARE(owner->status(), ConfigStore::Status::Ready);
+        NativeFacade retained(owner.get(), {"credentials"});
+        QSignalSpy retainedRejected(&retained, &ConfigFacade::inputRejected);
+        owner.reset();
+        QVERIFY(!retained.readSetting({"synthetic-private-key"}).isValid());
+        const auto failure = retained.writeSetting({"synthetic-private-key"}, 1);
+        QVERIFY(!failure.accepted);
+        QCOMPARE(failure.errors.first().path, ConfigPath({"credentials", "<redacted>"}));
+        QCOMPARE(retainedRejected.size(), 1);
+        QCOMPARE(retainedRejected[0][0].toStringList(), QStringList{"<redacted>"});
+    }
     void diagnosticCanary() {
         MessageCapture logCapture;
         const QString canary = QString("M5_") + "DIAGNOSTIC_CANARY_72f9";

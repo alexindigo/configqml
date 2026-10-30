@@ -6,14 +6,16 @@
 namespace configqml {
 ConfigFacade::ConfigFacade(ConfigStore *store, ConfigPath prefix, QObject *parent)
     : QObject(parent), m_store(store), m_prefix(ownPath(prefix)) {
-    m_diagnostics = store->schema().diagnostics();
-    connect(store, &ConfigStore::valuesChanged, this, [this](const auto &paths) {
-        ConfigConsumerGuard boundary(this);
-        for (const auto &path : paths)
-            if (startsWith(path, m_prefix))
-                if (!boundary.invoke([&] { emit settingChanged(path.mid(m_prefix.size())); }))
-                    return;
-    });
+    if (store) {
+        m_diagnostics = store->schema().diagnostics();
+        connect(store, &ConfigStore::valuesChanged, this, [this](const auto &paths) {
+            ConfigConsumerGuard boundary(this);
+            for (const auto &path : paths)
+                if (startsWith(path, m_prefix))
+                    if (!boundary.invoke([&] { emit settingChanged(path.mid(m_prefix.size())); }))
+                        return;
+        });
+    }
 }
 QVariant ConfigFacade::readSetting(const ConfigPath &relativePath) const {
     if (!m_store)
