@@ -282,6 +282,101 @@ private slots:
         QVERIFY(result.coveredRevisions.contains("json"));
         QVERIFY(compat::bytes(path).contains("\"b\":9"));
     }
+    void retentionFailureSurvivesLaterPublicationFailure_data() {
+        QTest::addColumn<bool>("retentionFailure");
+        QTest::addColumn<bool>("uncertain");
+        QTest::newRow("retention-then-known-failure") << true << false;
+        QTest::newRow("retention-then-uncertain-failure") << true << true;
+        QTest::newRow("ordinary-errors-still-select-last-known") << false << false;
+        QTest::newRow("ordinary-errors-still-select-last-uncertain") << false << true;
+    }
+    void retentionFailureSurvivesLaterPublicationFailure() {
+        QFETCH(bool, retentionFailure);
+        QFETCH(bool, uncertain);
+        using D = ConfigDescriptor;
+        QTemporaryDir dir;
+        const auto path = dir.filePath("a.json");
+        const QByteArray original = "{\"n\":1}";
+        compat::put(path, original);
+        auto o = strictOptions(dir.path(), path);
+        o.schema =
+            ConfigSchema(D::group({{"a", D::group({{"n", D::leaf(D::Type::SafeInteger, 0)}})},
+                                   {"b", D::group({{"n", D::leaf(D::Type::SafeInteger, 0)}})}}));
+        o.layers[0].sources = {{"a", {"a"}, {}}, {"b", {"b"}, {{"n", 2}}}};
+        o.jsonFiles[0].sourceId = "a";
+        const auto evidence = o.evidenceDirectory;
+        o.fileFault = [evidence, retentionFailure](const QString &phase, const QString &) {
+            if (!retentionFailure && phase == "write")
+                return QString("first-publication-fault");
+            if (retentionFailure && phase == "readback") {
+                if (!QDir().rename(evidence, evidence + ".retained"))
+                    qFatal("evidence fixture rename");
+                compat::put(evidence, "not a directory");
+            }
+            return QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        bool scheduled = false;
+        ConfigStoreTestAccess::run(
+            store,
+            [uncertain](auto &worker) {
+                worker.scheduleBackend({false, uncertain
+                                                   ? ConfigMemoryBackend::Fault::Readback
+                                                   : ConfigMemoryBackend::Fault::BeforeOperation});
+            },
+            this, [&] { scheduled = true; });
+        QTRY_VERIFY(scheduled);
+        QVERIFY(store.setUser({"a", "n"}, 9).accepted);
+        QVERIFY(store.setUser({"b", "n"}, 8).accepted);
+        const auto result = compat::request(store, [&] { return store.save(); });
+        const auto laterError =
+            uncertain ? QString("injected-readback") : QString("injected-before-operation");
+        QCOMPARE(result.status, QString("failed"));
+        QCOMPARE(result.error.code, retentionFailure ? QString("evidence-retention") : laterError);
+        QCOMPARE(result.error.sourceId, retentionFailure ? QString("a") : QString("b"));
+        QCOMPARE(result.publications.size(), 2);
+        const auto first = result.publications[0], second = result.publications[1];
+        QCOMPARE(first.sourceId, QString("a"));
+        QCOMPARE(first.success, retentionFailure);
+        QCOMPARE(first.state, QString("known"));
+        QCOMPARE(first.error.code,
+                 retentionFailure ? QString() : QString("first-publication-fault"));
+        QCOMPARE(second.sourceId, QString("b"));
+        QVERIFY(!second.success);
+        QCOMPARE(second.state, uncertain ? QString("uncertain") : QString("known"));
+        QCOMPARE(second.error.code, laterError);
+        QCOMPARE(second.error.sourceId, QString("b"));
+        QCOMPARE(result.coveredRevisions.size(), retentionFailure ? 1 : 0);
+        QVERIFY(!result.coveredRevisions.contains("b"));
+        QCOMPARE(result.publicationState, retentionFailure ? QString("partial")
+                                          : uncertain      ? QString("uncertain")
+                                                           : QString("known"));
+        if (retentionFailure) {
+            QCOMPARE(result.coveredRevisions.value("a"), first.revision);
+            ConfigJsonBackend reader(o.jsonFiles);
+            const auto id = reader.submit({ConfigBackendRequest::Operation::Read, "a", {}, {}});
+            const auto readback = reader.take(id);
+            QVERIFY(readback->success);
+            QCOMPARE(readback->revision, first.revision);
+            QVERIFY(compat::bytes(path).contains("\"n\":9"));
+            QVERIFY(QFileInfo(evidence + ".retained").isDir());
+        } else
+            QCOMPARE(compat::bytes(path), original);
+        int memoryValue = -1;
+        bool read = false;
+        ConfigStoreTestAccess::run(
+            store,
+            [&](auto &worker) {
+                const auto id =
+                    worker.backend()->submit({ConfigBackendRequest::Operation::Read, "b", {}, {}});
+                memoryValue =
+                    decodeMemoryValue(worker.backend()->take(id)->bytes).value("n").toInt();
+            },
+            this, [&] { read = true; });
+        QTRY_VERIFY(read);
+        QCOMPARE(memoryValue, uncertain ? 8 : 2);
+    }
     void freshAbsentParentsAndOwnChain() {
         QTemporaryDir dir;
         ConfigStore store(strictOptions(dir.path(), dir.filePath("new/deep/user.json")));

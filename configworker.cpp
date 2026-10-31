@@ -932,7 +932,8 @@ void ConfigWorker::recordPublication(ConfigResult &result, const QString &source
         result.coveredRevisions[source] = outcome.revision;
     else {
         result.status = "failed";
-        result.error = outcome.error;
+        if (result.error.code != "evidence-retention")
+            result.error = outcome.error;
         if (state == "uncertain")
             result.publicationState = state;
     }
