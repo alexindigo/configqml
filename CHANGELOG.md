@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- JSON object encoding indexes preserved key order instead of repeatedly scanning
+  it, avoiding quadratic work for wide objects while retaining deterministic order.
+
 ## [0.2.0] — 2026-10-29
 
 ### Added

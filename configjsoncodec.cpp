@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configjsoncodec.h"
+#include <QSet>
 #include <QUrl>
 
 namespace configqml {
@@ -56,9 +57,12 @@ static ConfigJsonEncodeResult ordered(const QVariant &value, const ConfigPath &p
     if (value.metaType().id() == QMetaType::QVariantMap) {
         const auto map = value.toMap();
         auto keys = layout.keys.value(path);
+        QSet<QString> known(keys.cbegin(), keys.cend());
         for (auto it = map.cbegin(); it != map.cend(); ++it)
-            if (!keys.contains(it.key()))
+            if (!known.contains(it.key())) {
+                known.insert(it.key());
                 keys.append(it.key());
+            }
         QByteArray bytes = "{";
         bool first = true;
         for (const auto &key : keys) {

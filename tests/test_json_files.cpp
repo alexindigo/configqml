@@ -76,6 +76,44 @@ private slots:
         QVERIFY(!codec.decode("{\"x\":1,\"x\":2}", "file").ok());
         QVERIFY(!codec.decode("[]", "file").ok());
     }
+    void wideCodecOrdering() {
+        constexpr int count = 50000;
+        QVariantMap raw;
+        QByteArray reverse = "{";
+        for (int i = count - 1; i >= 0; --i) {
+            const auto key = QString("key-%1").arg(i, 5, 10, QChar('0'));
+            raw.insert(key, true);
+            if (i != count - 1)
+                reverse += ',';
+            reverse += encodeJsonValue(key).bytes + ":true";
+        }
+        reverse += '}';
+        ConfigJsonCodec fresh;
+        ConfigJsonCodec preserved;
+        const auto decoded = preserved.decode(reverse, "wide");
+        QVERIFY(decoded.ok());
+        QElapsedTimer timer;
+        timer.start();
+        const auto sorted = fresh.encode(raw, "wide");
+        const auto retained = preserved.encode(decoded.raw, "wide");
+        const auto elapsed = timer.elapsed();
+        QVERIFY(sorted.ok());
+        QVERIFY(retained.ok());
+        QCOMPARE(sorted.bytes, encodeJsonValue(raw).bytes + '\n');
+        QCOMPARE(retained.bytes, reverse + '\n');
+        qInfo("50000-key fresh and preserved encoding: %lldms", elapsed);
+#ifdef QT_NO_DEBUG
+        QVERIFY2(elapsed < 2000, "Wide object ordering must not scan the key list per member");
+#endif
+        // Removed members disappear; new keys append after surviving original keys.
+        auto changed = decoded.raw;
+        changed.remove("key-49999");
+        changed.insert("appended", false);
+        const auto edited = preserved.encode(changed, "wide");
+        QVERIFY(edited.ok());
+        QVERIFY(edited.bytes.startsWith("{\"key-49998\":true,"));
+        QVERIFY(edited.bytes.endsWith(",\"appended\":false}\n"));
+    }
     void restartUnknownMaskedAndExact() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
