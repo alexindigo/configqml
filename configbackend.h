@@ -56,6 +56,10 @@ struct ConfigBackendResult {
     enum class PublicationState { Known, Uncertain };
     PublicationState publicationState = PublicationState::Known;
     ConfigError error;
+    std::optional<ConfigRevision>
+        publicationWitness; // Correlated effect identity, not a successful receipt.
+    std::optional<bool> observedPresence;
+    bool bytesAvailable = false;
 };
 
 class ConfigBackend {

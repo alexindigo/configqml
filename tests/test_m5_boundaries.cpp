@@ -17,6 +17,8 @@
 #include <QEventLoop>
 #include <QTimer>
 #include <QMutexLocker>
+#include <QDir>
+#include <atomic>
 using namespace configqml;
 using D = ConfigDescriptor;
 using T = D::Type;
@@ -364,6 +366,256 @@ private slots:
                  QString("draft-conflict"));
         QCOMPARE(store.value({"n"}).toInt(), 1);
         QVERIFY(draft->dirty());
+    }
+    void localEditsAfterStrictRejection_data() {
+        QTest::addColumn<bool>("projection");
+        QTest::addColumn<int>("operation");
+        QTest::addColumn<bool>("remainingError");
+        QTest::addColumn<bool>("masked");
+        for (bool projection : {false, true})
+            for (int operation = 0; operation < 3; ++operation)
+                for (bool remaining : {false, true})
+                    for (bool masked : {false, true}) {
+                        const auto name =
+                            QByteArray::number(projection) + '-' + QByteArray::number(operation) +
+                            '-' + QByteArray::number(remaining) + '-' + QByteArray::number(masked);
+                        QTest::newRow(name.constData())
+                            << projection << operation << remaining << masked;
+                    }
+    }
+    void localEditsAfterStrictRejection() {
+        QFETCH(bool, projection);
+        QFETCH(int, operation);
+        QFETCH(bool, remainingError);
+        QFETCH(bool, masked);
+        QTemporaryDir dir;
+        const auto a = dir.filePath("a.json"), b = dir.filePath("b.json");
+        put(a, "{\"n\":1,\"other\":2}");
+        put(b, "{\"n\":3}");
+        QQmlEngine engine;
+        engine.addImportPath(QML_IMPORT_ROOT);
+        QQmlComponent component(&engine);
+        const QByteArray code =
+            QByteArray(
+                "import QtQml\nimport ConfigQml 1.0\nQtObject { id: root; "
+                "required property string directory; "
+                "readonly property int observed: store.ready ? store.values.a.n : -1; "
+                "readonly property int sibling: store.ready ? store.values.b.n : -1; "
+                "property ConfigStore store: ConfigStore { id: store; autoSave: false; "
+                "schema: ConfigSchema { ConfigGroup { key: 'a'; "
+                "ConfigValue { key: 'n'; valueType: ConfigValue.Integer; defaultValue: 0; "
+                "admissionPolicy: ConfigValue.Strict } "
+                "ConfigValue { key: 'other'; valueType: ConfigValue.Integer; defaultValue: 0; "
+                "admissionPolicy: ConfigValue.Strict } } "
+                "ConfigGroup { key: 'b'; ConfigValue { key: 'n'; valueType: ConfigValue.Integer; "
+                "defaultValue: 0 } } } sources: [ "
+                "JsonFileSource { sourceId: 'a'; prefix: ['a']; path: root.directory+'/a.json' }, "
+                "JsonFileSource { sourceId: 'b'; prefix: ['b']; path: root.directory+'/b.json' }") +
+            (masked ? ", MemorySource { sourceId: 'mask'; layerId: 'runtime'; "
+                      "kind: MemorySource.Runtime; writable: false; data: ({a:{n:99}}) }"
+                    : "") +
+            "] " +
+            (projection ? "projections: [ConfigProjection { projectionId: 'identity'; "
+                          "sourceIds: ['a','b']; transform: `function(i) { return "
+                          "{values:i.values,compatibilityRaw:i.compatibilityRaw,"
+                          "effects:[],diagnostics:[]}; }` }] "
+                        : "") +
+            "} }";
+        component.setData(code, QUrl("file:///strict-local.qml"));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        auto create = [&] {
+            return std::unique_ptr<QObject>(
+                component.createWithInitialProperties({{"directory", dir.path()}}));
+        };
+        auto consumer = create();
+        QVERIFY2(consumer, qPrintable(component.errorString()));
+        auto *qml = consumer->property("store").value<ConfigQmlStore *>();
+        QVERIFY(qml);
+        QTRY_VERIFY(qml->ready());
+        auto &store = *qml->core();
+        for (int batch = 0; batch < 2; ++batch) {
+            put(a, remainingError ? "{\"n\":\"bad\",\"other\":\"bad\"}"
+                                  : "{\"n\":\"bad\",\"other\":20}");
+            put(b, batch ? "{\"n\":40}" : "{\"n\":30}");
+            QCOMPARE(request(store, [&] { return store.reload(); }).status, QString("failed"));
+            QCOMPARE(store.value({"a", "n"}).toInt(), masked ? 99 : 1);
+            QCOMPARE(consumer->property("observed").toInt(), masked ? 99 : 1);
+            QCOMPARE(consumer->property("sibling").toInt(), 3);
+            QCOMPARE(store.value({"a", "other"}).toInt(), 2);
+        }
+        QString token;
+        ConfigResult edited;
+        if (operation == 2) {
+            edited = request(store, [&] {
+                return store.retainGroup({"repair",
+                                          {{"a", "n"}, {"b", "n"}},
+                                          {{{"a", "n"}, true, 7}, {{"b", "n"}, true, 8}},
+                                          {}});
+            });
+            QCOMPARE(edited.status, QString("retained"));
+            token = edited.groupToken;
+        } else {
+            edited = request(store, [&] {
+                return operation == 0 ? store.setUser({"a", "n"}, 7).requestId
+                                      : store.reset({"a", "n"}, "user").requestId;
+            });
+            QVERIFY(edited.status != "failed");
+        }
+        const int expected = masked ? 99 : operation == 1 ? 0 : 7;
+        QCOMPARE(store.value({"a", "n"}).toInt(), expected);
+        QCOMPARE(store.snapshot().values.value({"a", "n"}).toInt(), expected);
+        QCOMPARE(consumer->property("observed").toInt(), expected);
+        QCOMPARE(consumer->property("sibling").toInt(), operation == 2 ? 8 : 3);
+        QCOMPARE(store.value({"a", "other"}).toInt(), 2);
+        QVERIFY(bytes(a).contains("bad")); // Settlement, not a save repairing the getter.
+        QCOMPARE(store.info({"a", "n"}).provenance.maskedBy,
+                 masked ? QString("runtime") : QString());
+        QVERIFY(store.info({"a", "n"}).provenance.contributions[1].valid);
+        QCOMPARE(store.info({"a", "other"}).provenance.contributions[1].valid, !remainingError);
+        // Repair the remaining raw field explicitly; unrelated foreign 20 must not leak earlier.
+        QVERIFY(request(store, [&] { return store.setUser({"a", "other"}, 6).requestId; }).status !=
+                "failed");
+        if (!token.isEmpty()) {
+            QCOMPARE(request(store, [&] { return store.saveGroup(token); }).status,
+                     QString("saved"));
+            QCOMPARE(request(store, [&] { return store.releaseGroup(token); }).status,
+                     QString("released"));
+        }
+        QCOMPARE(request(store, [&] { return store.save(); }).status, QString("saved"));
+        auto reopened = create();
+        QVERIFY(reopened);
+        auto *reopenedStore = reopened->property("store").value<ConfigQmlStore *>();
+        QTRY_VERIFY(reopenedStore->ready());
+        QCOMPARE(reopened->property("observed").toInt(), expected);
+        QCOMPARE(reopenedStore->core()->value({"a", "other"}).toInt(), 6);
+        QCOMPARE(reopened->property("sibling").toInt(), operation == 2 ? 8 : 40);
+    }
+    void migrationRetentionKeepsPublicationFacts_data() {
+        QTest::addColumn<int>("outcome");
+        QTest::addColumn<bool>("priorShard");
+        for (int outcome = 0; outcome < 3; ++outcome)
+            for (bool prior : {false, true}) {
+                const auto name = QByteArray::number(outcome) + '-' + QByteArray::number(prior);
+                QTest::newRow(name.constData()) << outcome << prior;
+            }
+    }
+    void migrationRetentionKeepsPublicationFacts() {
+        QFETCH(int, outcome);
+        QFETCH(bool, priorShard);
+        QTemporaryDir dir;
+        const QByteArray original = "{\"n\":1,\"opaque\":18446744073709551615}";
+        const auto a = dir.filePath("a.json"), b = dir.filePath("b.json");
+        put(b, original);
+        auto o = options();
+        o.evidenceDirectory = dir.filePath("evidence");
+        o.schema = ConfigSchema(D::group({{"a", D::group({{"n", D::leaf(T::SafeInteger, 0)}})},
+                                          {"b", D::group({{"n", D::leaf(T::SafeInteger, 0)}})}}),
+                                1, {{0, [](const QVariantMap &raw) {
+                                         auto changed = raw;
+                                         changed["n"] = 7;
+                                         return ConfigValueResult{changed, {}};
+                                     }}});
+        o.layers[0].sources = {{"b", {"b"}, {}}};
+        o.jsonFiles = {{"user", "b", b}};
+        o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy::StrictSourcePreimage;
+        if (priorShard) {
+            put(a, original);
+            o.layers[0].sources.prepend({"a", {"a"}, {}});
+            o.jsonFiles.prepend({"user", "a", a});
+            o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy::StrictSourcePreimage;
+        }
+        const auto evidence = o.evidenceDirectory;
+        auto faults = std::make_shared<std::atomic<int>>(0);
+        o.fileFault = [evidence, b, outcome, faults](const QString &phase, const QString &file) {
+            if (file != b || phase != (outcome == 2 ? "rename" : "readback"))
+                return QString();
+            ++*faults;
+            // Reconcile has already read its preimage; obstruct retention before it returns.
+            if (!QDir().rename(evidence, evidence + ".retained"))
+                qFatal("evidence obstruction rename");
+            put(evidence, "not a directory");
+            if (outcome == 2)
+                put(b, "{\"n\":99}"); // Strict publication must keep this foreign replacement.
+            return outcome == 1 ? QString("migration-readback-fault") : QString();
+        };
+        ConfigStore store(o);
+        QSignalSpy migrated(&store, &ConfigStore::migrationCompleted);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Error);
+        QCOMPARE(migrated.size(), 1);
+        QCOMPARE(faults->load(), 1);
+        const auto receipt = migrated.first().first().value<ConfigResult>();
+        QCOMPARE(receipt.status, QString("failed"));
+        QCOMPARE(receipt.error.code, QString("evidence-retention"));
+        QCOMPARE(store.error(), QString("evidence-retention"));
+        QCOMPARE(receipt.publications.size(), priorShard ? 2 : 1);
+        const auto route = receipt.publications.last();
+        QCOMPARE(route.sourceId, QString("b"));
+        QCOMPARE(route.success, outcome == 0);
+        QCOMPARE(route.state, outcome == 1 ? QString("uncertain") : QString("known"));
+        const auto routeError = outcome == 1   ? QString("migration-readback-fault")
+                                : outcome == 2 ? QString("source-preimage-conflict")
+                                               : QString();
+        QCOMPARE(route.error.code, routeError);
+        QCOMPARE(receipt.coveredRevisions.contains("b"), outcome == 0);
+        QCOMPARE(receipt.coveredRevisions.contains("a"), priorShard);
+        QCOMPARE(receipt.publicationState, priorShard || outcome == 0 ? QString("partial")
+                                           : outcome == 1             ? QString("uncertain")
+                                                                      : QString("known"));
+        QCOMPARE(bytes(b + ".configqml-v0.bak"), original);
+        if (priorShard) {
+            QCOMPARE(bytes(a + ".configqml-v0.bak"), original);
+            QVERIFY(receipt.publications.first().success);
+        }
+        ConfigJsonCodec codec;
+        const auto disk = codec.decode(bytes(b), "b");
+        QVERIFY(disk.ok());
+        QCOMPARE(D::leaf(T::SafeInteger, 0).validate(disk.raw.value("n")).value.toInt(),
+                 outcome == 2 ? 99 : 7);
+        QCOMPARE(disk.raw.contains("_configqmlVersion"), outcome != 2);
+        ConfigJsonBackend reader(o.jsonFiles);
+        for (auto it = receipt.coveredRevisions.cbegin(); it != receipt.coveredRevisions.cend();
+             ++it) {
+            const auto id =
+                reader.submit({ConfigBackendRequest::Operation::Read, it.key(), {}, {}});
+            QCOMPARE(reader.take(id)->revision, it.value());
+        }
+        QVERIFY(QFileInfo(evidence + ".retained").isDir());
+        // Deliver the real native transaction receipt through the production QML adapter.
+        QQmlEngine engine;
+        engine.addImportPath(QML_IMPORT_ROOT);
+        QQmlComponent component(&engine);
+        // A lexical root reference keeps the observer independent of the store internals.
+        component.setData(
+            "import QtQml\nimport ConfigQml 1.0\nQtObject { id: root; "
+            "property var receipt: null; property ConfigStore store: ConfigStore { "
+            "autoSave: false; schema: ConfigSchema { ConfigValue { key: 'n'; "
+            "valueType: ConfigValue.Integer; defaultValue: 0 } } sources: [MemorySource {}] "
+            "onMigrationCompleted: function(r) { root.receipt = r; } } }",
+            QUrl("file:///migration-receipt.qml"));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        std::unique_ptr<QObject> consumer(component.create());
+        QVERIFY(consumer);
+        auto *adapter = consumer->property("store").value<ConfigQmlStore *>();
+        QTRY_VERIFY(adapter->ready());
+        ConfigWorkerPacket packet;
+        packet.migrationResult = receipt;
+        ConfigStoreTestAccess::inject(*adapter->core(), packet);
+        const auto delivered = engine.newQObject(consumer.get()).property("receipt");
+        QCOMPARE(delivered.property("error").property("code").toString(),
+                 QString("evidence-retention"));
+        QCOMPARE(delivered.property("status").toString(), QString("failed"));
+        QCOMPARE(delivered.property("publicationState").toString(), receipt.publicationState);
+        const auto publications = delivered.property("publications");
+        QCOMPARE(publications.property("length").toInt(), receipt.publications.size());
+        const auto last = publications.property(receipt.publications.size() - 1);
+        QCOMPARE(last.property("success").toBool(), outcome == 0);
+        QCOMPARE(last.property("publicationState").toString(), route.state);
+        QCOMPARE(last.property("error").toString(), routeError);
+        QCOMPARE(last.property("phase").toString(), route.error.operation);
+        QCOMPARE(last.property("file").toString(), route.error.file);
+        const auto coverage = delivered.property("coveredRevisions");
+        QCOMPARE(coverage.hasOwnProperty("b"), outcome == 0);
+        QCOMPARE(coverage.hasOwnProperty("a"), priorShard);
     }
     void inheritedStrictNativeInitialization() {
         auto o = options();

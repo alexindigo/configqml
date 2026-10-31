@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(configqml VERSION 0.1.0 DESCRIPTION "Layered configuration for Qt" LANGUAGES CXX)
+project(configqml VERSION 0.2.0 DESCRIPTION "Layered configuration for Qt" LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -22,8 +22,12 @@ add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp
     configconsumer_p.h configresult.h configstore.h configstore.cpp configworker_p.h configworker.cpp
     configshutdown_p.h configshutdown.cpp)
 target_sources(configqml_core PRIVATE configprojection_p.h configprojection.cpp
+    configprojection.h configsourceprojection_p.h configevidence_p.h configevidence.cpp
+    configrecordlistpolicy.h configrecordlistpolicy.cpp configrecordlistcommands.cpp configretainedgroup.cpp
     configlistmodel.h configlistmodel.cpp configdraft.h configdraft.cpp configgroup.cpp
     configstorehandle.h configstorehandle.cpp configmigration.cpp configjsonbackup.cpp)
+target_sources(configqml_core PRIVATE configoverlayeditor.h configoverlayeditor.cpp
+    configoverlay_p.h configoverlaypolicy.cpp configoverlayworker.cpp)
 add_library(configqml::core ALIAS configqml_core)
 set_target_properties(configqml_core PROPERTIES EXPORT_NAME core
     VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR} INSTALL_RPATH "$ORIGIN")
@@ -54,7 +58,8 @@ if(CONFIGQML_BUILD_QML)
         SOURCES configqmldeclaration.h configqmldeclaration.cpp
             configqmlstore.h configqmlstore.cpp configqmlvalue.h configqmlvalue.cpp
             confignamespace.cpp configfacade.h configfacade.cpp)
-    target_sources(configqml PRIVATE configqmlmodel.h configqmlmigration.cpp configqmlhandles.cpp)
+    target_sources(configqml PRIVATE configqmlmodel.h configqmlmigration.cpp configqmlhandles.cpp
+        configqmlcompat.cpp configqmlgroups.cpp configqmloverlay.h configqmloverlay.cpp)
     add_library(configqml::configqml ALIAS configqml)
     target_link_libraries(configqml PUBLIC configqml::core Qt6::Qml PRIVATE Qt6::CorePrivate)
     target_include_directories(configqml PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -98,7 +103,8 @@ install(TARGETS configqml_core EXPORT configqmlCoreTargets
 install(FILES configvalue.h configschema.h confignumber.h configlayers.h configscope.h
     configenvironment.h configbackend.h configcodec.h configmemorybackend.h
     configjsoncodec.h configjsonbackend.h configresult.h configstore.h configlistmodel.h
-    configdraft.h configstorehandle.h DESTINATION "${_configqml_include_dir}")
+    configdraft.h configstorehandle.h configprojection.h configrecordlistpolicy.h configoverlayeditor.h
+    DESTINATION "${_configqml_include_dir}")
 install(FILES COPYING COPYING.LESSER DESTINATION "${_configqml_license_dir}")
 install(EXPORT configqmlCoreTargets FILE configqmlCoreTargets.cmake NAMESPACE configqml::
     DESTINATION "${_configqml_cmake_dir}")
@@ -115,6 +121,11 @@ option(BUILD_TESTING "Build the configqml tests" OFF)
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 6.12 REQUIRED COMPONENTS Test Gui)
+    foreach(suite projections fallback_layers startup_policy record_list_policy source_events retained_groups strict_conflicts empty_shards overlay_editor string_pattern)
+        add_executable(test_${suite} tests/test_${suite}.cpp)
+        target_link_libraries(test_${suite} PRIVATE configqml::core Qt6::Test)
+        add_test(NAME ${suite} COMMAND test_${suite})
+    endforeach()
     add_executable(test_schema tests/test_schema.cpp)
     target_link_libraries(test_schema PRIVATE configqml::core Qt6::Test)
     add_test(NAME schema COMMAND test_schema)
@@ -154,12 +165,26 @@ if(BUILD_TESTING)
     add_executable(test_json_files tests/test_json_files.cpp)
     target_link_libraries(test_json_files PRIVATE configqml::core Qt6::Test)
     add_dependencies(test_json_files file_writer)
+    add_dependencies(test_strict_conflicts file_writer)
     add_test(NAME json_files COMMAND test_json_files)
     add_executable(test_consumer_lifetime tests/test_consumer_lifetime.cpp)
     target_link_libraries(test_consumer_lifetime PRIVATE configqml::core Qt6::Test)
     add_test(NAME consumer_lifetime COMMAND test_consumer_lifetime)
     if(CONFIGQML_BUILD_QML)
         find_package(Qt6 6.12 REQUIRED COMPONENTS Quick)
+        add_executable(test_projection_bridge tests/test_projection_bridge.cpp)
+        target_link_libraries(test_projection_bridge PRIVATE configqml::configqml Qt6::Test)
+        add_test(NAME projection_bridge COMMAND test_projection_bridge)
+        foreach(suite projections fallback_layers startup_policy record_list_policy source_events retained_groups strict_empty overlay_editor string_pattern)
+            add_executable(test_qml_${suite} tests/test_compat_qml.cpp)
+            target_link_libraries(test_qml_${suite} PRIVATE configqml::configqml Qt6::Test Qt6::Quick)
+            target_compile_definitions(test_qml_${suite} PRIVATE QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
+                COMPAT_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_${suite}.qml")
+            add_test(NAME qml_${suite} COMMAND test_qml_${suite})
+            set_tests_properties(qml_${suite} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QSG_RHI_BACKEND=software")
+            add_test(NAME ${suite}_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
+                -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_${suite}.qml)
+        endforeach()
         get_target_property(_qmllint Qt6::qmllint IMPORTED_LOCATION)
         get_filename_component(_qt_tools_dir "${_qmllint}" DIRECTORY)
         find_program(_qml NAMES qml qml6 HINTS "${_qt_tools_dir}" REQUIRED NO_DEFAULT_PATH)

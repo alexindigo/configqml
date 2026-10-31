@@ -5,6 +5,7 @@
 #include <QEventLoop>
 #include <QMutexLocker>
 #include <cstdio>
+#include <atomic>
 
 namespace configqml {
 void ConfigWorkerOwner::acknowledgeModels(const QMap<ConfigPath, quint64> &generations) {
@@ -19,7 +20,9 @@ void ConfigWorkerOwner::acknowledgeModels(const QMap<ConfigPath, quint64> &gener
 namespace {
 bool persistence(const QString &operation) {
     return operation == "save" || operation == "flush" || operation == "close" ||
-           operation == "autosave" || operation == "apply" || operation == "importProfile";
+           operation == "autosave" || operation == "apply" || operation == "importProfile" ||
+           operation == "saveGroup" || operation == "retryGroup" || operation == "overlayApply" ||
+           operation == "overlayReset";
 }
 class ShutdownRegistry {
 public:
@@ -120,10 +123,17 @@ private:
 } // namespace
 ConfigWorkerOwner::ConfigWorkerOwner(ConfigStoreOptions options, const QString &error)
     : m_storeId(options.storeId), m_autoSave(options.autoSave) {
+    static std::atomic<quint64> nextEndpoint{0};
+    m_endpoint = std::make_shared<ConfigOverlayEndpoint>();
+    m_endpoint->order = ++nextEndpoint;
+    m_leaves = options.schema.leaves();
+    for (const auto &policy : options.recordListPolicies)
+        m_policyPaths[policy.policyId] = policy.path;
     auto *applicationThread = QCoreApplication::instance()->thread();
     m_thread = new QThread;
     m_thread->moveToThread(applicationThread);
     m_worker = new ConfigWorker(std::move(options), error);
+    m_worker->setOverlayEndpoint(m_endpoint);
     m_worker->moveToThread(m_thread);
     m_joinTimer = new QTimer(this);
     m_joinTimer->setInterval(1);
@@ -136,6 +146,11 @@ ConfigWorkerOwner::ConfigWorkerOwner(ConfigStoreOptions options, const QString &
     moveToThread(applicationThread);
 }
 void ConfigWorkerOwner::start() {
+    m_endpoint->send = [owner =
+                            std::weak_ptr<ConfigWorkerOwner>(shared_from_this())](auto message) {
+        auto locked = owner.lock();
+        return locked && locked->overlayMessage(std::move(message));
+    };
     ShutdownRegistry::instance().add(shared_from_this());
     m_thread->start();
 }
@@ -152,13 +167,39 @@ bool ConfigWorkerOwner::dispatch(const ConfigCommand &command) {
     if (m_sealed || !m_worker)
         return false;
     m_prefix = qMax(m_prefix, command.prefix);
+    QList<ConfigPath> touched;
+    if (command.input)
+        touched = command.input->pathGenerations.keys();
+    if (command.operation == "importProfile")
+        for (const auto &path : m_leaves) {
+            bool selected = command.selection.isEmpty();
+            for (const auto &selection : command.selection)
+                selected |= startsWith(path, selection);
+            if (selected && !touched.contains(path))
+                touched.append(path);
+        }
+    if (command.operation == "updateRecordListPolicy" && m_policyPaths.contains(command.policyId))
+        touched.append(m_policyPaths.value(command.policyId));
+    m_endpoint->advance(touched);
     if (persistence(command.operation))
         ++m_pendingPersistence;
-    if (command.operation == "close")
+    if (command.operation == "close") {
+        m_endpoint->live = false;
         m_terminalQueued = m_sealed = true;
+    }
     auto *worker = m_worker;
     QMetaObject::invokeMethod(
         worker, [worker, command] { worker->enqueue(command); }, Qt::QueuedConnection);
+    return true;
+}
+bool ConfigWorkerOwner::overlayMessage(std::function<void(ConfigWorker &)> message) {
+    QMutexLocker lock(&m_mutex);
+    if (!m_worker || m_terminalReceived || m_stopped)
+        return false;
+    auto *worker = m_worker;
+    QMetaObject::invokeMethod(
+        worker, [worker, message = std::move(message)] { worker->overlayControl(message); },
+        Qt::QueuedConnection);
     return true;
 }
 void ConfigWorkerOwner::detach() { settle(true); }
@@ -169,9 +210,12 @@ void ConfigWorkerOwner::settle(bool detached) {
     {
         QMutexLocker lock(&m_mutex);
         m_detached |= detached;
+        if (detached)
+            m_endpoint->live = false;
         if (m_terminalQueued || m_stopped)
             return;
         m_terminalQueued = m_sealed = true;
+        m_endpoint->live = false;
         const bool publish = m_autoSave || m_pendingPersistence > 0;
         command = {
             publish && !m_detached ? ++m_requestId : 0, m_prefix, publish ? "close" : "retire", {}};

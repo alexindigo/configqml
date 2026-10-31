@@ -19,6 +19,8 @@ public:
     void pollJoin();
     void reclaim(std::shared_ptr<const ConfigSnapshot> snapshot);
     void acknowledgeModels(const QMap<ConfigPath, quint64> &generations);
+    std::shared_ptr<ConfigOverlayEndpoint> overlayEndpoint() const { return m_endpoint; }
+    bool overlayMessage(std::function<void(ConfigWorker &)> message);
     QString description() const;
     ConfigWorker *workerForTest() const { return m_worker; }
 signals:
@@ -44,5 +46,8 @@ private:
     quint64 m_requestId = 0;
     int m_pendingPersistence = 0;
     std::optional<ConfigResult> m_outcome;
+    std::shared_ptr<ConfigOverlayEndpoint> m_endpoint;
+    QList<ConfigPath> m_leaves;
+    QMap<QString, ConfigPath> m_policyPaths;
 };
 } // namespace configqml

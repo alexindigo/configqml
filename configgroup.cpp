@@ -85,7 +85,11 @@ void ConfigWorker::processGroup(const ConfigCommand &command) {
             error = "draft-conflict";
     coverInput(command); // Rejection also settles its path generations.
     auto candidate = *m_layers;
+    const auto before = *m_layers;
     for (auto it = input.edits.cbegin(); error.isEmpty() && it != input.edits.cend(); ++it) {
+        error = quarantined(it.key());
+        if (!error.isEmpty())
+            break;
         ConfigInput leaf;
         leaf.kind = it.value() ? ConfigInput::Kind::User : ConfigInput::Kind::Reset;
         leaf.path = it.key();
@@ -95,9 +99,9 @@ void ConfigWorker::processGroup(const ConfigCommand &command) {
             error = m_options.admission(leaf);
         if (!error.isEmpty())
             break;
-        const auto route = candidate.info(it.key()).route;
-        const auto outcome = it.value() ? candidate.setUser(it.key(), *it.value())
-                                        : candidate.reset(it.key(), route.layerId);
+    }
+    if (error.isEmpty()) {
+        const auto outcome = candidate.applyEdits(input.edits);
         if (!outcome.accepted)
             error = outcome.errors.isEmpty() ? QString("admission") : outcome.errors.first().code;
     }
@@ -111,12 +115,7 @@ void ConfigWorker::processGroup(const ConfigCommand &command) {
     }
     *m_layers = std::move(candidate);
     acceptIntent(input);
-    for (auto it = input.edits.cbegin(); it != input.edits.cend(); ++it) {
-        const auto route = m_layers->info(it.key()).route;
-        m_dirty[route.sourceId] = input.sequence;
-        if (m_files.contains(route.sourceId))
-            m_edits[route.sourceId].append({it.key().mid(route.prefix.size()), it.value(), false});
-    }
+    recordPersistent(input, before);
     beginSave(command);
 }
 static QVariant portableValue(const ConfigDescriptor &descriptor, const QVariant &raw) {
@@ -148,6 +147,13 @@ static QVariant portableValue(const ConfigDescriptor &descriptor, const QVariant
 void ConfigWorker::profile(const ConfigCommand &command) {
     auto result = resultFor(command);
     const auto fail = [&](const QString &code) {
+        if (command.operation == "importProfile") {
+            auto covered = command;
+            ConfigInput input;
+            input.sequence = command.prefix;
+            covered.input = input;
+            coverInput(covered);
+        }
         result.status = "failed";
         result.error = {code, {}, command.operation, command.file};
         post(publish(result));

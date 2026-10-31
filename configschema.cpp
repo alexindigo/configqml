@@ -186,6 +186,21 @@ ConfigDescriptor::validateCaptured(const QVariant &input, const ConfigPath &path
     }
     if (!matches && !null)
         return fail("type");
+    if (!stringPattern.isEmpty()) {
+        if (type != Type::String)
+            return fail("string-pattern-type");
+        // Frozen schemas share their eagerly compiled expression. Standalone
+        // construction descriptors remain mutable and validate their current
+        // authored pattern without retaining a cache over borrowed storage.
+        const auto expression = m_stringExpression && m_compiledStringPattern == stringPattern
+                                    ? m_stringExpression
+                                    : std::make_shared<const QRegularExpression>(
+                                          QRegularExpression::anchoredPattern(stringPattern));
+        if (!expression->isValid())
+            return fail("invalid-string-pattern");
+        if (!null && !expression->match(v.toString()).hasMatch())
+            return fail("string-pattern");
+    }
     if (!null && type == Type::SafeInteger &&
         (v.toLongLong() < -9007199254740991LL || v.toLongLong() > 9007199254740991LL))
         return fail("unsafe-integer");
@@ -423,6 +438,7 @@ static ConfigDescriptor ownDescriptor(const ConfigDescriptor &input, const Confi
                                       const ConfigDiagnosticBuilder &diagnostics) {
     auto out = input;
     out.idField = QString(input.idField.constData(), input.idField.size());
+    out.stringPattern = ownString(input.stringPattern);
     out.fields.clear();
     out.element.clear();
     out.choices.clear();
@@ -467,6 +483,30 @@ ConfigSchema::ConfigSchema(const ConfigDescriptor &root, int version,
         versions.insert(migration.fromVersion);
     }
     m_root = ownDescriptor(root, {}, m_errors, diagnostics);
+    std::function<void(ConfigDescriptor &, ConfigPath)> compilePatterns;
+    compilePatterns = [&](ConfigDescriptor &d, ConfigPath path) {
+        d.m_stringExpression.reset();
+        d.m_compiledStringPattern = d.stringPattern;
+        if (!d.stringPattern.isEmpty()) {
+            if (d.type != Type::String)
+                m_errors.append(diagnostics.make(path, "string-pattern-type"));
+            else {
+                auto expression = std::make_shared<QRegularExpression>(
+                    QRegularExpression::anchoredPattern(d.stringPattern));
+                if (!expression->isValid())
+                    m_errors.append(diagnostics.make(path, "invalid-string-pattern"));
+                else {
+                    expression->optimize();
+                    d.m_stringExpression = std::move(expression);
+                }
+            }
+        }
+        for (auto it = d.fields.begin(); it != d.fields.end(); ++it)
+            compilePatterns(it.value(), path + ConfigPath{it.key()});
+        for (auto &element : d.element)
+            compilePatterns(element, path + ConfigPath{"*"});
+    };
+    compilePatterns(m_root, {});
     if (root.type != Type::Group) {
         m_errors.append(diagnostics.make({}, "root-group"));
         return;
@@ -529,6 +569,30 @@ ConfigSchema::ConfigSchema(const ConfigDescriptor &root, int version,
     inspect(m_root, {}, true);
     if (!valid())
         m_defaults.clear();
+}
+
+ConfigDescriptor &ConfigDescriptor::operator=(ConfigDescriptor other) noexcept {
+    // Capture the complete source before releasing any destination storage.
+    // A caller may select an element/field lvalue owned by this descriptor.
+    using std::swap;
+    swap(type, other.type);
+    swap(optional, other.optional);
+    swap(nullable, other.nullable);
+    swap(sensitive, other.sensitive);
+    swap(machineLocal, other.machineLocal);
+    swap(admissionPolicy, other.admissionPolicy);
+    swap(forbidden, other.forbidden);
+    swap(defaultValue, other.defaultValue);
+    swap(choices, other.choices);
+    swap(minimum, other.minimum);
+    swap(maximum, other.maximum);
+    swap(fields, other.fields);
+    swap(element, other.element);
+    swap(idField, other.idField);
+    swap(stringPattern, other.stringPattern);
+    swap(m_compiledStringPattern, other.m_compiledStringPattern);
+    swap(m_stringExpression, other.m_stringExpression);
+    return *this;
 }
 
 std::optional<ConfigDescriptor> ConfigSchema::descriptor(const ConfigPath &path) const {

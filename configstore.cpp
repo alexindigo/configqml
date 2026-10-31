@@ -26,6 +26,28 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
             }
         }
     auto owned = options;
+    owned.evidenceDirectory = ownString(options.evidenceDirectory);
+    for (auto &path : owned.observedPaths)
+        path = ownPath(path);
+    for (auto &projection : owned.projections) {
+        projection.projectionId = ownString(projection.projectionId);
+        for (auto &id : projection.sourceIds)
+            id = ownString(id);
+        const auto metadata = ownValue(projection.metadata);
+        if (!metadata.ok())
+            m_error = "projection-declaration";
+        projection.metadata = metadata.value.toMap();
+    }
+    for (auto &policy : owned.recordListPolicies) {
+        policy.policyId = ownString(policy.policyId);
+        policy.path = ownPath(policy.path);
+        policy.keyField = ownString(policy.keyField);
+        for (auto &field : policy.preservedFields)
+            field = ownString(field);
+        for (auto &selector : policy.listPath)
+            selector.key = ownString(selector.key);
+        m_policyPaths[policy.policyId] = policy.path;
+    }
     for (auto &file : owned.jsonFiles) {
         file.layerId = QString(file.layerId.constData(), file.layerId.size());
         file.sourceId = QString(file.sourceId.constData(), file.sourceId.size());
@@ -37,6 +59,7 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
         layer.id = QString(layer.id.constData(), layer.id.size());
         for (auto &source : layer.sources) {
             source.id = QString(source.id.constData(), source.id.size());
+            source.fallbackFor = ownString(source.fallbackFor);
             source.prefix = ownPath(source.prefix);
             const auto raw = ownValue(source.raw, source.prefix, m_schema.diagnostics());
             if (raw.ok())
@@ -75,6 +98,14 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
 ConfigStore::~ConfigStore() {
     // Accepted work belongs to the process-owned worker. Only consumer delivery
     // ends here; no nested drain, abandonment or cancellation of persistence.
+    // QObject deletes children after derived members. Close their delivery now
+    // so an overlay child's destructor cannot access our destroyed owner member.
+    // Worker-owned admitted persistence is still retired by the owner below.
+    for (const auto &editor : m_overlays)
+        if (editor) {
+            editor->m_status = ConfigOverlayEditor::Status::Closed;
+            editor->m_store = nullptr;
+        }
     m_owner->detach();
 }
 void ConfigStore::finishThread() {
@@ -169,6 +200,16 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
         if (target != m_userLayerId || (!canWriteUser(path) && !coversSource))
             checked.errors = {diagnostics.make(path, "read-only-path")};
     }
+    if (checked.ok() && kind != ConfigInput::Kind::Runtime &&
+        kind != ConfigInput::Kind::ClearRuntime)
+        for (const auto &source : m_sourceStates) {
+            bool writable = false;
+            for (const auto &route : m_userRoutes)
+                writable |= route.sourceId == source.sourceId;
+            if (source.quarantined && writable &&
+                (startsWith(path, source.prefix) || startsWith(source.prefix, path)))
+                checked.errors = {diagnostics.make(path, "source-quarantined")};
+        }
     handle.requestId = registerRequest(context, std::move(callback));
     if (!checked.ok()) {
         handle.errors = checked.errors;
@@ -358,7 +399,33 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
         statusChange = true;
     }
     // Complete generation is installed before the first property notification.
+    m_groups = packet.groups;
+    // Published display state is not ingress authority. Keep monotone worker
+    // observations separate from claims made before their replies can arrive.
+    for (auto it = packet.groups.cbegin(); it != packet.groups.cend(); ++it) {
+        auto &ingress = m_retainedIngress[it.key()];
+        const auto generation = packet.groupGenerations.value(it.key());
+        if (generation >= ingress.generation) {
+            ingress.generation = generation;
+            ingress.state = it->state;
+            ingress.capturePrefix = it->capturePrefix;
+        }
+    }
+    if (packet.result)
+        for (auto &ingress : m_retainedIngress)
+            if (ingress.pendingRequest && ingress.pendingRequest == packet.result->requestId) {
+                ingress.pendingRequest = ingress.pendingGeneration = 0;
+                ingress.pendingState.clear();
+            }
     ConfigConsumerGuard boundary(this);
+    for (const auto &p : packet.overlays) {
+        if (packet.result && packet.result->operation == "openOverlay" &&
+            packet.result->status == "opened")
+            m_overlayPresentations[packet.result->requestId] =
+                std::make_shared<ConfigOverlayPresentation>(p);
+        else if (!boundary.invoke([&] { receiveOverlay(p); }))
+            return;
+    }
     m_publishingModels = true;
     QMap<ConfigPath, quint64> acknowledgements;
     qint64 modelNotifications = 0;
@@ -376,6 +443,21 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
     if (packet.admitted && !boundary.invoke([&] { emit published(); }))
         return;
     if (!changed.isEmpty() && !boundary.invoke([&] { emit valuesChanged(changed); }))
+        return;
+    if (packet.sourceStates) {
+        m_sourceStates = *packet.sourceStates;
+        if (!boundary.invoke([&] { emit sourceStatesChanged(); }))
+            return;
+    }
+    for (const auto &event : packet.projectionEffects)
+        if (!boundary.invoke([&] { emit projectionEffects(event); }))
+            return;
+    for (const auto &diagnostic : packet.projectionDiagnostics)
+        if (!boundary.invoke(
+                [&] { emit sourceWarning(m_schema.diagnostics().sanitize(diagnostic)); }))
+            return;
+    if (packet.sourceAccepted &&
+        !boundary.invoke([&] { emit sourceAccepted(*packet.sourceAccepted); }))
         return;
     if (statusChange && !boundary.invoke([&] { emit statusChanged(); }))
         return;
@@ -403,6 +485,13 @@ void ConfigStore::receiveResult(const ConfigResult &input) {
     const auto result = m_schema.diagnostics().sanitize(input);
     if (result.requestId < m_nextCompletion || !m_pending.contains(result.requestId))
         return;
+    if (result.operation == "retainGroup" && result.status == "failed") {
+        for (auto it = m_retainedRequests.begin(); it != m_retainedRequests.end();)
+            if (it.value() == result.requestId)
+                it = m_retainedRequests.erase(it);
+            else
+                ++it;
+    }
     m_results[result.requestId] = result;
     deliver();
 }
@@ -414,6 +503,21 @@ void ConfigStore::deliver() {
     while (m_results.contains(m_nextCompletion)) {
         const auto result = m_results.take(m_nextCompletion);
         auto pending = m_pending.take(m_nextCompletion++); // Detach before arbitrary reentry.
+        if (result.operation == "openOverlay") {
+            const auto presentation = m_overlayPresentations.take(result.requestId);
+            if (result.status == "opened" && presentation && pending.context) {
+                auto *editor = new ConfigOverlayEditor(this, *presentation);
+                m_overlays[result.editorId] = editor;
+                if (!boundary.invoke([&] { emit overlayOpened(result.requestId, editor); }))
+                    return;
+            } else {
+                const auto endpoint = m_owner->overlayEndpoint();
+                overlayRemoveDependency(endpoint, result.editorId);
+                if (result.status == "opened")
+                    endpoint->send(
+                        [id = result.editorId](ConfigWorker &w) { w.overlayDetach(id); });
+            }
+        }
         if (result.status == "failed")
             m_failures.append(result);
         if (result.operation == "close") {

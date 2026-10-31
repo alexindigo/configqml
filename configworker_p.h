@@ -4,6 +4,7 @@
 #include "configstore.h"
 #include "configmemorybackend.h"
 #include "configprojection_p.h"
+#include "configoverlay_p.h"
 #include <QQueue>
 #include <QTimer>
 #include <QFileSystemWatcher>
@@ -22,6 +23,13 @@ struct ConfigWorkerPacket {
     bool autoSaveRequested = false;
     std::optional<ConfigError> sourceError;
     std::optional<ConfigResult> migrationResult;
+    std::optional<QList<ConfigSourceState>> sourceStates;
+    std::optional<ConfigSourceAccepted> sourceAccepted;
+    QList<ConfigProjectionEffectsEvent> projectionEffects;
+    QList<ConfigError> projectionDiagnostics;
+    QMap<QString, ConfigGroupInfo> groups;
+    QMap<QString, quint64> groupGenerations;
+    QList<ConfigOverlayPresentation> overlays;
     QMap<ConfigPath, QMap<quint64, ConfigModelPlan>> models;
     qint64 planningNanos = 0;
 };
@@ -38,6 +46,40 @@ struct ConfigCommand {
     QString file;
     QString profileName;
     QList<ConfigPath> selection;
+    QString policyId;
+    std::optional<ConfigRecordListMetadata> policyMetadata;
+    std::optional<ConfigRecordListEditOptions> listEdits;
+    QString conversionError;
+    std::optional<ConfigRetainedGroupOptions> retainedGroup;
+    bool retainedLookup = false;
+    QString groupToken, groupState;
+    // Object-thread snapshot, including earlier pending lifecycle claims.
+    QMap<QString, quint64> groupGenerations;
+    std::shared_ptr<ConfigOverlayTransaction> overlay;
+    QString editorId;
+    QMap<ConfigPath, std::optional<QVariant>> overlayEdits;
+};
+struct ConfigPendingIntent {
+    quint64 id = 0, input = 0;
+    ConfigPath path;
+    ConfigFileEdit edit;
+    QString reservation;
+};
+struct ConfigRetainedCapture {
+    ConfigGroupInfo info;
+    quint64 generation = 0;
+    QByteArray commandBody;
+    QList<ConfigPath> selections;
+    QMap<QString, QSet<quint64>> intents;
+    QMap<QString, QVariantMap> bases;
+    QMap<QString, ConfigRevision> revisions;
+    QMap<QString, ConfigRevision> uncertain;
+    QMap<QString, QByteArray> uncertainBytes;
+    QMap<QString, QVariantMap> originalBases;
+    QMap<QString, ConfigRevision> originalRevisions;
+    QMap<QString, QByteArray> bytes, originalBytes;
+    QList<ConfigResult> receipts;
+    QMap<QString, ConfigRevision> confirmedRevisions;
 };
 class ConfigWorker : public QObject {
     Q_OBJECT
@@ -58,6 +100,18 @@ public:
     ConfigMemoryBackend *backend() const { return m_backend.get(); }
     ConfigLayers *layers() const { return m_layers.get(); }
     ConfigJsonBackend *jsonBackend() const { return m_json.get(); }
+    void setOverlayEndpoint(std::shared_ptr<ConfigOverlayEndpoint> endpoint) {
+        m_endpoint = std::move(endpoint);
+    }
+    void overlayLease(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
+    void overlayRelease(const QString &token);
+    void overlayContinue(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
+    void overlayChanged(const QString &editorId);
+    void overlayDetach(const QString &editorId);
+    void overlayScopeClosed(const std::shared_ptr<std::atomic_bool> &lifetime);
+    void overlayControl(const std::function<void(ConfigWorker &)> &message);
+    void holdOverlayLeases(bool hold);
+    qsizetype heldOverlayLeases() const { return m_overlayPaused.size(); }
     void setAdmission(std::function<QString(const ConfigInput &)> admission) {
         m_options.admission = std::move(admission);
     }
@@ -77,21 +131,89 @@ private:
     void beginSave(const ConfigCommand &command);
     void continueSave();
     void finishSave();
+    static void recordPublication(ConfigResult &result, const QString &source,
+                                  const ConfigBackendResult &outcome, bool published = true);
+    static void finalizePublicationState(ConfigResult &result);
     bool reloadFiles(const std::optional<ConfigCommand> &command = {});
     void armWatches();
     void scheduleAutoSave();
     void processGroup(const ConfigCommand &command);
+    void overlayCommand(const ConfigCommand &command);
+    void overlayAcquire(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
+    void overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
+    void overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
+    void overlayCancelAll();
+    void overlayNotify();
+    bool overlayBlocked(const ConfigCommand &command) const;
+    QList<ConfigPath> commandPaths(const ConfigCommand &command) const;
+    std::shared_ptr<ConfigOverlayEndpoint> m_endpoint;
+    QMap<QString, QList<ConfigPath>> m_overlayLeases;
+    QMap<QString, std::shared_ptr<ConfigOverlayTransaction>> m_overlayIncoming;
+    QMap<QString, std::shared_ptr<ConfigOverlayTransaction>> m_overlayPaused;
+    bool m_holdOverlayLeases = false;
+    QMap<QString, std::shared_ptr<ConfigOverlayTransaction>> m_overlayTransactions;
+    QMap<QString, ConfigCommand> m_overlayCommands;
+    QMap<QString, ConfigOverlayCapture> m_overlayCaptures;
+    QMap<QString, ConfigOverlaySubscription> m_overlaySubscriptions;
+    QMap<QString, ConfigResult> m_overlayReceipts;
+    QList<ConfigOverlayPresentation> m_overlayPackets;
+    QList<ConfigPath> m_reloadSelection;
     void profile(const ConfigCommand &command);
     bool migrateSources();
+    void recordListCommand(const ConfigCommand &command);
+    QString quarantined(const ConfigPath &path) const;
+    QString observeSource(const QString &id, const ConfigBackendResult &read,
+                          const ConfigError &error, bool startup);
+    QString retainObservation(const QString &id, const ConfigBackendResult &read,
+                              const QString &phase, const QString &role,
+                              const std::optional<ConfigCommand> &command = {},
+                              ConfigResult *result = nullptr);
+    void retainedGroupCommand(const ConfigCommand &command);
+    void recordPersistent(const ConfigInput &input, const ConfigLayers &before);
+    void recordPersistentEdit(const ConfigRoute &route, const ConfigPath &path,
+                              const std::optional<QVariant> &value, bool ifMissing, quint64 input,
+                              const ConfigLayers &before);
+    QList<ConfigFileEdit> pendingEdits(const QString &source) const;
+    QList<ConfigPendingIntent> eligibleIntents(const QString &source,
+                                               const ConfigCommand &command) const;
+    bool reserved(const ConfigPath &path) const;
+    QStringList unresolvedGroups(quint64 prefix) const;
+    void confirmed(const QString &id, const QVariantMap &raw, const ConfigBackendResult &outcome);
+    void refreshDirty(const QString &id);
+    void describeGroup(ConfigResult &result, const ConfigGroupInfo &info) const;
+    bool recoverOwnPublication(const QString &source, const ConfigBackendResult &read);
     ConfigStoreOptions m_options;
     QString m_initializationError;
     std::unique_ptr<ConfigLayers> m_layers;
+    std::unique_ptr<ConfigLayers> m_diskLayers;
+    QList<ConfigSourceState> m_sourceStates;
+    QMap<QString, ConfigRecordListPolicySpec> m_listPolicies;
+    QMap<QString, ConfigRecordListMetadata> m_listMetadata;
+    QMap<QString, quint64> m_listRevisions;
+    QMap<ConfigPath, QVariant> m_listInputs, m_listOutputs;
+    QMap<ConfigPath, QStringList> m_listMetadataKeys;
+    QString m_acceptOrigin, m_acceptCause;
+    quint64 m_sourceEventId = 0;
+    QMap<ConfigPath, QVariantList> m_diskFacts;
+    quint64 m_observationOrder = 0;
     std::unique_ptr<ConfigMemoryBackend> m_backend;
     std::unique_ptr<ConfigJsonBackend> m_json;
     QMap<QString, ConfigJsonFile> m_files;
     QMap<QString, ConfigRoute> m_fileRoutes;
     QMap<QString, QVariantMap> m_baselines;
-    QMap<QString, QList<ConfigFileEdit>> m_edits;
+    QMap<QString, QList<ConfigPendingIntent>> m_intents;
+    quint64 m_nextIntent = 0;
+    QMap<QString, ConfigRetainedCapture> m_groups;
+    QMap<QString, QString> m_groupKeys;
+    QMap<QString, ConfigRevision> m_pendingRevisions;
+    QMap<QString, QByteArray> m_sourceBytes, m_pendingBytes, m_saveBytes;
+    QMap<QString, QList<ConfigPendingIntent>> m_saveIntents;
+    QMap<QString, QVariantMap> m_saveBases;
+    QMap<QString, ConfigRevision> m_saveRevisions;
+    QVariantMap m_activeRaw;
+    bool m_unresolvedSave = false;
+    bool m_recoveryRead = false;
+    QSet<QString> m_recoveryChecked, m_recoveryWhole;
     QFileSystemWatcher *m_watcher = nullptr;
     QTimer *m_watchTimer = nullptr;
     QTimer *m_autoTimer = nullptr;
@@ -104,6 +226,7 @@ private:
     bool m_closed = false;
     bool m_draining = false;
     quint64 m_prefix = 0;
+    QSet<quint64> m_settledInputs;
     quint64 m_generation = 0;
     QMap<ConfigPath, quint64> m_pathGenerations;
     QMap<ConfigPath, quint64> m_pathInputs;

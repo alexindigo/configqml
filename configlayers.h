@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 #include "configschema.h"
+#include "configprojection.h"
+#include <QSet>
 
 namespace configqml {
 enum class ConfigLayerKind { File, Environment, Runtime };
@@ -14,6 +16,11 @@ struct ConfigSource {
     QByteArray revision;
     bool exists = true;
     bool json = false; // Raw JSON URL strings are decoded only for admitted projections.
+    QString fallbackFor;
+    bool available = true;
+    std::optional<bool> diskExists;
+    bool localIntent = false;
+    bool pruneResetNamespaces = false; // Worker compiles JsonFileSource.deleteWhenEmpty here.
 };
 struct ConfigLayer {
     QString id;
@@ -76,24 +83,33 @@ struct ConfigWriteResult {
 // Synchronous, single-owner engine. M2 supplies the asynchronous store/worker.
 class ConfigLayers {
 public:
-    ConfigLayers(const ConfigSchema &schema, const QList<ConfigLayer> &layers);
+    ConfigLayers(const ConfigSchema &schema, const QList<ConfigLayer> &layers,
+                 const QList<ConfigProjectionSpec> &projections = {});
     bool valid() const { return m_errors.isEmpty(); }
     QList<ConfigDiagnostic> errors() const { return m_errors; }
     ConfigSchema schema() const { return m_schema; }
     QVariantMap effective() const;
     std::optional<QVariant> value(const ConfigPath &path) const;
+    std::optional<QVariant> unmaskedValue(const ConfigPath &path) const;
     std::optional<ConfigSource> source(const QString &layerId, const QString &sourceId) const;
     QList<ConfigDiagnostic> diagnostics(const QString &layerId, const QString &sourceId) const;
     QList<ConfigDiagnostic> rejectedDiagnostics() const;
     ConfigOperation replaceSource(const QString &layerId, const ConfigSource &source);
     ConfigOperation replaceSources(const QString &layerId, const QList<ConfigSource> &sources);
+    ConfigOperation replaceAllSources(const QMap<QString, QList<ConfigSource>> &sources);
+    ConfigWriteResult applyEdits(const QMap<ConfigPath, std::optional<QVariant>> &edits);
     ConfigInfo info(const ConfigPath &path) const;
     ConfigWriteResult setUser(const ConfigPath &path, const QVariant &value);
     ConfigWriteResult reset(const ConfigPath &path, const QString &targetLayer);
     ConfigWriteResult setRuntime(const ConfigPath &path, const QVariant &value);
     ConfigWriteResult clearRuntime(const ConfigPath &path);
+    QString fallbackState(const QString &sourceId) const;
+    QList<ConfigProjectionEffectsEvent> takeProjectionEffects();
+    QList<QPair<QString, ConfigDiagnostic>> takeProjectionDiagnostics();
 
 private:
+    friend class ConfigWorker;
+    void removeTransientLayers();
     struct AdmittedValue {
         QVariant value;
         QByteArray revision;
@@ -101,19 +117,34 @@ private:
     };
     struct SourceState {
         ConfigSource source;
+        // Raw input underlying the last committed layer admission, plus checked local edits.
+        // Rejected observations remain in source, never become a local transaction's base.
+        ConfigSource admissionSource;
         QMap<ConfigPath, AdmittedValue> admitted;
         QList<ConfigDiagnostic> errors;
         bool rejected = false;
+        QString projectionError;
     };
     struct LayerState {
         ConfigLayer descriptor;
         QList<SourceState> sources;
     };
-    ConfigOperation admit(LayerState &layer, SourceState &state, const ConfigSource &source);
+    ConfigOperation admit(LayerState &layer, SourceState &state, const ConfigSource &source,
+                          bool projected = false);
     bool rejects(const LayerState &layer, const ConfigPath &path) const;
     ConfigRoute route(const ConfigPath &path, const QString &layerId) const;
     ConfigWriteResult write(const ConfigPath &path, const QVariant &value, bool runtime);
     ConfigWriteResult erase(const ConfigPath &path, const QString &layerId, bool runtime);
+    bool participates(const SourceState &source) const;
+    QList<ConfigDiagnostic> projectSources(const QList<LayerState> *previous = nullptr,
+                                           bool local = false);
+    QList<ConfigDiagnostic> commitLocal(const ConfigLayers &before);
+    void refreshRejection(const LayerState &layer, SourceState &source);
+    QList<ConfigProjectionSpec> m_projections;
+    QList<ConfigProjectionEffectsEvent> m_effects;
+    QList<QPair<QString, ConfigDiagnostic>> m_projectionDiagnostics;
+    QSet<QString> m_effectRuns;
+    bool m_deferProjections = false;
     ConfigSchema m_schema;
     QList<LayerState> m_layers;
     QList<ConfigDiagnostic> m_errors;

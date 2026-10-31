@@ -3,6 +3,7 @@
 #include "configresult.h"
 #include "configjsonbackend.h"
 #include "configlistmodel.h"
+#include "configrecordlistpolicy.h"
 #include <QObject>
 #include <QPointer>
 #include <QThread>
@@ -17,6 +18,10 @@ struct ConfigWorkerPacket;
 class ConfigStoreTestAccess;
 class ConfigDraft;
 class ConfigStoreHandle;
+class ConfigOverlayEditor;
+struct ConfigOverlayOptions;
+struct ConfigOverlayPresentation;
+struct ConfigOverlayEndpoint;
 struct ConfigStoreOptions {
     ConfigSchema schema{ConfigDescriptor::group({})};
     QList<ConfigLayer> layers;
@@ -26,6 +31,10 @@ struct ConfigStoreOptions {
     ConfigJsonBackend::FaultHook fileFault;
     QString storeId;
     ConfigListModel::Numbers modelNumbers = ConfigListModel::Numbers::Native;
+    QList<ConfigProjectionSpec> projections;
+    QList<ConfigRecordListPolicySpec> recordListPolicies;
+    QString evidenceDirectory;
+    QList<ConfigPath> observedPaths;
     // Native, worker-only admission. Never pass an engine-bound callback here.
     std::function<QString(const ConfigInput &)> admission;
 };
@@ -84,6 +93,20 @@ public:
                           Callback callback = {});
     quint64 importProfile(const QString &file, const QList<ConfigPath> &paths = {},
                           QObject *context = nullptr, Callback callback = {});
+    QList<ConfigSourceState> sourceStates() const { return m_sourceStates; }
+    quint64 updateRecordListPolicy(const QString &policyId,
+                                   const ConfigRecordListMetadata &metadata,
+                                   QObject *context = nullptr, Callback callback = {});
+    quint64 editRecordList(const QString &policyId, const ConfigRecordListEditOptions &options,
+                           QObject *context = nullptr, Callback callback = {});
+    quint64 retainGroup(const ConfigRetainedGroupOptions &options, QObject *context = nullptr,
+                        Callback callback = {});
+    quint64 saveGroup(const QString &token, QObject *context = nullptr, Callback callback = {});
+    quint64 retryGroup(const QString &token, QObject *context = nullptr, Callback callback = {});
+    quint64 releaseGroup(const QString &token, QObject *context = nullptr, Callback callback = {});
+    ConfigGroupInfo groupInfo(const QString &token) const;
+    quint64 openOverlay(const ConfigOverlayOptions &options, QObject *context = nullptr,
+                        Callback callback = {});
 signals:
     void statusChanged();
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
@@ -92,12 +115,22 @@ signals:
     void completed(const configqml::ConfigResult &result);
     void autoSaved(const configqml::ConfigResult &result);
     void sourceError(const configqml::ConfigError &error);
+    void sourceWarning(const configqml::ConfigError &warning);
     void migrationCompleted(const configqml::ConfigResult &result);
+    void sourceStatesChanged();
+    void sourceAccepted(const configqml::ConfigSourceAccepted &event);
+    void projectionEffects(const configqml::ConfigProjectionEffectsEvent &event);
+    void overlayOpened(quint64 requestId, configqml::ConfigOverlayEditor *editor);
 
 private:
     friend class ConfigWorker;
     friend class ConfigStoreTestAccess;
     friend class ConfigDraft;
+    friend class ConfigStoreHandle;
+    friend class ConfigOverlayEditor;
+    quint64 overlayRequest(ConfigOverlayEditor *editor, const QString &operation, QObject *context,
+                           Callback callback);
+    void receiveOverlay(const ConfigOverlayPresentation &presentation);
     quint64 applyGroup(const QMap<ConfigPath, std::optional<QVariant>> &edits,
                        const QMap<ConfigPath, ConfigPathState> &fences, QObject *context,
                        Callback callback);
@@ -109,6 +142,9 @@ private:
                               const ConfigAdmission *admission = nullptr);
     quint64 request(const QString &operation, QObject *context, Callback callback);
     quint64 registerRequest(QObject *context, Callback callback);
+    quint64 groupRequest(const QString &operation, const QString &token, QObject *context,
+                         Callback callback);
+    QMap<QString, quint64> retainedGenerations() const;
     void receive(const ConfigWorkerPacket &packet);
     void receiveResult(const ConfigResult &result);
     void deliver();
@@ -126,6 +162,23 @@ private:
     QString m_userLayerId;
     QString m_storeId;
     ConfigSnapshot m_cache;
+    QList<ConfigSourceState> m_sourceStates;
+    QMap<QString, ConfigPath> m_policyPaths;
+    QMap<QString, ConfigGroupInfo> m_groups;
+    // Value-free ingress claims, including requests whose worker reply is pending.
+    // Captures/bodies and semantic idempotency remain worker-owned.
+    QMap<QString, quint64> m_retainedRequests;
+    struct RetainedIngress {
+        // Last worker observation and separate object-thread transition claim.
+        // Only its own settlement removes a claim, even if admission refused it.
+        quint64 generation = 0, capturePrefix = 0;
+        QString state;
+        quint64 pendingRequest = 0, pendingGeneration = 0;
+        QString pendingState;
+    };
+    QMap<QString, RetainedIngress> m_retainedIngress;
+    QMap<QString, QPointer<ConfigOverlayEditor>> m_overlays;
+    QMap<quint64, std::shared_ptr<ConfigOverlayPresentation>> m_overlayPresentations;
     mutable QMap<ConfigPath, QVariant> m_presentations;
     std::shared_ptr<const ConfigSnapshot> m_admittedSnapshot;
     Status m_status = Status::Loading;

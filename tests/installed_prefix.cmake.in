@@ -96,7 +96,7 @@ if(NOT last_output MATCHES "CONFIGQML_NATIVE_OK")
     message(FATAL_ERROR "Native example did not observe the admitted value")
 endif()
 # Also compile/link the installed QML target and its public header closure.
-file(WRITE "${root}/qml-native/CMakeLists.txt" "cmake_minimum_required(VERSION 3.21)\nproject(qml_consumer LANGUAGES CXX)\nfind_package(configqml 0.1 REQUIRED COMPONENTS Qml)\nadd_executable(qml-consumer main.cpp)\ntarget_link_libraries(qml-consumer PRIVATE configqml::configqml)\n")
+file(WRITE "${root}/qml-native/CMakeLists.txt" "cmake_minimum_required(VERSION 3.21)\nproject(qml_consumer LANGUAGES CXX)\nfind_package(configqml @PROJECT_VERSION@ REQUIRED COMPONENTS Qml)\nadd_executable(qml-consumer main.cpp)\ntarget_link_libraries(qml-consumer PRIVATE configqml::configqml)\n")
 file(WRITE "${root}/qml-native/main.cpp" "#include <configqmlstore.h>\n#include <configqmlvalue.h>\n#include <configqmlmodel.h>\n#include <configfacade.h>\n#include <cstring>\nint main() { return std::strcmp(configqml::ConfigQmlStore::staticMetaObject.className(), \"configqml::ConfigQmlStore\"); }\n")
 run(${clean} "@CMAKE_COMMAND@" -S "${root}/qml-native" -B "${root}/qml-native-build" -G Ninja
     "-DQt6_DIR=@Qt6_DIR@" "-Dconfigqml_DIR=${cmakedir}"

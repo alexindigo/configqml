@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 #include "configvalue.h"
+#include <QRegularExpression>
 #include <functional>
 #include <memory>
 
@@ -51,8 +52,14 @@ struct ConfigDescriptor {
     std::optional<QVariant> maximum;
     QMap<QString, ConfigDescriptor> fields; // Group/Record children.
     QList<ConfigDescriptor> element; // Exactly one for List/Map; value-owned recursive descriptor.
-    QString idField; // Optional required scalar record field selecting list row identity.
+    QString idField;       // Optional required scalar record field selecting list row identity.
+    QString stringPattern; // Empty is unconstrained; String descriptors only.
 
+    ConfigDescriptor() = default;
+    explicit ConfigDescriptor(Type type) : type(type) {}
+    ConfigDescriptor(const ConfigDescriptor &) = default;
+    ConfigDescriptor(ConfigDescriptor &&) noexcept = default;
+    ConfigDescriptor &operator=(ConfigDescriptor other) noexcept;
     static ConfigDescriptor group(const QMap<QString, ConfigDescriptor> &fields);
     static ConfigDescriptor leaf(Type type, const QVariant &defaultValue);
     static ConfigDescriptor list(const ConfigDescriptor &element, const QVariantList &defaultValue);
@@ -64,6 +71,8 @@ struct ConfigDescriptor {
 private:
     friend struct ConfigCapture;
     friend class ConfigSchema;
+    QString m_compiledStringPattern;
+    std::shared_ptr<const QRegularExpression> m_stringExpression;
     ConfigValueResult validateCaptured(const QVariant &value, const ConfigPath &path, Format format,
                                        bool childrenAdmitted,
                                        const ConfigDiagnosticBuilder &diagnostics) const;

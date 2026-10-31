@@ -81,6 +81,23 @@ bool compatibleAncestors(const QVariantMap &base, const QVariantMap &fresh, cons
     return true;
 }
 } // namespace
+bool applyFileEdit(QVariantMap &raw, const ConfigFileEdit &edit) {
+    const auto current = valueAt(raw, edit.path);
+    if (edit.ifMissing && current)
+        return false;
+    if (edit.pruneEmpty && (!current || current->metaType().id() != QMetaType::QVariantMap ||
+                            !current->toMap().isEmpty()))
+        return false;
+    if (edit.value && edit.path.isEmpty())
+        raw = edit.value->toMap();
+    else if (edit.value)
+        putValue(raw, edit.path, *edit.value);
+    else if (edit.path.isEmpty())
+        raw.clear();
+    else
+        removeValue(raw, edit.path);
+    return true;
+}
 ConfigJsonBackend::ConfigJsonBackend(const QList<ConfigJsonFile> &files, FaultHook hook,
                                      const QMap<QString, ConfigDiagnosticBuilder> &diagnostics)
     : m_files(files), m_hook(std::move(hook)) {
@@ -129,6 +146,7 @@ ConfigJsonBackend::Target ConfigJsonBackend::resolve(const QString &id) const {
         struct stat s;
         if (::lstat(QFile::encodeName(candidate).constData(), &s) == 0) {
             if (S_ISLNK(s.st_mode)) {
+                result.identity += QFile::encodeName(candidate).toHex() + ':' + stamp(s) + ';';
                 if (++followed > 40)
                     return fail("symlink-loop");
                 result.links.append(candidate);
@@ -146,6 +164,10 @@ ConfigJsonBackend::Target ConfigJsonBackend::resolve(const QString &id) const {
             }
             if (!pending.isEmpty() && !S_ISDIR(s.st_mode))
                 return fail("not-a-directory");
+            if (S_ISDIR(s.st_mode))
+                result.identity += QFile::encodeName(candidate).toHex() + ':' +
+                                   QByteArray::number(s.st_dev) + ':' +
+                                   QByteArray::number(s.st_ino) + ';';
         } else if (errno != ENOENT)
             return fail("stat-failed");
         parts.append(segment);
@@ -197,12 +219,14 @@ ConfigBackendResult ConfigJsonBackend::read(const QString &id, const QString &ex
     if (fd.fd < 0) {
         if (errno == ENOENT) {
             r.success = true;
-            r.revision = {false, QFile::encodeName(name).toHex() + "|missing|"};
+            r.observedPresence = false;
+            r.revision = {false, QFile::encodeName(name).toHex() + "|missing||" + target.identity};
         } else
             r.error = {"open-failed", id, "read", name};
         return r;
     }
     struct stat before, after;
+    r.observedPresence = true;
     if (::fstat(fd.fd, &before) < 0 || !S_ISREG(before.st_mode)) {
         r.error = {"unsupported-file-identity", id, "read", name};
         return r;
@@ -222,34 +246,48 @@ ConfigBackendResult ConfigJsonBackend::read(const QString &id, const QString &ex
         }
         bytes.append(buffer, n);
     }
-    if (::fstat(fd.fd, &after) < 0 || stamp(before) != stamp(after) ||
-        stamp(name) != stamp(after) || resolve(id).path != name) {
+    r.bytes = bytes;
+    r.bytesAvailable = true;
+    const auto afterTarget = resolve(id);
+    if (::fstat(fd.fd, &after) < 0) {
+        r.error = {"concurrent-read", id, "read", name};
+        return r;
+    }
+    r.revision = {true, QFile::encodeName(name).toHex() + '|' + stamp(after) + '|' +
+                            QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex() +
+                            '|' + target.identity};
+    if (stamp(before) != stamp(after) || stamp(name) != stamp(after) || afterTarget.path != name ||
+        afterTarget.identity != target.identity) {
         r.error = {"concurrent-read", id, "read", name};
         return r;
     }
     r.success = true;
-    r.bytes = bytes;
-    r.revision = {true, QFile::encodeName(name).toHex() + '|' + stamp(after) + '|' +
-                            QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex()};
     return r;
 }
 void ConfigJsonBackend::confirm(const QString &id, const ConfigRevision &revision) {
     const auto fields = revision.token.split('|');
-    if (fields.size() == 3) {
+    if (fields.size() == 4) {
         const auto target = QFile::decodeName(QByteArray::fromHex(fields[0]));
         m_sourceTargets[ownString(id)] = target;
         m_confirmed[ownString(target)] = fields[1];
+        m_confirmedChains[ownString(id)] = fields[3];
     }
 }
 bool ConfigJsonBackend::changed(const QString &id) const {
     const auto target = resolve(id);
     return !target.error.empty() || m_sourceTargets.value(id) != target.path ||
-           !m_confirmed.contains(target.path) ||
+           m_confirmedChains.value(id) != target.identity || !m_confirmed.contains(target.path) ||
            stamp(target.path) != m_confirmed.value(target.path);
 }
-ConfigBackendResult ConfigJsonBackend::publish(const ConfigBackendRequest &request, int directory,
-                                               const QString &name) {
+ConfigBackendResult
+ConfigJsonBackend::publish(const ConfigBackendRequest &request, int directory, const QString &name,
+                           bool remove, QList<ConfigJsonTransaction::Observation> *observations) {
     const auto id = request.sourceId;
+    QString conflictCode = "revision-conflict";
+    for (const auto &file : m_files)
+        if (file.sourceId == id &&
+            file.conflictPolicy == ConfigConflictPolicy::StrictSourcePreimage)
+            conflictCode = "source-preimage-conflict";
     auto r = read(id, name); // Fresh authority inside the resolved target's lock.
     r.operation = ConfigBackendRequest::Operation::Publish;
     if (!r.success)
@@ -262,10 +300,65 @@ ConfigBackendResult ConfigJsonBackend::publish(const ConfigBackendRequest &reque
     }
     if (r.revision != request.expected) {
         r.success = false;
-        r.error = {"revision-conflict", id, "preflight", name};
+        r.error = {conflictCode, id, "preflight", name};
         return r;
     }
     const auto originalStamp = stamp(name);
+    const auto originalChain = resolve(id).identity;
+    auto observe = [&](const ConfigBackendResult &value, const QString &phase,
+                       const QString &role) {
+        if (observations)
+            observations->append({value, phase, role});
+    };
+    if (remove) {
+        const auto injected = fault("delete", name);
+        if (!injected.isEmpty() || stamp(name) != originalStamp ||
+            resolve(id).identity != originalChain || resolve(id).path != name ||
+            !checkTarget(id, name, true).empty()) {
+            r.success = false;
+            r.error = {injected.isEmpty() ? QString("empty-delete-target") : injected, id,
+                       "preflight", name};
+            return r;
+        }
+        if (::unlinkat(directory, QFile::encodeName(QFileInfo(name).fileName()).constData(), 0) <
+            0) {
+            r.success = false;
+            r.error = {"empty-delete-target", id, "delete", name};
+            return r;
+        }
+        r.publicationWitness =
+            ConfigRevision{false, QFile::encodeName(name).toHex() + "|missing||" + originalChain};
+        auto absent = r;
+        absent.revision = *r.publicationWitness;
+        absent.bytes.clear();
+        absent.observedPresence = false;
+        absent.bytesAvailable = false;
+        observe(absent, "delete", "published");
+        auto injectedAfter = fault("directory-sync", name);
+        bool synced = ::fsync(directory) == 0;
+        if (!synced || !injectedAfter.isEmpty()) {
+            r.success = false;
+            r.publicationState = ConfigBackendResult::PublicationState::Uncertain;
+            r.error = {injectedAfter.isEmpty() ? QString("directory-sync-failed") : injectedAfter,
+                       id, "sync", name};
+            return r;
+        }
+        injectedAfter = fault("readback", name);
+        const auto witness = r.publicationWitness;
+        r = read(id, name);
+        r.operation = ConfigBackendRequest::Operation::Publish;
+        r.publicationWitness = witness;
+        observe(r, "readback", r.revision == *witness && r.success ? "readback" : "late");
+        if (!injectedAfter.isEmpty() || !r.success || r.revision != *witness) {
+            r.success = false;
+            r.publicationState = ConfigBackendResult::PublicationState::Uncertain;
+            r.error = {injectedAfter.isEmpty() ? QString("readback-mismatch") : injectedAfter, id,
+                       "readback", name};
+            return r;
+        }
+        confirm(id, r.revision);
+        return r;
+    }
     const auto temporary =
         "." + QFileInfo(name).fileName() + "." + QUuid::createUuid().toString(QUuid::Id128);
     const auto temporaryBytes = QFile::encodeName(temporary);
@@ -304,20 +397,39 @@ ConfigBackendResult ConfigJsonBackend::publish(const ConfigBackendRequest &reque
     if (!injected.isEmpty())
         return fail(injected, "rename");
     if (stamp(name) != originalStamp || resolve(id).path != name ||
-        !checkTarget(id, name, true).empty())
-        return fail("revision-conflict", "preflight");
+        resolve(id).identity != originalChain || !checkTarget(id, name, true).empty())
+        return fail(conflictCode, "preflight");
     if (::renameat(directory, temporaryBytes.constData(), directory,
                    QFile::encodeName(QFileInfo(name).fileName()).constData()) < 0)
         return fail("rename-failed", "rename");
-    if (::fsync(directory) < 0)
-        return fail("directory-sync-failed", "sync", true);
+    struct stat published;
+    if (::fstat(fd.fd, &published) == 0) {
+        const ConfigRevision effect{
+            true, QFile::encodeName(name).toHex() + '|' + stamp(published) + '|' +
+                      QCryptographicHash::hash(request.bytes, QCryptographicHash::Sha256).toHex() +
+                      '|' + originalChain};
+        if (stamp(name) == stamp(published) && resolve(id).path == name &&
+            resolve(id).identity == originalChain)
+            r.publicationWitness = effect;
+        auto own = r;
+        own.revision = effect;
+        own.bytes = request.bytes;
+        own.observedPresence = true;
+        own.bytesAvailable = true;
+        observe(own, "rename", "published");
+    }
+    injected = fault("directory-sync", name);
+    if (::fsync(directory) < 0 || !injected.isEmpty())
+        return fail(injected.isEmpty() ? QString("directory-sync-failed") : injected, "sync", true);
     injected = fault("readback", name);
-    if (!injected.isEmpty())
-        return fail(injected, "readback", true);
+    const auto witness = r.publicationWitness;
     r = read(id, name);
+    r.publicationWitness = witness;
     r.operation = ConfigBackendRequest::Operation::Publish;
-    if (!r.success || r.bytes != request.bytes)
-        return fail("readback-mismatch", "readback", true);
+    observe(r, "readback", r.success && witness && r.revision == *witness ? "readback" : "late");
+    if (!injected.isEmpty() || !r.success || r.bytes != request.bytes || !witness ||
+        r.revision != *witness)
+        return fail(injected.isEmpty() ? QString("readback-mismatch") : injected, "readback", true);
     confirm(id, r.revision);
     return r;
 }
@@ -362,9 +474,10 @@ std::optional<ConfigBackendResult> ConfigJsonBackend::take(quint64 requestId) {
         return {};
     return m_results.take(requestId);
 }
-ConfigJsonTransaction ConfigJsonBackend::reconcile(const QString &sourceId,
-                                                   const QVariantMap &baseline,
-                                                   const QList<ConfigFileEdit> &edits) {
+ConfigJsonTransaction
+ConfigJsonBackend::reconcile(const QString &sourceId, const QVariantMap &baseline,
+                             const QList<ConfigFileEdit> &edits,
+                             const std::optional<ConfigSourcePreimage> &preimage) {
     const auto id = ownString(sourceId);
     ConfigJsonTransaction t;
     auto &r = t.outcome;
@@ -377,19 +490,36 @@ ConfigJsonTransaction ConfigJsonBackend::reconcile(const QString &sourceId,
         return t;
     }
     auto error = target.error;
+    ConfigJsonFile file;
+    for (const auto &candidate : m_files)
+        if (candidate.sourceId == id)
+            file = candidate;
+    const bool strict = file.conflictPolicy == ConfigConflictPolicy::StrictSourcePreimage;
     if (error.empty())
         error = checkTarget(id, name, true);
     auto fail = [&](ConfigError e) {
         r.success = false;
         r.error = m_diagnostics.value(id).sanitize(std::move(e));
+        if (t.observations.isEmpty())
+            t.observations.append({r, r.error.operation, "foreign"});
         return t;
     };
     if (!error.empty())
         return fail(error);
+    if (strict && !preimage)
+        return fail({"source-preimage-conflict", id, "preflight", name});
+    // Remember the chain before creating absent parent directories ourselves.
+    const bool createdParents = !QFileInfo(QFileInfo(name).absolutePath()).exists();
+    if (strict && createdParents &&
+        (preimage->revision.exists ||
+         preimage->revision.token.split('|').value(3) != target.identity))
+        return fail({"source-preimage-conflict", id, "preflight", name});
     if (!QDir().mkpath(QFileInfo(name).absolutePath()))
         return fail({"mkdir-failed", id, "stage", name});
     if (resolve(id).path != name)
         return fail({"target-changed", id, "preflight", name});
+    if (strict && createdParents && !resolve(id).identity.startsWith(target.identity))
+        return fail({"source-preimage-conflict", id, "preflight", name});
     Fd dir(::open(QFile::encodeName(QFileInfo(name).absolutePath()).constData(),
                   O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
     Fd lock(openLock(dir.fd, name));
@@ -397,8 +527,17 @@ ConfigJsonTransaction ConfigJsonBackend::reconcile(const QString &sourceId,
         return fail({"lock-failed", id, "lock", name});
     r = read(id, name);
     r.operation = ConfigBackendRequest::Operation::Publish;
+    t.observations.append({r, "preflight", "foreign"});
     if (!r.success)
         return t;
+    auto expected = preimage ? preimage->revision : ConfigRevision{};
+    if (strict && createdParents) {
+        const auto fields = expected.token.split('|');
+        expected.token = fields.value(0) + '|' + fields.value(1) + '|' + fields.value(2) + '|' +
+                         resolve(id).identity;
+    }
+    if (strict && (r.revision != expected || r.bytes != preimage->bytes))
+        return fail({"source-preimage-conflict", id, "preflight", name});
     ConfigJsonCodec codec(m_diagnostics.value(id));
     if (r.revision.exists) {
         auto parsed = codec.decode(r.bytes, id);
@@ -423,36 +562,32 @@ ConfigJsonTransaction ConfigJsonBackend::reconcile(const QString &sourceId,
                         m_diagnostics.value(id).make(edit.path, "path-conflict"), id, "reconcile",
                         name));
             }
-        if (!edit.ifMissing && (!same(valueAt(baseline, edit.path), fresh) ||
-                                !compatibleAncestors(baseline, t.raw, edit.path)))
+        const auto fence = edit.fencePath.value_or(edit.path);
+        if (!edit.ifMissing && (!same(valueAt(baseline, fence), valueAt(t.raw, fence)) ||
+                                !compatibleAncestors(baseline, t.raw, fence)))
             return fail(m_diagnostics.value(id).error(
                 m_diagnostics.value(id).make(edit.path, "path-conflict"), id, "reconcile", name));
     }
     bool applied = false;
-    for (const auto &edit : edits) {
-        if (edit.ifMissing && valueAt(t.raw, edit.path))
-            continue;
-        applied = true;
-        if (edit.value && edit.path.isEmpty())
-            t.raw = edit.value->toMap();
-        else if (edit.value)
-            putValue(t.raw, edit.path, *edit.value);
-        else if (edit.path.isEmpty())
-            t.raw.clear();
-        else
-            removeValue(t.raw, edit.path);
-    }
+    for (const auto &edit : edits)
+        applied |= applyFileEdit(t.raw, edit);
     if (!applied)
+        return t;
+    auto choices = t.raw;
+    choices.remove("_configqmlVersion");
+    const bool remove = file.deleteWhenEmpty && choices.isEmpty();
+    if (remove && !r.revision.exists)
         return t;
     const auto encoded = codec.encode(t.raw, id);
     if (!encoded.ok())
         return fail(encoded.error);
+    t.candidateBytes = remove ? QByteArray() : encoded.bytes;
     r = publish({ConfigBackendRequest::Operation::Publish, id, encoded.bytes, r.revision}, dir.fd,
-                name);
+                name, remove, &t.observations);
     t.published =
         r.success || r.publicationState == ConfigBackendResult::PublicationState::Uncertain;
     if (r.success)
-        t.raw = codec.decode(r.bytes, id).raw;
+        t.raw = r.revision.exists ? codec.decode(r.bytes, id).raw : QVariantMap{};
     return t;
 }
 } // namespace configqml

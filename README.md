@@ -23,6 +23,9 @@ Detached editor drafts apply one revision-fenced group; scoped handles share tha
 owner. [Editors and profiles](docs/editors-profiles.md) describes portable raw
 exports/imports, and [evolution and secrets](docs/evolution-secrets.md) documents
 worker-only raw migrations, per-node admission, redaction and keyring references.
+Declared [overlay views and editors](docs/overlay-editors.md) combine a scoped
+base with sparse record overrides: live read-only runtime values and separately
+captured revision-fenced previews, with worker-owned merge/difference and receipts.
 
 ## Install
 
@@ -49,7 +52,7 @@ Use C++17 and Qt **6.12** on Linux. The production target links only Qt Core;
 Qt Test is used by the test executables. With an installed package:
 
 ```cmake
-find_package(configqml 0.1 REQUIRED COMPONENTS Core)
+find_package(configqml 0.2 REQUIRED COMPONENTS Core)
 target_link_libraries(myapp PRIVATE configqml::core)
 ```
 

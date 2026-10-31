@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configstorehandle.h"
 #include "configconsumer_p.h"
+#include "configshutdown_p.h"
 namespace configqml {
 ConfigStoreHandle::ConfigStoreHandle(ConfigStore *store, ConfigPath prefix, bool writable,
                                      QObject *parent)
     : QObject(parent), m_store(store), m_prefix(ownPath(prefix)), m_writable(writable) {
-    if (store)
+    if (store) {
+        m_endpoint = store->m_owner->overlayEndpoint();
         m_diagnostics = store->schema().diagnostics();
+    }
     const auto descriptor = store ? store->schema().descriptor(m_prefix) : std::nullopt;
     if (!descriptor || descriptor->type != ConfigDescriptor::Type::Group) {
         m_store = nullptr;
@@ -21,7 +24,16 @@ ConfigStoreHandle::ConfigStoreHandle(ConfigStore *store, ConfigPath prefix, bool
             ConfigConsumerGuard(this).invoke([&] { emit valuesChanged(relative); });
     });
 }
+ConfigStoreHandle::~ConfigStoreHandle() { invalidateLifetime(); }
+void ConfigStoreHandle::invalidateLifetime() {
+    if (!m_lifetime->exchange(false))
+        return;
+    if (auto endpoint = m_endpoint.lock())
+        endpoint->send(
+            [lifetime = m_lifetime](ConfigWorker &w) { w.overlayScopeClosed(lifetime); });
+}
 void ConfigStoreHandle::detach() {
+    invalidateLifetime();
     if (m_store)
         disconnect(m_store, nullptr, this, nullptr);
     m_store = nullptr;

@@ -3,8 +3,44 @@
 #include "configprojection_p.h"
 #include <QJSValue>
 #include <QJSValueIterator>
+#include <cmath>
 
 namespace configqml {
+bool qmlIndex(const QVariant &value, qsizetype &out) {
+    const auto type = value.metaType().id();
+    if (type != QMetaType::LongLong && type != QMetaType::ULongLong && type != QMetaType::Double)
+        return false;
+    const auto n = value.toDouble();
+    if (!std::isfinite(n) || std::trunc(n) != n || n < 0 || n > 9007199254740991.0)
+        return false;
+    out = qsizetype(n);
+    return true;
+}
+bool qmlSelectors(const QVariant &value, QList<ConfigValueSelector> &out, bool each) {
+    if (value.metaType().id() != QMetaType::QVariantList)
+        return false;
+    for (const auto &raw : value.toList()) {
+        if (raw.metaType().id() != QMetaType::QVariantMap)
+            return false;
+        const auto segment = raw.toMap();
+        if (segment.size() != 1)
+            return false;
+        if (segment.contains("key") && segment.value("key").metaType().id() == QMetaType::QString)
+            out.append({ConfigValueSelector::Kind::Key, segment.value("key").toString(), 0});
+        else if (segment.contains("index")) {
+            qsizetype n;
+            if (!qmlIndex(segment.value("index"), n))
+                return false;
+            out.append({ConfigValueSelector::Kind::Index, {}, n});
+        } else if (each && segment.contains("each") &&
+                   segment.value("each").metaType().id() == QMetaType::Bool &&
+                   segment.value("each").toBool())
+            out.append({ConfigValueSelector::Kind::Each, {}, 0});
+        else
+            return false;
+    }
+    return true;
+}
 namespace {
 class QmlInput final : public ConfigValueInput {
 public:
@@ -126,6 +162,19 @@ QVariantMap qmlResult(const ConfigResult &input, const ConfigDiagnosticBuilder &
         covered[it.key()] = QString::fromLatin1(it->token);
     QVariantList publications;
     QVariantList masks;
+    QVariantList coverage, evidence;
+    for (const auto &item : r.coverage)
+        coverage.append(QVariantMap{{"path", item.path},
+                                    {"sourceId", item.sourceId},
+                                    {"inputThrough", QString::number(item.inputThrough)},
+                                    {"intentRevision", QString::number(item.intentRevision)}});
+    for (const auto &item : r.evidence)
+        evidence.append(QVariantMap{{"evidenceId", item.evidenceId},
+                                    {"directory", item.directory},
+                                    {"sourceId", item.sourceId},
+                                    {"phase", item.phase},
+                                    {"role", item.role},
+                                    {"observationOrder", QString::number(item.observationOrder)}});
     for (auto it = r.masks.cbegin(); it != r.masks.cend(); ++it)
         masks.append(QVariantMap{{"path", it.key()}, {"maskedBy", it.value()}});
     for (const auto &p : r.publications)
@@ -152,6 +201,48 @@ QVariantMap qmlResult(const ConfigResult &input, const ConfigDiagnosticBuilder &
                                   {"operation", r.error.operation}}},
             {"maskedBy", r.maskedBy},
             {"masks", masks},
+            {"coverage", coverage},
+            {"evidence", evidence},
+            {"policyId", r.policyId},
+            {"metadataRevision", QString::number(r.metadataRevision)},
+            {"groupToken", r.groupToken},
+            {"requestKey", r.requestKey},
+            {"capturePrefix", QString::number(r.capturePrefix)},
+            {"dependencies", r.dependencies},
+            {"attemptId", r.attemptId},
+            {"attemptNumber", QString::number(r.attemptNumber)},
+            {"unresolvedGroups", r.unresolvedGroups},
+            {"excludedGroups", r.excludedGroups},
+            {"editorId", r.editorId},
+            {"refreshState", r.refreshState},
             {"description", r.description()}};
+}
+QVariantMap qmlGroupInfo(const ConfigGroupInfo &info, const ConfigDiagnosticBuilder &diagnostics) {
+    if (!info.error.empty())
+        return {{"error", QVariantMap{{"code", info.error.code}}}};
+    QVariantList coverage, attempts;
+    for (const auto &item : info.coverage)
+        coverage.append(QVariantMap{{"path", item.path},
+                                    {"sourceId", item.sourceId},
+                                    {"inputThrough", QString::number(item.inputThrough)},
+                                    {"intentRevision", QString::number(item.intentRevision)}});
+    for (const auto &attempt : info.attempts) {
+        const auto error = diagnostics.sanitize(attempt.error);
+        attempts.append(QVariantMap{{"attemptId", attempt.attemptId},
+                                    {"attemptNumber", QString::number(attempt.attemptNumber)},
+                                    {"requestId", QString::number(attempt.requestId)},
+                                    {"status", attempt.status},
+                                    {"publicationState", attempt.publicationState},
+                                    {"error", QVariantMap{{"code", error.code},
+                                                          {"sourceId", error.sourceId},
+                                                          {"operation", error.operation},
+                                                          {"file", error.file},
+                                                          {"path", error.path},
+                                                          {"line", error.line}}}});
+    }
+    return {{"groupToken", info.groupToken}, {"requestKey", info.requestKey},
+            {"state", info.state},           {"capturePrefix", QString::number(info.capturePrefix)},
+            {"coverage", coverage},          {"dependencies", info.dependencies},
+            {"attempts", attempts}};
 }
 } // namespace configqml

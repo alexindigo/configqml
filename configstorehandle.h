@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 #include "configdraft.h"
+#include <atomic>
 
 namespace configqml {
+struct ConfigOverlayEndpoint;
 class ConfigStoreHandle : public QObject {
     Q_OBJECT
 public:
     ConfigStoreHandle(ConfigStore *store, ConfigPath prefix, bool writable,
                       QObject *parent = nullptr);
+    ~ConfigStoreHandle() override;
     bool attached() const { return m_store; }
     void detach();
     ConfigStoreHandle *scope(const ConfigPath &relative, bool writable = true);
@@ -23,6 +26,10 @@ signals:
     void detached();
 
 private:
+    friend class ConfigStore;
+    void invalidateLifetime();
+    std::weak_ptr<ConfigOverlayEndpoint> m_endpoint;
+    std::shared_ptr<std::atomic_bool> m_lifetime = std::make_shared<std::atomic_bool>(true);
     QPointer<ConfigStore> m_store;
     ConfigPath m_prefix;
     bool m_writable;

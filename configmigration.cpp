@@ -23,10 +23,9 @@ bool ConfigWorker::migrateSources() {
             result.status = "failed";
             if (result.error.empty())
                 result.error = {code, id, "migration", m_json->path(id)};
-            if (!result.coveredRevisions.isEmpty())
-                result.publicationState = "partial";
         } else
             result.status = planned.isEmpty() ? "nothing_to_save" : "saved";
+        finalizePublicationState(result);
         ConfigWorkerPacket packet;
         packet.migrationResult = result;
         post(packet);
@@ -94,26 +93,35 @@ bool ConfigWorker::migrateSources() {
     for (const auto &migration : planned) {
         ConfigSource updated = migration.original;
         updated.raw = migration.transformed;
+        QString retentionError;
         if (m_files.contains(updated.id)) {
-            const auto transaction = m_json->reconcile(updated.id, migration.original.raw,
-                                                       {{{}, migration.transformed, false}});
+            const auto transaction = m_json->reconcile(
+                updated.id, migration.original.raw, {{{}, migration.transformed, false}},
+                ConfigSourcePreimage{
+                    {migration.original.diskExists.value_or(migration.original.exists),
+                     migration.original.revision},
+                    migration.original.bytes});
+            for (const auto &observation : transaction.observations) {
+                const auto error =
+                    retainObservation(updated.id, observation.result, observation.phase,
+                                      observation.role, {}, &result);
+                if (!error.isEmpty())
+                    retentionError = error;
+            }
             const auto &outcome = transaction.outcome;
-            const QString state =
-                outcome.publicationState == ConfigBackendResult::PublicationState::Known
-                    ? "known"
-                    : "uncertain";
-            result.publications.append(
-                {updated.id, outcome.success, outcome.revision, state, outcome.error});
+            recordPublication(result, updated.id, outcome);
+            if (!retentionError.isEmpty())
+                result.error = {retentionError, updated.id, "migration", m_json->path(updated.id)};
             if (!outcome.success) {
-                result.publicationState = state;
-                return finish(outcome.error.code, updated.id);
+                return finish(retentionError.isEmpty() ? outcome.error.code : retentionError,
+                              updated.id);
             }
             updated.raw = transaction.raw;
             updated.bytes = outcome.bytes;
             updated.revision = outcome.revision.token;
             m_baselines[updated.id] = transaction.raw;
             m_revisions[updated.id] = outcome.revision;
-            result.coveredRevisions[updated.id] = outcome.revision;
+            m_sourceBytes[updated.id] = outcome.bytes;
         } else {
             // The memory backend's seed below is its initial confirmed publication.
             updated.bytes = encodeMemoryValue(updated.raw);
@@ -123,6 +131,8 @@ bool ConfigWorker::migrateSources() {
                 for (auto &source : layer.sources)
                     if (source.id == updated.id)
                         source = updated;
+        if (!retentionError.isEmpty())
+            return finish(retentionError, updated.id);
     }
     return finish();
 }

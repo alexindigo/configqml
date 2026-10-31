@@ -116,8 +116,13 @@ is read/replaced at its setting path, not by addressing its internal members.
 Reset is distinct from assigning null/empty/default. Sparse user state is the raw
 override tree, not an effective-tree diff: removing values merely because they
 equal today's defaults would lose explicit intent. Editing a leaf does not
-re-admit unrelated fields from a previously rejected raw input. ConfigLayers returns
-native admission results only; ConfigStore owns async persistence and notifications.
+re-admit unrelated fields from a previously rejected raw input. Local transactions
+reproject the raw input underlying the last committed admission plus checked local
+edits; rejected observations and their remaining diagnostics stay separate. Every
+source replacement batch checks the latest observed whole layer again, including
+successive invalid batches. A failed local reprojection rolls back the transaction
+and reports rejection. ConfigLayers returns native admission results only;
+ConfigStore owns async persistence and notifications.
 
 ## Scopes and plugin sub-stores
 
