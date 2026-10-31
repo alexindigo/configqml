@@ -15,7 +15,22 @@ namespace {
 class MigrationEngine {
 public:
     QJSEngine engine;
+    MigrationEngine() {
+        // Qt 6.12's JS Map/WeakMap still use linear ESTable searches. A private
+        // symbol supplies a direct candidate index; strict identity below is the
+        // authority, so copying even that symbol cannot forge an atomic value.
+        const auto index = engine.evaluate(R"JS((function() {
+            var key = Symbol(), define = Object.defineProperty;
+            return {
+                set: function(object, index) { define(object, key, {value:index}); },
+                get: function(object) { return object[key]; }
+            };
+        })())JS");
+        atomSet = index.property("set");
+        atomGet = index.property("get");
+    }
     QList<QPair<QJSValue, QVariant>> atoms;
+    QJSValue atomSet, atomGet;
     QList<QJSValue> ancestors;
     QString error;
     QString protocol = "migration";
@@ -54,6 +69,7 @@ public:
                                          : value.toString();
                 define(object, "decimal", decimal);
             }
+            atomSet.call({object, QJSValue(double(atoms.size()))});
             engine.globalObject().property("Object").property("freeze").call({object});
             atoms.append({object, value});
             return object;
@@ -83,9 +99,17 @@ public:
             return {};
         }
         if (value.isObject()) {
-            for (const auto &atom : atoms)
+            const auto index = atomGet.call({value});
+            if (index.isError() || engine.hasError()) {
+                error = protocol == "projection" ? "projection-result" : "migration-value";
+                return {};
+            }
+            const auto n = index.isNumber() ? index.toNumber() : -1;
+            if (n >= 0 && n < atoms.size() && std::trunc(n) == n) {
+                const auto &atom = atoms[qsizetype(n)];
                 if (value.strictlyEquals(atom.first))
                     return atom.second;
+            }
             for (const auto &ancestor : ancestors)
                 if (value.strictlyEquals(ancestor)) {
                     error = protocol + "-cycle";

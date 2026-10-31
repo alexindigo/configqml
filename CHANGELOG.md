@@ -6,6 +6,8 @@
 
 - JSON object encoding indexes preserved key order instead of repeatedly scanning
   it, avoiding quadratic work for wide objects while retaining deterministic order.
+- Migration and source-projection bridges recover exact numeric/URL wrappers with
+  an identity-checked index rather than a full scan for each returned value.
 
 ### Security
 
