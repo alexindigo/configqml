@@ -52,7 +52,7 @@ Use C++17 and Qt **6.12** on Linux. The production target links only Qt Core;
 Qt Test is used by the test executables. With an installed package:
 
 ```cmake
-find_package(configqml 0.2 REQUIRED COMPONENTS Core)
+find_package(configqml 0.2.1 REQUIRED COMPONENTS Core)
 target_link_libraries(myapp PRIVATE configqml::core)
 ```
 

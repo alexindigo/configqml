@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(configqml_native_example LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
-find_package(configqml 0.2 REQUIRED COMPONENTS Core)
+find_package(configqml 0.2.1 REQUIRED COMPONENTS Core)
 if(TARGET Qt6::Qml OR TARGET configqml::configqml)
     message(FATAL_ERROR "Core-only discovery unexpectedly imported QML")
 endif()
