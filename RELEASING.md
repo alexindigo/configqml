@@ -61,8 +61,8 @@ BUILD_TESTING defaults off; packaging must not require Qt Test or Quick.
 
 ## Gate 3 — Arch package
 
-Create `qt6-configqml-0.2.0.tar.gz` from the release commit using
-`git archive --prefix=configqml-0.2.0/ <release-commit>`, deliver it and the
+Create `qt6-configqml-0.2.1.tar.gz` from the release commit using
+`git archive --prefix=configqml-0.2.1/ <release-commit>`, deliver it and the
 candidate recipe to the guest's `packaging/`, and record the archive SHA256.
 The local filename matches the recipe's downloaded filename; makepkg uses it
 without a network fetch. In that guest directory:
@@ -71,8 +71,8 @@ without a network fetch. In that guest directory:
 makepkg --printsrcinfo > generated.SRCINFO
 diff -u .SRCINFO generated.SRCINFO
 makepkg --cleanbuild --noconfirm
-namcap PKGBUILD qt6-configqml-0.2.0-1-x86_64.pkg.tar.zst
-sudo pacman -U --noconfirm qt6-configqml-0.2.0-1-x86_64.pkg.tar.zst
+namcap PKGBUILD qt6-configqml-0.2.1-1-x86_64.pkg.tar.zst
+sudo pacman -U --noconfirm qt6-configqml-0.2.1-1-x86_64.pkg.tar.zst
 env -u QML_IMPORT_PATH -u QML2_IMPORT_PATH -u LD_LIBRARY_PATH QT_FORCE_STDERR_LOGGING=1 \
   /usr/lib/qt6/bin/qml -a core ../source/examples/qml/Settings.qml
 ```

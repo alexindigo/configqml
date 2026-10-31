@@ -3,7 +3,7 @@
 
 pkgname=qt6-configqml
 _projname=configqml
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="Layered configuration for Qt and QML"
 arch=('x86_64')
