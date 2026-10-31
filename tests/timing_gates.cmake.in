@@ -10,17 +10,26 @@ function(probe name config expected)
     if(name STREQUAL "late_options")
         string(APPEND source "/late")
     endif()
-    run("@CMAKE_COMMAND@" -S "${source}" -B "${build}" -G Ninja
-        "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@" "-DCMAKE_BUILD_TYPE=${config}"
-        "-DEXPECTED_TIMING=${expected}" ${ARGN})
-    run("@CMAKE_COMMAND@" --build "${build}" --parallel 2)
-    if(name STREQUAL "late_options")
-        run("${build}/child/timing_probe")
-    else()
-        run("${build}/timing_probe")
+    set(config_options)
+    if(NOT "@CMAKE_CONFIGURATION_TYPES@" STREQUAL "")
+        list(APPEND config_options "-DCMAKE_CONFIGURATION_TYPES=${config}")
     endif()
+    run("@CMAKE_COMMAND@" -S "${source}" -B "${build}" -G "@CMAKE_GENERATOR@"
+        "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@" "-DCMAKE_BUILD_TYPE=${config}"
+        "-DCMAKE_MAKE_PROGRAM=@CMAKE_MAKE_PROGRAM@"
+        "-DEXPECTED_TIMING=${expected}" ${config_options} ${ARGN})
+    run("@CMAKE_COMMAND@" --build "${build}" --config "${config}" --parallel 2)
+    set(output "${build}")
+    if(name STREQUAL "late_options")
+        string(APPEND output "/child")
+    endif()
+    if(NOT "@CMAKE_CONFIGURATION_TYPES@" STREQUAL "")
+        string(APPEND output "/${config}")
+    endif()
+    run("${output}/timing_probe")
 endfunction()
 probe(release Release 1)
+probe(lowercase release 1)
 probe(relwithdebinfo RelWithDebInfo 1)
 probe(debug Debug 0)
 probe(global_sanitizer Release 0 "-DCMAKE_CXX_FLAGS=-fsanitize=undefined")
@@ -30,12 +39,36 @@ probe(target_sanitizer Release 0 -DSANITIZER_SOURCE=target)
 probe(interface_sanitizer Release 0 -DSANITIZER_SOURCE=interface)
 probe(expression_sanitizer Release 0 -DSANITIZER_SOURCE=expression)
 probe(disabled Release 0 -DCONFIGQML_TIMING_GATES=OFF)
-# A cached/explicit ON must not make reconfigured sanitizer builds time-sensitive.
-probe(forced_sanitizer Release 0 -DCONFIGQML_TIMING_GATES=ON
+# Explicit overrides are authoritative, independently of AUTO's classification.
+probe(forced_debug Debug 1 -DCONFIGQML_TIMING_GATES=ON)
+probe(forced_sanitizer Release 1 -DCONFIGQML_TIMING_GATES=ON
     "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG -fsanitize=undefined")
 probe(late_options Release 0)
 probe(cached Release 1 "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG")
 probe(cached Release 0 "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG -fsanitize=undefined")
+probe(auto_reconfigure Debug 0 -DCONFIGQML_TIMING_GATES=AUTO)
+probe(auto_reconfigure Release 1)
+probe(off_reconfigure Debug 0 -DCONFIGQML_TIMING_GATES=OFF)
+probe(off_reconfigure Release 0)
+# CMake may know this generator even when its build tool is not installed. Look
+# only on PATH so a Makefiles-only environment does not acquire a Ninja dependency.
+find_program(ninja_executable NAMES ninja ninja-build HINTS ENV PATH NO_DEFAULT_PATH)
+set(multi_config_available OFF)
+if(ninja_executable)
+    execute_process(COMMAND "@CMAKE_COMMAND@"
+        -S "@CMAKE_CURRENT_SOURCE_DIR@/tests/timing_gates/generator-check"
+        -B "@CMAKE_CURRENT_BINARY_DIR@/timing-gate-probes/generator-check"
+        -G "Ninja Multi-Config" "-DCMAKE_MAKE_PROGRAM=${ninja_executable}"
+        RESULT_VARIABLE availability OUTPUT_VARIABLE availability_output
+        ERROR_VARIABLE availability_error TIMEOUT 45)
+    if(availability EQUAL 0)
+        set(multi_config_available ON)
+    endif()
+endif()
+if(NOT multi_config_available)
+    message(STATUS "Skipping Ninja Multi-Config timing probes: generator or Ninja unavailable")
+    return()
+endif()
 foreach(sanitized OFF ON)
     set(build "@CMAKE_CURRENT_BINARY_DIR@/timing-gate-probes/multi-${sanitized}")
     set(flags "-g")
@@ -45,6 +78,7 @@ foreach(sanitized OFF ON)
     # Direct execution keeps CMAKE_CONFIGURATION_TYPES' list in one argument.
     execute_process(COMMAND "@CMAKE_COMMAND@"
         -S "@CMAKE_CURRENT_SOURCE_DIR@/tests/timing_gates" -B "${build}" -G "Ninja Multi-Config"
+        "-DCMAKE_MAKE_PROGRAM=${ninja_executable}"
         "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@" "-DCMAKE_CONFIGURATION_TYPES=Debug;Release"
         "-DCMAKE_CXX_FLAGS_DEBUG=${flags}"
         "-DEXPECTED_TIMING=$<AND:$<NOT:$<BOOL:${sanitized}>>,$<CONFIG:Release>>"
