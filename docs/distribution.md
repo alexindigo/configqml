@@ -78,3 +78,24 @@ checkout before publication. Local verification uses a separately hashed archive
 of the release commit, without contacting the unpublished tag.
 The recipe pins qt6-base and qt6-declarative to the adapter's exact Qt version,
 so an incompatible Qt upgrade cannot silently retain the old binary plugin.
+
+## Test timing gates
+
+With `BUILD_TESTING=ON`, `CONFIGQML_TIMING_GATES` controls the performance-budget
+comparisons shared by native and QML suites. Its default is ON only when an active
+Release or RelWithDebInfo configuration is available and no `-fsanitize` option
+is found in `CMAKE_CXX_FLAGS`, the active configuration-specific
+`CMAKE_CXX_FLAGS_<CONFIG>` variables, or target compile/interface compile options.
+Multi-configuration generators inspect every enabled configuration; a sanitizer
+in any of them disables timing comparisons. Target options are inspected after
+targets (including an embedding parent's additions) have been configured.
+Generator-expression option text is inspected conservatively, so an unevaluated
+sanitizer expression disables timing comparisons too.
+
+`-DCONFIGQML_TIMING_GATES=OFF` disables the comparisons explicitly. ON requests
+them only in optimized configurations without detected sanitizers: Debug and
+instrumented builds remain untimed, including after reconfiguring a cached ON
+build with sanitizer flags. Every functional assertion still runs. For example,
+a Release build using `-DCMAKE_CXX_FLAGS_RELEASE='-O2 -DNDEBUG -fsanitize=undefined'`
+compiles the tests with timing gates off; normal Release enforces them. Opaque
+instrumentation hidden inside compiler wrappers should explicitly set OFF.
