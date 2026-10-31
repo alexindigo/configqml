@@ -25,7 +25,8 @@ target_sources(configqml_core PRIVATE configprojection_p.h configprojection.cpp
     configprojection.h configsourceprojection_p.h configevidence_p.h configevidence.cpp
     configrecordlistpolicy.h configrecordlistpolicy.cpp configrecordlistcommands.cpp configretainedgroup.cpp
     configlistmodel.h configlistmodel.cpp configdraft.h configdraft.cpp configgroup.cpp
-    configstorehandle.h configstorehandle.cpp configmigration.cpp configjsonbackup.cpp)
+    configstorehandle.h configstorehandle.cpp configmigration.cpp configjsonbackup.cpp
+    configjsonpublication_p.h configjsonpublication.cpp)
 target_sources(configqml_core PRIVATE configoverlayeditor.h configoverlayeditor.cpp
     configoverlay_p.h configoverlaypolicy.cpp configoverlayworker.cpp)
 add_library(configqml::core ALIAS configqml_core)

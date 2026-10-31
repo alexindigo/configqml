@@ -103,7 +103,8 @@ store.importProfile(profileFile, [], callback)
 
 Native equivalents take `QList<ConfigPath>` and context/callback. All file work,
 selection, raw projection, validation and grouped import are worker-owned. Export
-uses a 0600 atomic QSaveFile through the JSON storage owner, reports `exported`
+uses the JSON backend's shared descriptor-relative atomic publisher with 0600
+permissions, reports `exported`
 or `failed`, and refuses a store source as its destination. Import uses the normal
 saved/nothing_to_save/failed receipt, including partial multi-file outcomes. Paths
 must be absolute and clean.
@@ -111,10 +112,25 @@ must be absolute and clean.
 The storage owner resolves the complete export destination with the same bounded
 symlink resolver used for configured sources, including dangling targets and
 symlinked parent directories. It excludes every configured source's resolved
-target, then writes beside that exact resolved destination, preserving the alias.
-It checks resolution, source exclusion and file identity again before commit.
-Hard-linked destinations are refused rather than broken by replacement. As with
-configured files, this is not a sandbox against hostile directory mutation.
+target, then opens the resolved parent with `O_DIRECTORY | O_NOFOLLOW` and takes
+the same bounded cooperative `<target>.lock` as configured-file publication.
+The shared publisher creates a unique private staging file with
+`openat(O_CREAT | O_EXCL | O_NOFOLLOW, 0600)`, completely writes and fsyncs it,
+checks resolution/source exclusion and the descriptor-relative final identity,
+then uses `renameat` on that same directory descriptor and fsyncs the directory.
+Profiles, configured-file replacement/deletion and no-replace migration backups
+share this publisher; profiles never fall back to pathname-based QSaveFile writes.
+Hard-linked destinations are refused rather than broken by replacement. Retain
+the cooperative sidecar lock file; it must not be unlinked as cleanup.
+
+Once the parent is open, a later parent-component swap cannot redirect staging
+or publication: the export either fails validation or lands in the already-opened
+directory, even if that directory has been renamed. This does **not** implement
+component-by-component traversal anchored at a trusted root. Components above the
+opened parent can change during resolution/open; `O_NOFOLLOW` protects only the
+final parent component. Source exclusion and identity rechecks do not make those
+earlier components race-free. This is the same residual model as configured-file
+publication, not a sandbox against arbitrary hostile directory mutation.
 
 Import accepts regular files only (symlinks to regular files are allowed), refusing
 FIFOs, devices and directories without waiting for input. The opened file identity

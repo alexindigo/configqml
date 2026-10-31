@@ -1,69 +1,22 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configjsonbackend.h"
+#include "configjsonpublication_p.h"
 #include <QCryptographicHash>
 #include <QDir>
-#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
-#include <QSaveFile>
 #include <QStandardPaths>
 #include <QThread>
-#include <QUuid>
 #include <cerrno>
 #include <fcntl.h>
-#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace configqml {
 namespace {
-struct Fd {
-    int fd = -1;
-    explicit Fd(int fd = -1) : fd(fd) {}
-    ~Fd() {
-        if (fd >= 0)
-            ::close(fd);
-    }
-};
-QByteArray stamp(const struct stat &s) {
-    return QByteArray::number(s.st_dev) + ':' + QByteArray::number(s.st_ino) + ':' +
-           QByteArray::number(s.st_size) + ':' + QByteArray::number(s.st_mtim.tv_sec) + ':' +
-           QByteArray::number(s.st_mtim.tv_nsec) + ':' + QByteArray::number(s.st_ctim.tv_sec) +
-           ':' + QByteArray::number(s.st_ctim.tv_nsec);
-}
-QByteArray stamp(const QString &path) {
-    struct stat s;
-    if (::lstat(QFile::encodeName(path).constData(), &s) < 0)
-        return errno == ENOENT ? QByteArray("missing") : QByteArray("stat-error");
-    return stamp(s);
-}
-bool locked(int fd) {
-    QElapsedTimer timer;
-    timer.start();
-    do {
-        if (::flock(fd, LOCK_EX | LOCK_NB) == 0)
-            return true;
-        if (errno != EWOULDBLOCK && errno != EINTR)
-            return false;
-        QThread::msleep(2);
-    } while (timer.elapsed() < 2000);
-    return false;
-}
-int openLock(int directory, const QString &name) {
-    if (directory < 0)
-        return -1;
-    const auto fd =
-        ::openat(directory, QFile::encodeName(QFileInfo(name).fileName() + ".lock").constData(),
-                 O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
-    struct stat s;
-    if (fd < 0)
-        return -1;
-    if (::fstat(fd, &s) < 0 || !S_ISREG(s.st_mode) || s.st_nlink != 1 || !locked(fd)) {
-        ::close(fd);
-        return -1;
-    }
-    return fd;
-}
+using Fd = ConfigFileDescriptor;
+QByteArray stamp(const struct stat &s) { return fileIdentityStamp(s); }
+QByteArray stamp(const QString &path) { return fileIdentityStampAt(AT_FDCWD, path); }
 bool same(const std::optional<QVariant> &a, const std::optional<QVariant> &b) {
     if (bool(a) != bool(b))
         return false;
@@ -82,15 +35,7 @@ bool compatibleAncestors(const QVariantMap &base, const QVariantMap &fresh, cons
     return true;
 }
 ConfigError checkFileIdentity(const QString &id, const QString &name, bool writing) {
-    struct stat s;
-    if (::lstat(QFile::encodeName(name).constData(), &s) == 0) {
-        if (!S_ISREG(s.st_mode))
-            return {"unsupported-file-identity", id, "path", name};
-        if (writing && s.st_nlink != 1)
-            return {"hard-linked-target", id, "publish", name};
-    } else if (errno != ENOENT)
-        return {"stat-failed", id, "path", name};
-    return {};
+    return checkFileIdentityAt(AT_FDCWD, name, id, writing, name);
 }
 } // namespace
 bool applyFileEdit(QVariantMap &raw, const ConfigFileEdit &edit) {
@@ -221,8 +166,9 @@ ConfigError ConfigJsonBackend::exportProfile(const QString &configured, const QB
     const auto target = resolvePath(configured, id);
     if (!target.error.empty())
         return target.error;
-    // Resolution and exclusion belong to this storage owner. The writer receives
-    // only the checked final target, never the original alias (including dangling links).
+    // Resolve/exclude before opening the parent; staging and commit then stay on
+    // that descriptor. Components above the opened parent are not rooted traversal
+    // and can race during resolution/open, just as for configured-file publication.
     const auto validate = [&]() -> ConfigError {
         const auto current = resolvePath(configured, id);
         if (!current.error.empty())
@@ -241,21 +187,25 @@ ConfigError ConfigJsonBackend::exportProfile(const QString &configured, const QB
     auto error = validate();
     if (!error.empty())
         return error;
-    const auto original = stamp(target.path);
-    QSaveFile file(target.path);
-    file.setDirectWriteFallback(false);
-    if (!file.open(QIODevice::WriteOnly) ||
-        !file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner) ||
-        file.write(bytes) != bytes.size())
-        return {"profile-export", id, "exportProfile", configured};
-    error = validate();
-    if (!error.empty())
-        return error;
-    if (stamp(target.path) != original)
-        return {"target-changed", id, "exportProfile", configured};
-    if (!file.commit())
-        return {"profile-export", id, "exportProfile", configured};
-    return {};
+    Fd directory(::open(QFile::encodeName(QFileInfo(target.path).absolutePath()).constData(),
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    Fd lock(openPublicationLock(directory.fd, target.path));
+    if (lock.fd < 0)
+        return {"lock-failed", id, "exportProfile", configured};
+    const auto basename = QFileInfo(target.path).fileName();
+    const auto original = fileIdentityStampAt(directory.fd, basename);
+    PublicationOptions options;
+    options.preservePermissions = false;
+    options.phase = [](const QString &step) { return "profile-" + step; };
+    options.validate = [&]() {
+        const auto failure = validate();
+        if (!failure.empty())
+            return failure;
+        return fileIdentityStampAt(directory.fd, basename) == original
+                   ? ConfigError{}
+                   : ConfigError{"target-changed", id, "exportProfile", configured};
+    };
+    return publishFile(directory.fd, id, target.path, bytes, options).error;
 }
 ConfigBackendResult ConfigJsonBackend::read(const QString &id, const QString &expectedTarget) {
     ConfigBackendResult r;
@@ -364,105 +314,49 @@ ConfigJsonBackend::publish(const ConfigBackendRequest &request, int directory, c
         if (observations)
             observations->append({value, phase, role});
     };
-    if (remove) {
-        const auto injected = fault("delete", name);
-        if (!injected.isEmpty() || stamp(name) != originalStamp ||
-            resolve(id).identity != originalChain || resolve(id).path != name ||
-            !checkTarget(id, name, true).empty()) {
-            r.success = false;
-            r.error = {injected.isEmpty() ? QString("empty-delete-target") : injected, id,
-                       "preflight", name};
-            return r;
-        }
-        if (::unlinkat(directory, QFile::encodeName(QFileInfo(name).fileName()).constData(), 0) <
-            0) {
-            r.success = false;
-            r.error = {"empty-delete-target", id, "delete", name};
-            return r;
-        }
-        r.publicationWitness =
-            ConfigRevision{false, QFile::encodeName(name).toHex() + "|missing||" + originalChain};
-        auto absent = r;
-        absent.revision = *r.publicationWitness;
-        absent.bytes.clear();
-        absent.observedPresence = false;
-        absent.bytesAvailable = false;
-        observe(absent, "delete", "published");
-        auto injectedAfter = fault("directory-sync", name);
-        bool synced = ::fsync(directory) == 0;
-        if (!synced || !injectedAfter.isEmpty()) {
-            r.success = false;
-            r.publicationState = ConfigBackendResult::PublicationState::Uncertain;
-            r.error = {injectedAfter.isEmpty() ? QString("directory-sync-failed") : injectedAfter,
-                       id, "sync", name};
-            return r;
-        }
-        injectedAfter = fault("readback", name);
-        const auto witness = r.publicationWitness;
-        r = read(id, name);
-        r.operation = ConfigBackendRequest::Operation::Publish;
-        r.publicationWitness = witness;
-        observe(r, "readback", r.revision == *witness && r.success ? "readback" : "late");
-        if (!injectedAfter.isEmpty() || !r.success || r.revision != *witness) {
-            r.success = false;
-            r.publicationState = ConfigBackendResult::PublicationState::Uncertain;
-            r.error = {injectedAfter.isEmpty() ? QString("readback-mismatch") : injectedAfter, id,
-                       "readback", name};
-            return r;
-        }
-        confirm(id, r.revision);
-        return r;
-    }
-    const auto temporary =
-        "." + QFileInfo(name).fileName() + "." + QUuid::createUuid().toString(QUuid::Id128);
-    const auto temporaryBytes = QFile::encodeName(temporary);
-    Fd fd(::openat(directory, temporaryBytes.constData(),
-                   O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600));
-    auto fail = [&](const QString &code, const QString &phase, bool uncertain = false) {
-        ::unlinkat(directory, temporaryBytes.constData(), 0);
-        r.success = false;
-        r.error = {code, id, phase, name};
-        if (uncertain)
-            r.publicationState = ConfigBackendResult::PublicationState::Uncertain;
-        return r;
+    PublicationOptions options;
+    if (remove)
+        options.mode = PublicationOptions::Mode::Remove;
+    options.phase = [remove](const QString &step) {
+        if (step == "publish")
+            return QString(remove ? "delete" : "rename");
+        if (step == "create" || step == "permissions")
+            return QString("stage");
+        return step;
     };
-    if (fd.fd < 0)
-        return fail("stage-open-failed", "stage");
-    struct stat existing;
-    if (::lstat(QFile::encodeName(name).constData(), &existing) == 0 &&
-        ::fchmod(fd.fd, existing.st_mode & 0777) < 0)
-        return fail("permissions-failed", "stage");
-    auto injected = fault("write", name);
-    if (!injected.isEmpty())
-        return fail(injected, "write");
-    qsizetype offset = 0;
-    while (offset < request.bytes.size()) {
-        const auto n =
-            ::write(fd.fd, request.bytes.constData() + offset, request.bytes.size() - offset);
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n <= 0)
-            return fail("write-failed", "write");
-        offset += n;
-    }
-    if (::fsync(fd.fd) < 0)
-        return fail("file-sync-failed", "sync");
-    injected = fault("rename", name);
-    if (!injected.isEmpty())
-        return fail(injected, "rename");
-    if (stamp(name) != originalStamp || resolve(id).path != name ||
-        resolve(id).identity != originalChain || !checkTarget(id, name, true).empty())
-        return fail(conflictCode, "preflight");
-    if (::renameat(directory, temporaryBytes.constData(), directory,
-                   QFile::encodeName(QFileInfo(name).fileName()).constData()) < 0)
-        return fail("rename-failed", "rename");
-    struct stat published;
-    if (::fstat(fd.fd, &published) == 0) {
+    options.translateError = [remove](ConfigError error) {
+        if (error.operation == "directory-sync" || error.operation == "file-sync")
+            error.operation = "sync";
+        else if (remove && error.operation == "delete" && error.code != "empty-delete-target")
+            error.operation = "preflight";
+        return error;
+    };
+    options.validate = [&]() -> ConfigError {
+        if (fileIdentityStampAt(directory, QFileInfo(name).fileName()) != originalStamp ||
+            stamp(name) != originalStamp || resolve(id).path != name ||
+            resolve(id).identity != originalChain || !checkTarget(id, name, true).empty())
+            return {remove ? QString("empty-delete-target") : conflictCode, id, "preflight", name};
+        return {};
+    };
+    options.published = [&](const QByteArray &published) {
+        if (remove) {
+            r.publicationWitness = ConfigRevision{false, QFile::encodeName(name).toHex() +
+                                                             "|missing||" + originalChain};
+            auto absent = r;
+            absent.revision = *r.publicationWitness;
+            absent.bytes.clear();
+            absent.observedPresence = false;
+            absent.bytesAvailable = false;
+            observe(absent, "delete", "published");
+            return;
+        }
+        if (published.isEmpty())
+            return;
         const ConfigRevision effect{
-            true, QFile::encodeName(name).toHex() + '|' + stamp(published) + '|' +
+            true, QFile::encodeName(name).toHex() + '|' + published + '|' +
                       QCryptographicHash::hash(request.bytes, QCryptographicHash::Sha256).toHex() +
                       '|' + originalChain};
-        if (stamp(name) == stamp(published) && resolve(id).path == name &&
+        if (stamp(name) == published && resolve(id).path == name &&
             resolve(id).identity == originalChain)
             r.publicationWitness = effect;
         auto own = r;
@@ -471,19 +365,29 @@ ConfigJsonBackend::publish(const ConfigBackendRequest &request, int directory, c
         own.observedPresence = true;
         own.bytesAvailable = true;
         observe(own, "rename", "published");
+    };
+    const auto publication = publishFile(directory, id, name, request.bytes, options);
+    if (!publication.error.empty()) {
+        r.success = false;
+        r.error = publication.error;
+        if (publication.published)
+            r.publicationState = ConfigBackendResult::PublicationState::Uncertain;
+        return r;
     }
-    injected = fault("directory-sync", name);
-    if (::fsync(directory) < 0 || !injected.isEmpty())
-        return fail(injected.isEmpty() ? QString("directory-sync-failed") : injected, "sync", true);
-    injected = fault("readback", name);
+    const auto injected = fault("readback", name);
     const auto witness = r.publicationWitness;
     r = read(id, name);
     r.publicationWitness = witness;
     r.operation = ConfigBackendRequest::Operation::Publish;
     observe(r, "readback", r.success && witness && r.revision == *witness ? "readback" : "late");
-    if (!injected.isEmpty() || !r.success || r.bytes != request.bytes || !witness ||
-        r.revision != *witness)
-        return fail(injected.isEmpty() ? QString("readback-mismatch") : injected, "readback", true);
+    if (!injected.isEmpty() || !r.success || (!remove && r.bytes != request.bytes) || !witness ||
+        r.revision != *witness) {
+        r.success = false;
+        r.error = {injected.isEmpty() ? QString("readback-mismatch") : injected, id, "readback",
+                   name};
+        r.publicationState = ConfigBackendResult::PublicationState::Uncertain;
+        return r;
+    }
     confirm(id, r.revision);
     return r;
 }
@@ -509,7 +413,7 @@ quint64 ConfigJsonBackend::submit(const ConfigBackendRequest &input) {
             QDir().mkpath(QFileInfo(name).absolutePath());
             Fd dir(::open(QFile::encodeName(QFileInfo(name).absolutePath()).constData(),
                           O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-            Fd lock(openLock(dir.fd, name));
+            Fd lock(openPublicationLock(dir.fd, name));
             if (lock.fd < 0) {
                 r.success = false;
                 r.error = {"lock-failed", request.sourceId, "lock", name};
@@ -576,7 +480,7 @@ ConfigJsonBackend::reconcile(const QString &sourceId, const QVariantMap &baselin
         return fail({"source-preimage-conflict", id, "preflight", name});
     Fd dir(::open(QFile::encodeName(QFileInfo(name).absolutePath()).constData(),
                   O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-    Fd lock(openLock(dir.fd, name));
+    Fd lock(openPublicationLock(dir.fd, name));
     if (lock.fd < 0)
         return fail({"lock-failed", id, "lock", name});
     r = read(id, name);

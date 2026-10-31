@@ -906,6 +906,82 @@ private slots:
         store.clearRuntime({"a", "n"});
         QTRY_COMPARE(store.value({"a", "n"}).toInt(), 7);
     }
+    void profileParentSwap_data() {
+        QTest::addColumn<bool>("ancestor");
+        QTest::addColumn<bool>("existing");
+        QTest::addColumn<QString>("phase");
+        for (bool ancestor : {false, true})
+            for (bool existing : {false, true})
+                for (const auto &phase : {"profile-create", "profile-publish-checked"}) {
+                    const auto label = QByteArray::number(ancestor) + '-' +
+                                       QByteArray::number(existing) + '-' + phase;
+                    QTest::newRow(label.constData()) << ancestor << existing << QString(phase);
+                }
+    }
+    void profileParentSwap() {
+        QFETCH(bool, ancestor);
+        QFETCH(bool, existing);
+        QFETCH(QString, phase);
+        QTemporaryDir dir;
+        const auto component = dir.filePath("checked");
+        const auto moved = dir.filePath("moved");
+        const auto foreign = dir.filePath("foreign");
+        const auto suffix = ancestor ? QString("/leaf") : QString();
+        QVERIFY(QDir().mkpath(component + suffix));
+        QVERIFY(QDir().mkpath(foreign + suffix));
+        const auto destination = component + suffix + "/profile.json";
+        const auto forbidden = foreign + suffix + "/profile.json";
+        const QByteArray previous = "preserve-checked-original";
+        const QByteArray sentinel = "do-not-replace-configured-source";
+        const QByteArray exported = "{\"format\":1,\"name\":\"Checked\",\"entries\":[]}\n";
+        writeFile(forbidden, sentinel);
+        if (existing)
+            writeFile(destination, previous);
+        bool swapped = false, swapFailed = false;
+        ConfigJsonBackend backend(
+            {{"user", "protected", forbidden}}, [&](const QString &at, const QString &) {
+                if (at != phase)
+                    return QString();
+                swapped = true;
+                swapFailed = !QDir().rename(component, moved) || !QFile::link(foreign, component);
+                return swapFailed ? QString("test-parent-swap") : QString();
+            });
+        const auto error = backend.exportProfile(destination, exported);
+        QVERIFY(swapped);
+        QVERIFY(!swapFailed);
+        QCOMPARE(readFile(forbidden), sentinel);
+        const auto checked = moved + suffix + "/profile.json";
+        if (error.empty()) {
+            QCOMPARE(readFile(checked), exported);
+            struct stat state;
+            QCOMPARE(::stat(QFile::encodeName(checked).constData(), &state), 0);
+            QCOMPARE(state.st_mode & 0777, mode_t(0600));
+        } else if (QFile::exists(checked))
+            QVERIFY(readFile(checked) == previous || readFile(checked) == exported);
+        QCOMPARE(QDir(moved + suffix).entryList({"*.stage"}, QDir::Files | QDir::Hidden).size(), 0);
+    }
+    void profilePublicationFaults_data() {
+        QTest::addColumn<QString>("phase");
+        for (const auto &phase :
+             {"profile-create", "profile-write", "profile-file-sync", "profile-publish",
+              "profile-publish-checked", "profile-directory-sync"})
+            QTest::newRow(phase) << QString(phase);
+    }
+    void profilePublicationFaults() {
+        QFETCH(QString, phase);
+        QTemporaryDir dir;
+        const auto path = dir.filePath("profile.json");
+        const QByteArray before = "previous-profile";
+        const QByteArray after = "{\"name\":\"new-profile\"}\n";
+        writeFile(path, before);
+        ConfigJsonBackend backend({}, [&](const QString &at, const QString &) {
+            return at == phase ? QString("profile-test-fault") : QString();
+        });
+        QCOMPARE(backend.exportProfile(path, after).code, QString("profile-test-fault"));
+        QCOMPARE(readFile(path), phase == "profile-directory-sync" ? after : before);
+        QCOMPARE(QDir(dir.path()).entryList({"*.stage"}, QDir::Files | QDir::Hidden).size(), 0);
+        QVERIFY(QFile::exists(path + ".lock"));
+    }
     void profileResolvedDestinations_data() {
         QTest::addColumn<int>("mode");
         const QStringList names{"dangling-absolute", "dangling-relative", "directory-alias",

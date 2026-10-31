@@ -72,6 +72,10 @@ private:
     };
     Target resolve(const QString &id) const;
     static Target resolvePath(const QString &configured, const QString &id);
+    struct PublicationOptions;
+    struct PublicationResult;
+    PublicationResult publishFile(int directory, const QString &id, const QString &name,
+                                  const QByteArray &bytes, const PublicationOptions &options);
     ConfigBackendResult read(const QString &id, const QString &expectedTarget = {});
     ConfigBackendResult publish(const ConfigBackendRequest &request, int directory,
                                 const QString &target, bool remove = false,
