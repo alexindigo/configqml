@@ -13,6 +13,8 @@
 
 - Profile imports refuse non-regular files and enforce a configurable 16 MiB byte
   limit before and during reads, preventing FIFO blocking and unbounded buffering.
+- Profile export admits whitelisted raw values through their descriptors, refusing
+  malformed scalar/collection content that could carry undeclared private data.
 
 ## [0.2.0] — 2026-10-29
 

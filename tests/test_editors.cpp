@@ -357,6 +357,109 @@ private slots:
         QCOMPARE(request(invalid, [&] { return invalid.importProfile(path); }).error.code,
                  QString("profile-size-limit"));
     }
+    void profileDescriptorAdmission_data() {
+        QTest::addColumn<int>("shape");
+        for (int shape = 0; shape < 8; ++shape)
+            QTest::newRow(QByteArray::number(shape).constData()) << shape;
+    }
+    void profileDescriptorAdmission() {
+        QFETCH(int, shape);
+        QTemporaryDir dir;
+        const QString canary = "PRIVATE_PROFILE_CANARY_4a7c";
+        const QVariantMap hidden{{"undeclared", canary}};
+        auto descriptor = D::leaf(T::String, QString("default"));
+        QVariant raw = hidden;
+        if (shape == 1) {
+            descriptor = D::list(descriptor, {});
+            raw = QVariantList{hidden};
+        } else if (shape == 2) {
+            descriptor = D::leaf(T::Map, QVariantMap{});
+            descriptor.element = {D::leaf(T::String, QString())};
+            raw = QVariantMap{{"opaque", hidden}};
+        } else if (shape == 3) {
+            descriptor = D::leaf(T::Record, QVariantMap{{"declared", QString()}});
+            descriptor.fields = {{"declared", D::leaf(T::String, QString())}};
+            raw = QVariantMap{{"declared", hidden}};
+        } else if (shape == 4)
+            descriptor = D::list(descriptor, {}); // A map is not an empty list.
+        else if (shape == 5) {
+            descriptor = D::leaf(T::Record, QVariantMap{});
+            raw = QVariantList{hidden}; // A list is not an empty record.
+        } else if (shape == 6) {
+            descriptor = D::leaf(T::SafeInteger, 0);
+            descriptor.maximum = 5;
+            raw = 6;
+        } else if (shape == 7) {
+            descriptor.choices = {QString("default")};
+            raw = canary;
+        }
+        auto o = options();
+        o.schema = ConfigSchema(D::group({{"value", descriptor}}));
+        QVERIFY(o.schema.valid());
+        o.layers[0].sources = {{"raw", {}, {{"value", raw}}}};
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto profile = dir.filePath("portable.json");
+        const QByteArray previous = "preserve-existing-profile";
+        writeFile(profile, previous);
+        const auto result = request(store, [&] { return store.exportProfile("Safe", profile); });
+        const auto exported = readFile(profile);
+        QVERIFY2(!exported.contains(canary.toUtf8()),
+                 "Undeclared private data escaped its descriptor");
+        QCOMPARE(result.status, QString("failed"));
+        QCOMPARE(result.error.code, QString("profile-admission"));
+        QCOMPARE(exported, previous);
+        QCOMPARE(store.snapshot().values.value({"value"}), *descriptor.defaultValue);
+    }
+    void profileRecursiveWhitelist() {
+        QTemporaryDir dir;
+        auto title = D::leaf(T::String, QString());
+        title.nullable = true;
+        const auto url = D::leaf(T::Url, QUrl("https://example.test/default"));
+        auto record =
+            D::leaf(T::Record, QVariantMap{{"title", QString()}, {"url", *url.defaultValue}});
+        record.fields = {{"title", title}, {"url", url}};
+        auto map = D::leaf(T::Map, QVariantMap{});
+        map.element = {record};
+        auto privateRecord = record;
+        privateRecord.fields["url"].sensitive = true;
+        auto o = options();
+        o.schema = ConfigSchema(D::group({{"rows", D::list(record, {})},
+                                          {"map", map},
+                                          {"private", D::list(privateRecord, {})}}));
+        const QVariantMap rawRecord{{"title", QVariant::fromValue(nullptr)},
+                                    {"url", QString("https://example.test/a%2Fb")},
+                                    {"unknown", QString("RECURSIVE_CANARY")}};
+        o.layers[0].sources = {{"raw",
+                                {},
+                                {{"rows", QVariantList{rawRecord}},
+                                 {"map", QVariantMap{{"opaque", rawRecord}}},
+                                 {"private", QVariantList{rawRecord}}}}};
+        // JSON sources perform URL adaptation before admission; the raw tree keeps strings.
+        const auto config = dir.filePath("raw.json");
+        writeFile(config, encodeJsonValue(o.layers[0].sources[0].raw).bytes);
+        o.jsonFiles = {{"user", "raw", config}};
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto profile = dir.filePath("portable.json");
+        QCOMPARE(request(store, [&] { return store.exportProfile("Safe", profile); }).status,
+                 QString("exported"));
+        const auto bytes = readFile(profile);
+        QVERIFY(!bytes.contains("RECURSIVE_CANARY"));
+        QVERIFY(!bytes.contains("private"));
+        QVERIFY(bytes.contains("null"));
+        o.jsonFiles.clear();
+        o.layers[0].sources[0].raw.clear();
+        ConfigStore imported(o);
+        QTRY_COMPARE(imported.status(), ConfigStore::Status::Ready);
+        QCOMPARE(request(imported, [&] { return imported.importProfile(profile); }).status,
+                 QString("saved"));
+        const auto row = imported.value({"rows"}).toList().first().toMap();
+        QVERIFY(isNull(row.value("title")));
+        QCOMPARE(row.value("url").toUrl(), QUrl("https://example.test/a%2Fb"));
+        QVERIFY(!row.contains("unknown"));
+        QCOMPARE(imported.value({"map"}).toMap().value("opaque").toMap(), row);
+    }
     void rawProfileRoundTripAndExclusions() {
         QTemporaryDir dir;
         writeFile(dir.filePath("a.json"),

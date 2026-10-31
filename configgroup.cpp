@@ -121,31 +121,54 @@ void ConfigWorker::processGroup(const ConfigCommand &command) {
     recordPersistent(input, before);
     beginSave(command);
 }
-static QVariant portableValue(const ConfigDescriptor &descriptor, const QVariant &raw) {
-    // Whitelist record members; unknown legacy data can contain credentials.
-    if (isNull(raw))
-        return raw;
-    if (descriptor.type == ConfigDescriptor::Type::Record) {
+static std::optional<QVariant> portableValue(const ConfigDescriptor &descriptor,
+                                             const QVariant &raw) {
+    using T = ConfigDescriptor::Type;
+    if (descriptor.sensitive || descriptor.forbidden || descriptor.machineLocal ||
+        descriptor.type == T::SecretRef)
+        return {};
+    QVariant projected = raw;
+    // Raw data is not admitted data. Check container shape before traversing and
+    // whitelist record members, then admit every projected value through its descriptor.
+    if (!isNull(raw) && descriptor.type == T::Record) {
+        if (raw.metaType().id() != QMetaType::QVariantMap)
+            return {};
         QVariantMap result;
         const auto map = raw.toMap();
         for (auto it = descriptor.fields.cbegin(); it != descriptor.fields.cend(); ++it)
-            if (map.contains(it.key()))
-                result[it.key()] = portableValue(it.value(), map.value(it.key()));
-        return result;
-    }
-    if (descriptor.type == ConfigDescriptor::Type::List) {
+            if (map.contains(it.key())) {
+                const auto child = portableValue(it.value(), map.value(it.key()));
+                if (!child)
+                    return {};
+                result[it.key()] = *child;
+            }
+        projected = result;
+    } else if (!isNull(raw) && descriptor.type == T::List) {
+        if (raw.metaType().id() != QMetaType::QVariantList || descriptor.element.size() != 1)
+            return {};
         QVariantList result;
-        for (const auto &item : raw.toList())
-            result.append(portableValue(descriptor.element.first(), item));
-        return result;
-    }
-    if (descriptor.type == ConfigDescriptor::Type::Map) {
+        for (const auto &item : raw.toList()) {
+            const auto child = portableValue(descriptor.element.first(), item);
+            if (!child)
+                return {};
+            result.append(*child);
+        }
+        projected = result;
+    } else if (!isNull(raw) && descriptor.type == T::Map) {
+        if (raw.metaType().id() != QMetaType::QVariantMap || descriptor.element.size() != 1)
+            return {};
         auto result = raw.toMap();
-        for (auto &item : result)
-            item = portableValue(descriptor.element.first(), item);
-        return result;
+        for (auto &item : result) {
+            const auto child = portableValue(descriptor.element.first(), item);
+            if (!child)
+                return {};
+            item = *child;
+        }
+        projected = result;
     }
-    return raw;
+    if (!descriptor.validate(jsonSettingValue(projected, descriptor)).ok())
+        return {};
+    return projected; // Retain the raw numeric/URL representation, not normalized admission.
 }
 static QString readProfile(const QString &path, qint64 limit, QByteArray &bytes) {
     if (limit <= 0)
@@ -242,8 +265,14 @@ void ConfigWorker::profile(const ConfigCommand &command) {
             const auto source = m_layers->source(route.layerId, route.sourceId);
             const auto raw = valueAt(source->raw, path.mid(route.prefix.size()));
             QVariantMap entry{{"path", path}, {"present", bool(raw)}};
-            if (raw)
-                entry["value"] = portableValue(*m_options.schema.descriptor(path), *raw);
+            if (raw) {
+                const auto value = portableValue(*m_options.schema.descriptor(path), *raw);
+                if (!value) {
+                    fail("profile-admission");
+                    return;
+                }
+                entry["value"] = *value;
+            }
             entries.append(entry);
         }
         const auto bytes = codec.encode(
@@ -308,7 +337,8 @@ void ConfigWorker::profile(const ConfigCommand &command) {
             const auto descriptor = *m_options.schema.descriptor(path);
             const auto raw = entry.value("value");
             const auto checked = m_options.schema.validate(path, jsonSettingValue(raw, descriptor));
-            if (!checked.ok() || portableValue(descriptor, raw) != raw) {
+            const auto portable = portableValue(descriptor, raw);
+            if (!checked.ok() || !portable || *portable != raw) {
                 fail("profile-admission");
                 return;
             }

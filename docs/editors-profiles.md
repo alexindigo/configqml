@@ -133,6 +133,12 @@ null. Maps retain opaque keys; declared record fields inside maps/lists are
 whitelisted recursively. Invalid/duplicate/unsafe profile entries and unknown
 atomic record members are refused at import before changing any setting.
 
+Every whitelisted export value must pass its descriptor's shape, type and
+constraints, including scalar elements nested in lists/maps/records. Invalid raw
+overrides fail the entire export with `profile-admission` before publication;
+they are never coerced to empty containers, silently reset or emitted unchecked.
+An existing profile and the original raw sources remain unchanged on refusal.
+
 Profile files are portable preference snapshots, not full-store backups. Raw
 unknown/invalid data remains preserved in the original source files by the normal
 backend. Applications migrating legacy mixed preference/credential files must
