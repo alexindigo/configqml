@@ -103,9 +103,18 @@ store.importProfile(profileFile, [], callback)
 
 Native equivalents take `QList<ConfigPath>` and context/callback. All file work,
 selection, raw projection, validation and grouped import are worker-owned. Export
-uses a 0600 atomic QSaveFile, reports `exported` or `failed`, and refuses a store
-source as its destination. Import uses the normal saved/nothing_to_save/failed
-receipt, including partial multi-file outcomes. Paths must be absolute and clean.
+uses a 0600 atomic QSaveFile through the JSON storage owner, reports `exported`
+or `failed`, and refuses a store source as its destination. Import uses the normal
+saved/nothing_to_save/failed receipt, including partial multi-file outcomes. Paths
+must be absolute and clean.
+
+The storage owner resolves the complete export destination with the same bounded
+symlink resolver used for configured sources, including dangling targets and
+symlinked parent directories. It excludes every configured source's resolved
+target, then writes beside that exact resolved destination, preserving the alias.
+It checks resolution, source exclusion and file identity again before commit.
+Hard-linked destinations are refused rather than broken by replacement. As with
+configured files, this is not a sandbox against hostile directory mutation.
 
 Import accepts regular files only (symlinks to regular files are allowed), refusing
 FIFOs, devices and directories without waiting for input. The opened file identity

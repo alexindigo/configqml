@@ -56,6 +56,7 @@ public:
                                     const QList<ConfigFileEdit> &edits,
                                     const std::optional<ConfigSourcePreimage> &preimage = {});
     ConfigError preserveBackup(const QString &sourceId, int version, const QByteArray &original);
+    ConfigError exportProfile(const QString &file, const QByteArray &bytes);
     bool changed(const QString &sourceId) const;
     void confirm(const QString &sourceId, const ConfigRevision &revision);
     QString path(const QString &sourceId) const;
@@ -70,6 +71,7 @@ private:
         ConfigError error;
     };
     Target resolve(const QString &id) const;
+    static Target resolvePath(const QString &configured, const QString &id);
     ConfigBackendResult read(const QString &id, const QString &expectedTarget = {});
     ConfigBackendResult publish(const ConfigBackendRequest &request, int directory,
                                 const QString &target, bool remove = false,

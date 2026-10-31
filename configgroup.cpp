@@ -4,7 +4,6 @@
 #include "configconsumer_p.h"
 #include <QFile>
 #include <QFileInfo>
-#include <QSaveFile>
 #include <QSet>
 #include <QDir>
 #include <fcntl.h>
@@ -227,17 +226,6 @@ void ConfigWorker::profile(const ConfigCommand &command) {
         fail("profile-path");
         return;
     }
-    if (command.operation == "exportProfile")
-        for (const auto &file : m_options.jsonFiles) {
-            const QFileInfo destination(command.file);
-            const QFileInfo source(m_json->path(file.sourceId));
-            if (destination.absoluteFilePath() == source.absoluteFilePath() ||
-                (!destination.canonicalFilePath().isEmpty() &&
-                 destination.canonicalFilePath() == source.canonicalFilePath())) {
-                fail("profile-is-config-source");
-                return;
-            }
-        }
     for (const auto &prefix : command.selection)
         if (!m_options.schema.descriptor(prefix)) {
             fail("undeclared-path");
@@ -277,12 +265,13 @@ void ConfigWorker::profile(const ConfigCommand &command) {
         }
         const auto bytes = codec.encode(
             {{"format", 1}, {"name", command.profileName}, {"entries", entries}}, "profile");
-        QSaveFile file(command.file);
-        file.setDirectWriteFallback(false);
-        if (!bytes.ok() || !file.open(QIODevice::WriteOnly) ||
-            !file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner) ||
-            file.write(bytes.bytes) != bytes.bytes.size() || !file.commit()) {
+        if (!bytes.ok()) {
             fail("profile-export");
+            return;
+        }
+        const auto error = m_json->exportProfile(command.file, bytes.bytes);
+        if (!error.empty()) {
+            fail(error.code);
             return;
         }
         result.status = "exported";

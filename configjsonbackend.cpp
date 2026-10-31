@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QThread>
 #include <QUuid>
@@ -80,6 +81,17 @@ bool compatibleAncestors(const QVariantMap &base, const QVariantMap &fresh, cons
     }
     return true;
 }
+ConfigError checkFileIdentity(const QString &id, const QString &name, bool writing) {
+    struct stat s;
+    if (::lstat(QFile::encodeName(name).constData(), &s) == 0) {
+        if (!S_ISREG(s.st_mode))
+            return {"unsupported-file-identity", id, "path", name};
+        if (writing && s.st_nlink != 1)
+            return {"hard-linked-target", id, "publish", name};
+    } else if (errno != ENOENT)
+        return {"stat-failed", id, "path", name};
+    return {};
+}
 } // namespace
 bool applyFileEdit(QVariantMap &raw, const ConfigFileEdit &edit) {
     const auto current = valueAt(raw, edit.path);
@@ -119,11 +131,15 @@ ConfigBackendCapabilities ConfigJsonBackend::capabilities() const {
 }
 QString ConfigJsonBackend::path(const QString &id) const { return resolve(id).path; }
 ConfigJsonBackend::Target ConfigJsonBackend::resolve(const QString &id) const {
-    Target result;
     QString configured;
     for (const auto &file : m_files)
         if (file.sourceId == id)
             configured = file.path;
+    return resolvePath(configured, id);
+}
+ConfigJsonBackend::Target ConfigJsonBackend::resolvePath(const QString &configured,
+                                                         const QString &id) {
+    Target result;
     auto fail = [&](const QString &code) {
         result.error = {code, id, "path", configured};
         return result;
@@ -189,18 +205,56 @@ QString ConfigJsonBackend::fault(const QString &phase, const QString &target) co
 }
 ConfigError ConfigJsonBackend::checkTarget(const QString &id, const QString &name,
                                            bool writing) const {
-    struct stat s;
-    if (::lstat(QFile::encodeName(name).constData(), &s) == 0) {
-        if (!S_ISREG(s.st_mode))
-            return {"unsupported-file-identity", id, "path", name};
-        if (writing && s.st_nlink != 1)
-            return {"hard-linked-target", id, "publish", name};
-    } else if (errno != ENOENT)
-        return {"stat-failed", id, "path", name};
+    const auto identity = checkFileIdentity(id, name, writing);
+    if (!identity.empty())
+        return identity;
     for (const auto &other : m_files) {
         if (other.sourceId != id && resolve(other.sourceId).path == name)
             return {"duplicate-file-identity", id, "path", name};
     }
+    return {};
+}
+ConfigError ConfigJsonBackend::exportProfile(const QString &configured, const QByteArray &bytes) {
+    const QString id = "profile";
+    if (QThread::currentThread() != m_owner)
+        return {"wrong-thread", id, "exportProfile", configured};
+    const auto target = resolvePath(configured, id);
+    if (!target.error.empty())
+        return target.error;
+    // Resolution and exclusion belong to this storage owner. The writer receives
+    // only the checked final target, never the original alias (including dangling links).
+    const auto validate = [&]() -> ConfigError {
+        const auto current = resolvePath(configured, id);
+        if (!current.error.empty())
+            return current.error;
+        if (current.path != target.path || current.identity != target.identity)
+            return {"target-changed", id, "exportProfile", configured};
+        for (const auto &file : m_files) {
+            const auto source = resolve(file.sourceId);
+            if (!source.error.empty())
+                return source.error;
+            if (source.path == target.path)
+                return {"profile-is-config-source", id, "exportProfile", configured};
+        }
+        return checkFileIdentity(id, target.path, true);
+    };
+    auto error = validate();
+    if (!error.empty())
+        return error;
+    const auto original = stamp(target.path);
+    QSaveFile file(target.path);
+    file.setDirectWriteFallback(false);
+    if (!file.open(QIODevice::WriteOnly) ||
+        !file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner) ||
+        file.write(bytes) != bytes.size())
+        return {"profile-export", id, "exportProfile", configured};
+    error = validate();
+    if (!error.empty())
+        return error;
+    if (stamp(target.path) != original)
+        return {"target-changed", id, "exportProfile", configured};
+    if (!file.commit())
+        return {"profile-export", id, "exportProfile", configured};
     return {};
 }
 ConfigBackendResult ConfigJsonBackend::read(const QString &id, const QString &expectedTarget) {

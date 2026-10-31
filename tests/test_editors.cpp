@@ -16,6 +16,7 @@
 #include <QDir>
 #include <QProcess>
 #include <sys/stat.h>
+#include <unistd.h>
 using namespace configqml;
 using D = ConfigDescriptor;
 using T = D::Type;
@@ -904,6 +905,77 @@ private slots:
         QCOMPARE(store.value({"a", "n"}).toInt(), 99);
         store.clearRuntime({"a", "n"});
         QTRY_COMPARE(store.value({"a", "n"}).toInt(), 7);
+    }
+    void profileResolvedDestinations_data() {
+        QTest::addColumn<int>("mode");
+        const QStringList names{"dangling-absolute", "dangling-relative", "directory-alias",
+                                "dangling-source",   "dangling-chain",    "allowed-dangling",
+                                "allowed-existing",  "hardlink",          "loop"};
+        for (int i = 0; i < names.size(); ++i)
+            QTest::newRow(qPrintable(names[i])) << i;
+    }
+    void profileResolvedDestinations() {
+        QFETCH(int, mode);
+        QTemporaryDir dir;
+        QVERIFY(QDir().mkdir(dir.filePath("sources")));
+        auto o = options(dir.filePath("sources"));
+        auto forbidden = dir.filePath("sources/a.json");
+        auto destination = dir.filePath("alias.json");
+        const auto allowed = dir.filePath("portable.json");
+        if (mode == 0)
+            QVERIFY(QFile::link(forbidden, destination));
+        else if (mode == 1)
+            QCOMPARE(::symlink("sources/a.json", QFile::encodeName(destination).constData()), 0);
+        else if (mode == 2) {
+            QVERIFY(QFile::link(dir.filePath("sources"), dir.filePath("directory")));
+            destination = dir.filePath("directory/a.json");
+        } else if (mode == 3) {
+            const auto target = dir.filePath("missing.json");
+            QVERIFY(QFile::link(target, forbidden));
+            destination = target;
+        } else if (mode == 4) {
+            QVERIFY(QFile::link(forbidden, dir.filePath("middle.json")));
+            QVERIFY(QFile::link(dir.filePath("middle.json"), destination));
+        } else if (mode == 5 || mode == 6) {
+            if (mode == 6) {
+                writeFile(allowed, "previous-profile");
+                QVERIFY(QFile::setPermissions(allowed, QFile::ReadOwner | QFile::WriteOwner |
+                                                           QFile::ReadGroup | QFile::ReadOther));
+            }
+            QVERIFY(QFile::link(allowed, destination));
+        } else if (mode == 7) {
+            writeFile(allowed, "preserve-hardlink");
+            QCOMPARE(::link(QFile::encodeName(allowed).constData(),
+                            QFile::encodeName(destination).constData()),
+                     0);
+        } else {
+            QVERIFY(QFile::link(dir.filePath("middle.json"), destination));
+            QVERIFY(QFile::link(destination, dir.filePath("middle.json")));
+        }
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto result =
+            request(store, [&] { return store.exportProfile("Safe", destination); });
+        if (mode < 5) {
+            QVERIFY2(!QFile::exists(forbidden),
+                     "A dangling alias published into a configured source");
+            QCOMPARE(result.status, QString("failed"));
+            QCOMPARE(result.error.code, QString("profile-is-config-source"));
+        } else if (mode == 5 || mode == 6) {
+            QCOMPARE(result.status, QString("exported"));
+            QVERIFY(QFileInfo(destination).isSymLink());
+            QVERIFY(readFile(allowed).contains("Safe"));
+            struct stat state{};
+            QCOMPARE(::stat(QFile::encodeName(allowed).constData(), &state), 0);
+            QCOMPARE(state.st_mode & 0777, mode_t(0600));
+            QCOMPARE(request(store, [&] { return store.importProfile(destination); }).status,
+                     QString("saved"));
+        } else if (mode == 7) {
+            QCOMPARE(result.error.code, QString("hard-linked-target"));
+            QCOMPARE(readFile(allowed), QByteArray("preserve-hardlink"));
+            QCOMPARE(readFile(destination), QByteArray("preserve-hardlink"));
+        } else
+            QCOMPARE(result.error.code, QString("symlink-loop"));
     }
     void profileResetMaliciousInputAndPartialReceipt() {
         QTemporaryDir dir;

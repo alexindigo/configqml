@@ -15,6 +15,8 @@
   limit before and during reads, preventing FIFO blocking and unbounded buffering.
 - Profile export admits whitelisted raw values through their descriptors, refusing
   malformed scalar/collection content that could carry undeclared private data.
+- Profile publication checks and writes the same resolved target, including dangling
+  symlinks, preventing export aliases from overwriting configured sources.
 
 ## [0.2.0] — 2026-10-29
 
