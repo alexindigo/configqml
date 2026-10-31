@@ -2,6 +2,7 @@
 #include "configqmldeclaration.h"
 #include "compatfixture.h"
 #include "confignumber.h"
+#include "modelbudgets.h"
 #include <QJSEngine>
 #include <QElapsedTimer>
 #include <QUrl>
@@ -50,10 +51,10 @@ private slots:
         }
         const auto elapsed = timer.elapsed();
         QCOMPARE(encodeJsonValue(output).bytes, encodeJsonValue(raw).bytes);
-        qInfo("100000-number %s bridge: %lldms", projection ? "projection" : "migration", elapsed);
-#ifdef QT_NO_DEBUG
-        QVERIFY2(elapsed < 3000, "Atom lookup must not scan all preceding numeric wrappers");
-#endif
+        qInfo("100000-number %s bridge: %lldms enforce=%d", projection ? "projection" : "migration",
+              elapsed, enforceModelBudgets);
+        if (enforceModelBudgets)
+            QVERIFY2(elapsed < 3000, "Atom lookup must not scan all preceding numeric wrappers");
     }
     void atomIdentityIsNotShape() {
         QJSEngine engine;

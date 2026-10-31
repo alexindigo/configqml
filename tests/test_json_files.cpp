@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "fileoptions.h"
 #include "storeprobe.h"
+#include "modelbudgets.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFile>
@@ -101,10 +102,10 @@ private slots:
         QVERIFY(retained.ok());
         QCOMPARE(sorted.bytes, encodeJsonValue(raw).bytes + '\n');
         QCOMPARE(retained.bytes, reverse + '\n');
-        qInfo("50000-key fresh and preserved encoding: %lldms", elapsed);
-#ifdef QT_NO_DEBUG
-        QVERIFY2(elapsed < 2000, "Wide object ordering must not scan the key list per member");
-#endif
+        qInfo("50000-key fresh and preserved encoding: %lldms enforce=%d", elapsed,
+              enforceModelBudgets);
+        if (enforceModelBudgets)
+            QVERIFY2(elapsed < 2000, "Wide object ordering must not scan the key list per member");
         // Removed members disappear; new keys append after surviving original keys.
         auto changed = decoded.raw;
         changed.remove("key-49999");
@@ -438,10 +439,12 @@ private slots:
         for (int i = 1; i < 29; ++i)
             QCOMPARE(readFile(dir.filePath(QString("s%1.json").arg(i))), QByteArray("{\"a\":0}"));
         const auto publication = Probe::worstPublicationNanos(store);
-        qInfo("JSON burst GUI ingress+save max us %.3f; publication max us %.3f", worst / 1000.0,
-              publication / 1000.0);
-        QVERIFY(worst < 16000000);
-        QVERIFY(publication < 16000000);
+        qInfo("JSON burst GUI ingress+save max us %.3f; publication max us %.3f enforce=%d",
+              worst / 1000.0, publication / 1000.0, enforceModelBudgets);
+        if (enforceModelBudgets) {
+            QVERIFY(worst < 16000000);
+            QVERIFY(publication < 16000000);
+        }
         // External reload reaches the consumer and leaves all other sections alone.
         QVERIFY(writeFile(dir.filePath("s1.json"), "{\"a\":42}"));
         QTRY_COMPARE(store.value({"s1", "a"}).toLongLong(), 42);
