@@ -37,6 +37,7 @@ struct ConfigStoreOptions {
     QList<ConfigPath> observedPaths;
     // Native, worker-only admission. Never pass an engine-bound callback here.
     std::function<QString(const ConfigInput &)> admission;
+    qint64 profileMaxBytes = 16 * 1024 * 1024; // Positive import limit, including JSON whitespace.
 };
 class ConfigStore : public QObject {
     Q_OBJECT

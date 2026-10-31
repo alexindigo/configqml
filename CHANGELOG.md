@@ -7,6 +7,11 @@
 - JSON object encoding indexes preserved key order instead of repeatedly scanning
   it, avoiding quadratic work for wide objects while retaining deterministic order.
 
+### Security
+
+- Profile imports refuse non-regular files and enforce a configurable 16 MiB byte
+  limit before and during reads, preventing FIFO blocking and unbounded buffering.
+
 ## [0.2.0] — 2026-10-29
 
 ### Added

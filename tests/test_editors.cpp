@@ -298,6 +298,65 @@ private slots:
         QCOMPARE(store.value({"plugins", "../a.b_雪", "n"}).toInt(), 7);
         QCOMPARE(second->info({"n"}).provenance.route.sourceId, QString("second"));
     }
+    void profileImportLimits_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto &kind : {"oversized", "fifo", "directory", "device"})
+            QTest::newRow(kind) << QString(kind);
+    }
+    void profileImportLimits() {
+        QFETCH(QString, kind);
+        QTemporaryDir dir;
+        auto path = dir.filePath("input.json");
+        if (kind == "oversized") {
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            QVERIFY(file.resize(16 * 1024 * 1024 + 1));
+        } else if (kind == "fifo")
+            QCOMPARE(::mkfifo(QFile::encodeName(path).constData(), 0600), 0);
+        else if (kind == "directory")
+            path = dir.path();
+        else
+            path = "/dev/zero";
+        ConfigStore store(options());
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QElapsedTimer timer;
+        timer.start();
+        const auto result = request(store, [&] { return store.importProfile(path); });
+        QCOMPARE(result.status, QString("failed"));
+        QCOMPARE(result.error.code,
+                 kind == "oversized" ? QString("profile-too-large") : QString("profile-file-type"));
+        QVERIFY(timer.elapsed() < 1000);
+        QCOMPARE(store.value({"a", "n"}).toInt(), 0);
+        // A refused import must settle its prefix and leave the worker responsive.
+        QCOMPARE(request(store, [&] { return store.close(); }).status, QString("nothing_to_save"));
+    }
+    void configuredProfileByteLimit() {
+        QTemporaryDir dir;
+        const auto path = dir.filePath("profile.json");
+        const auto bytes =
+            QByteArray("{\"format\":1,\"name\":\"Bounded\",\"entries\":[{\"path\":[\"a\",\"n\"],"
+                       "\"present\":true,\"value\":7}]}") +
+            QByteArray(70000, ' ');
+        writeFile(path, bytes);
+        auto o = options();
+        o.profileMaxBytes = bytes.size();
+        ConfigStore exact(o);
+        QTRY_COMPARE(exact.status(), ConfigStore::Status::Ready);
+        QCOMPARE(request(exact, [&] { return exact.importProfile(path); }).status,
+                 QString("saved"));
+        QCOMPARE(exact.value({"a", "n"}).toInt(), 7);
+        --o.profileMaxBytes;
+        ConfigStore over(o);
+        QTRY_COMPARE(over.status(), ConfigStore::Status::Ready);
+        QCOMPARE(request(over, [&] { return over.importProfile(path); }).error.code,
+                 QString("profile-too-large"));
+        QCOMPARE(over.value({"a", "n"}).toInt(), 0);
+        o.profileMaxBytes = 0;
+        ConfigStore invalid(o);
+        QTRY_COMPARE(invalid.status(), ConfigStore::Status::Ready);
+        QCOMPARE(request(invalid, [&] { return invalid.importProfile(path); }).error.code,
+                 QString("profile-size-limit"));
+    }
     void rawProfileRoundTripAndExclusions() {
         QTemporaryDir dir;
         writeFile(dir.filePath("a.json"),

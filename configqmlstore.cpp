@@ -40,6 +40,7 @@ void ConfigQmlStore::componentComplete() {
     options.modelNumbers = ConfigListModel::Numbers::DecimalStrings;
     options.autoSave = m_autoSave;
     options.autoSaveInterval = m_autoSaveInterval;
+    options.profileMaxBytes = m_profileMaxBytes;
     options.schema =
         ConfigSchema(descriptor, m_schema ? m_schema->version : 0,
                      m_schema ? m_schema->compileMigrations(errors) : QList<ConfigMigration>{});

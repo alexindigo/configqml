@@ -7,6 +7,9 @@
 #include <QSaveFile>
 #include <QSet>
 #include <QDir>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace configqml {
 quint64 ConfigStore::applyGroup(const QMap<ConfigPath, std::optional<QVariant>> &edits,
@@ -144,6 +147,45 @@ static QVariant portableValue(const ConfigDescriptor &descriptor, const QVariant
     }
     return raw;
 }
+static QString readProfile(const QString &path, qint64 limit, QByteArray &bytes) {
+    if (limit <= 0)
+        return "profile-size-limit";
+    struct stat state;
+    const auto name = QFile::encodeName(path);
+    if (::stat(name.constData(), &state) < 0)
+        return "profile-read";
+    if (!S_ISREG(state.st_mode))
+        return "profile-file-type";
+    // Nonblocking open prevents a replacement FIFO from blocking before fstat.
+    const auto fd = ::open(name.constData(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+        return "profile-read";
+    QFile file;
+    if (!file.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) {
+        ::close(fd);
+        return "profile-read";
+    }
+    if (::fstat(fd, &state) < 0)
+        return "profile-read";
+    if (!S_ISREG(state.st_mode))
+        return "profile-file-type";
+    if (state.st_size > limit)
+        return "profile-too-large";
+    char buffer[65536];
+    for (;;) {
+        const auto remaining = limit - bytes.size();
+        // At the boundary probe one byte without growing the admitted buffer.
+        const auto count =
+            file.read(buffer, qMin<qint64>(sizeof(buffer), remaining ? remaining : 1));
+        if (count < 0)
+            return "profile-read";
+        if (count == 0)
+            return {};
+        if (count > remaining)
+            return "profile-too-large";
+        bytes.append(buffer, count);
+    }
+}
 void ConfigWorker::profile(const ConfigCommand &command) {
     auto result = resultFor(command);
     const auto fail = [&](const QString &code) {
@@ -218,12 +260,13 @@ void ConfigWorker::profile(const ConfigCommand &command) {
         post(publish(result));
         return;
     }
-    QFile file(command.file);
-    if (!file.open(QIODevice::ReadOnly)) {
-        fail("profile-read");
+    QByteArray profileBytes;
+    const auto readError = readProfile(command.file, m_options.profileMaxBytes, profileBytes);
+    if (!readError.isEmpty()) {
+        fail(readError);
         return;
     }
-    const auto decoded = codec.decode(file.readAll(), "profile");
+    const auto decoded = codec.decode(profileBytes, "profile");
     const auto format = decoded.raw.value("format");
     if (!decoded.ok() || encodeJsonValue(format).bytes != "1" ||
         decoded.raw.value("name").metaType().id() != QMetaType::QString ||
