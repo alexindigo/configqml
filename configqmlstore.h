@@ -22,6 +22,7 @@ class ConfigQmlStore : public QObject, public QQmlParserStatus {
     Q_PROPERTY(QString error READ error NOTIFY statusChanged)
     Q_PROPERTY(bool autoSave MEMBER m_autoSave)
     Q_PROPERTY(int autoSaveInterval MEMBER m_autoSaveInterval)
+    Q_PROPERTY(qint64 profileMaxBytes MEMBER m_profileMaxBytes)
     Q_PROPERTY(QQmlListProperty<configqml::ConfigQmlProjection> projections READ projections)
     Q_PROPERTY(QQmlListProperty<configqml::ConfigQmlRecordListPolicy> recordListPolicies READ
                    recordListPolicies)
@@ -143,6 +144,7 @@ private:
     bool m_autoSave = true;
     QMap<ConfigPath, QPointer<QAbstractItemModel>> m_models;
     int m_autoSaveInterval = 300;
+    qint64 m_profileMaxBytes = 16 * 1024 * 1024;
     ConfigPath m_prefix;
     QPointer<ConfigDraft> m_draft;
     QPointer<ConfigOverlayEditor> m_overlay;

@@ -54,6 +54,11 @@ Native memory-source numbers use the same representation, preserving exact wide
 integers and negative zero; native URL atoms use frozen `{url: string}` records
 with identity-preserving return. JSON file URLs remain ordinary raw strings.
 
+The worker-local bridge indexes each wrapper with a private, nonenumerable symbol
+and verifies the indexed original's object identity before recovery. Copying a
+wrapper's fields or symbols cannot impersonate an original atom. Lookup does not
+scan the full atom collection, including for source projections using this bridge.
+
 Each declared file/shard has reserved raw `_configqmlVersion` metadata, absent
 meaning zero. The schema reserves that key. Transforms receive the source-relative
 raw object without that metadata and must preserve unknown entries they are not

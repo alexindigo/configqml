@@ -25,7 +25,8 @@ target_sources(configqml_core PRIVATE configprojection_p.h configprojection.cpp
     configprojection.h configsourceprojection_p.h configevidence_p.h configevidence.cpp
     configrecordlistpolicy.h configrecordlistpolicy.cpp configrecordlistcommands.cpp configretainedgroup.cpp
     configlistmodel.h configlistmodel.cpp configdraft.h configdraft.cpp configgroup.cpp
-    configstorehandle.h configstorehandle.cpp configmigration.cpp configjsonbackup.cpp)
+    configstorehandle.h configstorehandle.cpp configmigration.cpp configjsonbackup.cpp
+    configjsonpublication_p.h configjsonpublication.cpp)
 target_sources(configqml_core PRIVATE configoverlayeditor.h configoverlayeditor.cpp
     configoverlay_p.h configoverlaypolicy.cpp configoverlayworker.cpp)
 add_library(configqml::core ALIAS configqml_core)
@@ -150,15 +151,9 @@ if(BUILD_TESTING)
     add_executable(test_editors tests/test_editors.cpp)
     target_link_libraries(test_editors PRIVATE configqml::core Qt6::Test)
     add_test(NAME editors COMMAND test_editors)
-    if(CMAKE_CXX_FLAGS MATCHES "fsanitize")
-        target_compile_definitions(test_editors PRIVATE CONFIGQML_INSTRUMENTED_BUILD)
-    endif()
     add_executable(test_models tests/test_models.cpp)
     target_link_libraries(test_models PRIVATE configqml::core Qt6::Test Qt6::Gui)
     add_test(NAME models COMMAND test_models)
-    if(CMAKE_CXX_FLAGS MATCHES "fsanitize")
-        target_compile_definitions(test_models PRIVATE CONFIGQML_INSTRUMENTED_BUILD)
-    endif()
     set_tests_properties(models PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_executable(file_writer tests/file_writer.cpp)
     target_link_libraries(file_writer PRIVATE configqml::core)
@@ -220,9 +215,6 @@ if(BUILD_TESTING)
             QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
             QML_EDITOR_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_editors.qml")
         add_test(NAME qml_editors COMMAND test_qml_editors)
-        if(CMAKE_CXX_FLAGS MATCHES "fsanitize")
-            target_compile_definitions(test_qml_editors PRIVATE CONFIGQML_INSTRUMENTED_BUILD)
-        endif()
         add_test(NAME editors_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
             -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_editors.qml)
         add_executable(test_qml_models tests/test_qml_models.cpp)
@@ -231,9 +223,6 @@ if(BUILD_TESTING)
             QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
             QML_MODEL_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_models.qml")
         add_test(NAME qml_models COMMAND test_qml_models)
-        if(CMAKE_CXX_FLAGS MATCHES "fsanitize")
-            target_compile_definitions(test_qml_models PRIVATE CONFIGQML_INSTRUMENTED_BUILD)
-        endif()
         set_tests_properties(qml_models PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QSG_RHI_BACKEND=software")
         add_test(NAME models_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
             -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_models.qml)
@@ -283,4 +272,15 @@ if(BUILD_TESTING)
         -DPROGRAM=$<TARGET_FILE:test_core_link>
         -DLIBRARY=$<TARGET_FILE:configqml_core>
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/core_link.cmake)
+    configure_file(tests/timing_gates.cmake.in timing_gates.cmake @ONLY)
+    add_test(NAME timing_gates COMMAND ${CMAKE_COMMAND}
+        -P ${CMAKE_CURRENT_BINARY_DIR}/timing_gates.cmake)
+    set_tests_properties(timing_gates PROPERTIES TIMEOUT 180)
+    include(cmake/ConfigQmlTimingGates.cmake)
+    set(_timing_targets test_editors test_models test_json_files)
+    if(CONFIGQML_BUILD_QML)
+        list(APPEND _timing_targets test_projection_bridge test_qml_editors test_qml_models)
+    endif()
+    # Observe target options added by an embedding parent after add_subdirectory too.
+    cmake_language(EVAL CODE "cmake_language(DEFER DIRECTORY \"${CMAKE_SOURCE_DIR}\" CALL configqml_configure_timing_gates \"${CMAKE_CURRENT_SOURCE_DIR}\" \"${_timing_targets}\")")
 endif()

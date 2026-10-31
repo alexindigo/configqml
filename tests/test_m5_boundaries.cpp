@@ -97,6 +97,30 @@ public:
 class M5Boundaries : public QObject {
     Q_OBJECT
 private slots:
+    void qmlProfileByteLimit() {
+        QTemporaryDir dir;
+        const auto file = dir.filePath("profile.json");
+        put(file, "{\"format\":1,\"name\":\"Bounded\",\"entries\":[]}");
+        QQmlEngine engine;
+        engine.addImportPath(QML_IMPORT_ROOT);
+        QQmlComponent component(&engine);
+        component.setData(
+            "import QtQml\nimport ConfigQml 1.0\nConfigStore { autoSave: false; "
+            "profileMaxBytes: 8; schema: ConfigSchema {} sources: [MemorySource {}] }",
+            QUrl("file:///profile-limit.qml"));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        std::unique_ptr<QObject> root(component.create());
+        QVERIFY(root);
+        auto *store = qobject_cast<ConfigQmlStore *>(root.get());
+        QTRY_VERIFY(store->ready());
+        QSignalSpy completed(store, &ConfigQmlStore::completed);
+        store->importProfile(file);
+        QTRY_COMPARE(completed.size(), 1);
+        const auto result = completed[0][0].toMap();
+        QCOMPARE(result.value("status").toString(), QString("failed"));
+        QCOMPARE(result.value("error").toMap().value("code").toString(),
+                 QString("profile-too-large"));
+    }
     void nullableFacadeAndDestroyedOwner() {
         NativeFacade detached(nullptr);
         QVERIFY(!detached.readSetting({"n"}).isValid());

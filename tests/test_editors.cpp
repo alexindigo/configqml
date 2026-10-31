@@ -16,6 +16,7 @@
 #include <QDir>
 #include <QProcess>
 #include <sys/stat.h>
+#include <unistd.h>
 using namespace configqml;
 using D = ConfigDescriptor;
 using T = D::Type;
@@ -297,6 +298,168 @@ private slots:
         QCOMPARE(second->value({"n"}).toInt(), 8);
         QCOMPARE(store.value({"plugins", "../a.b_雪", "n"}).toInt(), 7);
         QCOMPARE(second->info({"n"}).provenance.route.sourceId, QString("second"));
+    }
+    void profileImportLimits_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto &kind : {"oversized", "fifo", "directory", "device"})
+            QTest::newRow(kind) << QString(kind);
+    }
+    void profileImportLimits() {
+        QFETCH(QString, kind);
+        QTemporaryDir dir;
+        auto path = dir.filePath("input.json");
+        if (kind == "oversized") {
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            QVERIFY(file.resize(16 * 1024 * 1024 + 1));
+        } else if (kind == "fifo")
+            QCOMPARE(::mkfifo(QFile::encodeName(path).constData(), 0600), 0);
+        else if (kind == "directory")
+            path = dir.path();
+        else
+            path = "/dev/zero";
+        ConfigStore store(options());
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QElapsedTimer timer;
+        timer.start();
+        const auto result = request(store, [&] { return store.importProfile(path); });
+        QCOMPARE(result.status, QString("failed"));
+        QCOMPARE(result.error.code,
+                 kind == "oversized" ? QString("profile-too-large") : QString("profile-file-type"));
+        QVERIFY(timer.elapsed() < 1000);
+        QCOMPARE(store.value({"a", "n"}).toInt(), 0);
+        // A refused import must settle its prefix and leave the worker responsive.
+        QCOMPARE(request(store, [&] { return store.close(); }).status, QString("nothing_to_save"));
+    }
+    void configuredProfileByteLimit() {
+        QTemporaryDir dir;
+        const auto path = dir.filePath("profile.json");
+        const auto bytes =
+            QByteArray("{\"format\":1,\"name\":\"Bounded\",\"entries\":[{\"path\":[\"a\",\"n\"],"
+                       "\"present\":true,\"value\":7}]}") +
+            QByteArray(70000, ' ');
+        writeFile(path, bytes);
+        auto o = options();
+        o.profileMaxBytes = bytes.size();
+        ConfigStore exact(o);
+        QTRY_COMPARE(exact.status(), ConfigStore::Status::Ready);
+        QCOMPARE(request(exact, [&] { return exact.importProfile(path); }).status,
+                 QString("saved"));
+        QCOMPARE(exact.value({"a", "n"}).toInt(), 7);
+        --o.profileMaxBytes;
+        ConfigStore over(o);
+        QTRY_COMPARE(over.status(), ConfigStore::Status::Ready);
+        QCOMPARE(request(over, [&] { return over.importProfile(path); }).error.code,
+                 QString("profile-too-large"));
+        QCOMPARE(over.value({"a", "n"}).toInt(), 0);
+        o.profileMaxBytes = 0;
+        ConfigStore invalid(o);
+        QTRY_COMPARE(invalid.status(), ConfigStore::Status::Ready);
+        QCOMPARE(request(invalid, [&] { return invalid.importProfile(path); }).error.code,
+                 QString("profile-size-limit"));
+    }
+    void profileDescriptorAdmission_data() {
+        QTest::addColumn<int>("shape");
+        for (int shape = 0; shape < 8; ++shape)
+            QTest::newRow(QByteArray::number(shape).constData()) << shape;
+    }
+    void profileDescriptorAdmission() {
+        QFETCH(int, shape);
+        QTemporaryDir dir;
+        const QString canary = "PRIVATE_PROFILE_CANARY_4a7c";
+        const QVariantMap hidden{{"undeclared", canary}};
+        auto descriptor = D::leaf(T::String, QString("default"));
+        QVariant raw = hidden;
+        if (shape == 1) {
+            descriptor = D::list(descriptor, {});
+            raw = QVariantList{hidden};
+        } else if (shape == 2) {
+            descriptor = D::leaf(T::Map, QVariantMap{});
+            descriptor.element = {D::leaf(T::String, QString())};
+            raw = QVariantMap{{"opaque", hidden}};
+        } else if (shape == 3) {
+            descriptor = D::leaf(T::Record, QVariantMap{{"declared", QString()}});
+            descriptor.fields = {{"declared", D::leaf(T::String, QString())}};
+            raw = QVariantMap{{"declared", hidden}};
+        } else if (shape == 4)
+            descriptor = D::list(descriptor, {}); // A map is not an empty list.
+        else if (shape == 5) {
+            descriptor = D::leaf(T::Record, QVariantMap{});
+            raw = QVariantList{hidden}; // A list is not an empty record.
+        } else if (shape == 6) {
+            descriptor = D::leaf(T::SafeInteger, 0);
+            descriptor.maximum = 5;
+            raw = 6;
+        } else if (shape == 7) {
+            descriptor.choices = {QString("default")};
+            raw = canary;
+        }
+        auto o = options();
+        o.schema = ConfigSchema(D::group({{"value", descriptor}}));
+        QVERIFY(o.schema.valid());
+        o.layers[0].sources = {{"raw", {}, {{"value", raw}}}};
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto profile = dir.filePath("portable.json");
+        const QByteArray previous = "preserve-existing-profile";
+        writeFile(profile, previous);
+        const auto result = request(store, [&] { return store.exportProfile("Safe", profile); });
+        const auto exported = readFile(profile);
+        QVERIFY2(!exported.contains(canary.toUtf8()),
+                 "Undeclared private data escaped its descriptor");
+        QCOMPARE(result.status, QString("failed"));
+        QCOMPARE(result.error.code, QString("profile-admission"));
+        QCOMPARE(exported, previous);
+        QCOMPARE(store.snapshot().values.value({"value"}), *descriptor.defaultValue);
+    }
+    void profileRecursiveWhitelist() {
+        QTemporaryDir dir;
+        auto title = D::leaf(T::String, QString());
+        title.nullable = true;
+        const auto url = D::leaf(T::Url, QUrl("https://example.test/default"));
+        auto record =
+            D::leaf(T::Record, QVariantMap{{"title", QString()}, {"url", *url.defaultValue}});
+        record.fields = {{"title", title}, {"url", url}};
+        auto map = D::leaf(T::Map, QVariantMap{});
+        map.element = {record};
+        auto privateRecord = record;
+        privateRecord.fields["url"].sensitive = true;
+        auto o = options();
+        o.schema = ConfigSchema(D::group({{"rows", D::list(record, {})},
+                                          {"map", map},
+                                          {"private", D::list(privateRecord, {})}}));
+        const QVariantMap rawRecord{{"title", QVariant::fromValue(nullptr)},
+                                    {"url", QString("https://example.test/a%2Fb")},
+                                    {"unknown", QString("RECURSIVE_CANARY")}};
+        o.layers[0].sources = {{"raw",
+                                {},
+                                {{"rows", QVariantList{rawRecord}},
+                                 {"map", QVariantMap{{"opaque", rawRecord}}},
+                                 {"private", QVariantList{rawRecord}}}}};
+        // JSON sources perform URL adaptation before admission; the raw tree keeps strings.
+        const auto config = dir.filePath("raw.json");
+        writeFile(config, encodeJsonValue(o.layers[0].sources[0].raw).bytes);
+        o.jsonFiles = {{"user", "raw", config}};
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto profile = dir.filePath("portable.json");
+        QCOMPARE(request(store, [&] { return store.exportProfile("Safe", profile); }).status,
+                 QString("exported"));
+        const auto bytes = readFile(profile);
+        QVERIFY(!bytes.contains("RECURSIVE_CANARY"));
+        QVERIFY(!bytes.contains("private"));
+        QVERIFY(bytes.contains("null"));
+        o.jsonFiles.clear();
+        o.layers[0].sources[0].raw.clear();
+        ConfigStore imported(o);
+        QTRY_COMPARE(imported.status(), ConfigStore::Status::Ready);
+        QCOMPARE(request(imported, [&] { return imported.importProfile(profile); }).status,
+                 QString("saved"));
+        const auto row = imported.value({"rows"}).toList().first().toMap();
+        QVERIFY(isNull(row.value("title")));
+        QCOMPARE(row.value("url").toUrl(), QUrl("https://example.test/a%2Fb"));
+        QVERIFY(!row.contains("unknown"));
+        QCOMPARE(imported.value({"map"}).toMap().value("opaque").toMap(), row);
     }
     void rawProfileRoundTripAndExclusions() {
         QTemporaryDir dir;
@@ -742,6 +905,153 @@ private slots:
         QCOMPARE(store.value({"a", "n"}).toInt(), 99);
         store.clearRuntime({"a", "n"});
         QTRY_COMPARE(store.value({"a", "n"}).toInt(), 7);
+    }
+    void profileParentSwap_data() {
+        QTest::addColumn<bool>("ancestor");
+        QTest::addColumn<bool>("existing");
+        QTest::addColumn<QString>("phase");
+        for (bool ancestor : {false, true})
+            for (bool existing : {false, true})
+                for (const auto &phase : {"profile-create", "profile-publish-checked"}) {
+                    const auto label = QByteArray::number(ancestor) + '-' +
+                                       QByteArray::number(existing) + '-' + phase;
+                    QTest::newRow(label.constData()) << ancestor << existing << QString(phase);
+                }
+    }
+    void profileParentSwap() {
+        QFETCH(bool, ancestor);
+        QFETCH(bool, existing);
+        QFETCH(QString, phase);
+        QTemporaryDir dir;
+        const auto component = dir.filePath("checked");
+        const auto moved = dir.filePath("moved");
+        const auto foreign = dir.filePath("foreign");
+        const auto suffix = ancestor ? QString("/leaf") : QString();
+        QVERIFY(QDir().mkpath(component + suffix));
+        QVERIFY(QDir().mkpath(foreign + suffix));
+        const auto destination = component + suffix + "/profile.json";
+        const auto forbidden = foreign + suffix + "/profile.json";
+        const QByteArray previous = "preserve-checked-original";
+        const QByteArray sentinel = "do-not-replace-configured-source";
+        const QByteArray exported = "{\"format\":1,\"name\":\"Checked\",\"entries\":[]}\n";
+        writeFile(forbidden, sentinel);
+        if (existing)
+            writeFile(destination, previous);
+        bool swapped = false, swapFailed = false;
+        ConfigJsonBackend backend(
+            {{"user", "protected", forbidden}}, [&](const QString &at, const QString &) {
+                if (at != phase)
+                    return QString();
+                swapped = true;
+                swapFailed = !QDir().rename(component, moved) || !QFile::link(foreign, component);
+                return swapFailed ? QString("test-parent-swap") : QString();
+            });
+        const auto error = backend.exportProfile(destination, exported);
+        QVERIFY(swapped);
+        QVERIFY(!swapFailed);
+        QCOMPARE(readFile(forbidden), sentinel);
+        const auto checked = moved + suffix + "/profile.json";
+        if (error.empty()) {
+            QCOMPARE(readFile(checked), exported);
+            struct stat state;
+            QCOMPARE(::stat(QFile::encodeName(checked).constData(), &state), 0);
+            QCOMPARE(state.st_mode & 0777, mode_t(0600));
+        } else if (QFile::exists(checked))
+            QVERIFY(readFile(checked) == previous || readFile(checked) == exported);
+        QCOMPARE(QDir(moved + suffix).entryList({"*.stage"}, QDir::Files | QDir::Hidden).size(), 0);
+    }
+    void profilePublicationFaults_data() {
+        QTest::addColumn<QString>("phase");
+        for (const auto &phase :
+             {"profile-create", "profile-write", "profile-file-sync", "profile-publish",
+              "profile-publish-checked", "profile-directory-sync"})
+            QTest::newRow(phase) << QString(phase);
+    }
+    void profilePublicationFaults() {
+        QFETCH(QString, phase);
+        QTemporaryDir dir;
+        const auto path = dir.filePath("profile.json");
+        const QByteArray before = "previous-profile";
+        const QByteArray after = "{\"name\":\"new-profile\"}\n";
+        writeFile(path, before);
+        ConfigJsonBackend backend({}, [&](const QString &at, const QString &) {
+            return at == phase ? QString("profile-test-fault") : QString();
+        });
+        QCOMPARE(backend.exportProfile(path, after).code, QString("profile-test-fault"));
+        QCOMPARE(readFile(path), phase == "profile-directory-sync" ? after : before);
+        QCOMPARE(QDir(dir.path()).entryList({"*.stage"}, QDir::Files | QDir::Hidden).size(), 0);
+        QVERIFY(QFile::exists(path + ".lock"));
+    }
+    void profileResolvedDestinations_data() {
+        QTest::addColumn<int>("mode");
+        const QStringList names{"dangling-absolute", "dangling-relative", "directory-alias",
+                                "dangling-source",   "dangling-chain",    "allowed-dangling",
+                                "allowed-existing",  "hardlink",          "loop"};
+        for (int i = 0; i < names.size(); ++i)
+            QTest::newRow(qPrintable(names[i])) << i;
+    }
+    void profileResolvedDestinations() {
+        QFETCH(int, mode);
+        QTemporaryDir dir;
+        QVERIFY(QDir().mkdir(dir.filePath("sources")));
+        auto o = options(dir.filePath("sources"));
+        auto forbidden = dir.filePath("sources/a.json");
+        auto destination = dir.filePath("alias.json");
+        const auto allowed = dir.filePath("portable.json");
+        if (mode == 0)
+            QVERIFY(QFile::link(forbidden, destination));
+        else if (mode == 1)
+            QCOMPARE(::symlink("sources/a.json", QFile::encodeName(destination).constData()), 0);
+        else if (mode == 2) {
+            QVERIFY(QFile::link(dir.filePath("sources"), dir.filePath("directory")));
+            destination = dir.filePath("directory/a.json");
+        } else if (mode == 3) {
+            const auto target = dir.filePath("missing.json");
+            QVERIFY(QFile::link(target, forbidden));
+            destination = target;
+        } else if (mode == 4) {
+            QVERIFY(QFile::link(forbidden, dir.filePath("middle.json")));
+            QVERIFY(QFile::link(dir.filePath("middle.json"), destination));
+        } else if (mode == 5 || mode == 6) {
+            if (mode == 6) {
+                writeFile(allowed, "previous-profile");
+                QVERIFY(QFile::setPermissions(allowed, QFile::ReadOwner | QFile::WriteOwner |
+                                                           QFile::ReadGroup | QFile::ReadOther));
+            }
+            QVERIFY(QFile::link(allowed, destination));
+        } else if (mode == 7) {
+            writeFile(allowed, "preserve-hardlink");
+            QCOMPARE(::link(QFile::encodeName(allowed).constData(),
+                            QFile::encodeName(destination).constData()),
+                     0);
+        } else {
+            QVERIFY(QFile::link(dir.filePath("middle.json"), destination));
+            QVERIFY(QFile::link(destination, dir.filePath("middle.json")));
+        }
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto result =
+            request(store, [&] { return store.exportProfile("Safe", destination); });
+        if (mode < 5) {
+            QVERIFY2(!QFile::exists(forbidden),
+                     "A dangling alias published into a configured source");
+            QCOMPARE(result.status, QString("failed"));
+            QCOMPARE(result.error.code, QString("profile-is-config-source"));
+        } else if (mode == 5 || mode == 6) {
+            QCOMPARE(result.status, QString("exported"));
+            QVERIFY(QFileInfo(destination).isSymLink());
+            QVERIFY(readFile(allowed).contains("Safe"));
+            struct stat state{};
+            QCOMPARE(::stat(QFile::encodeName(allowed).constData(), &state), 0);
+            QCOMPARE(state.st_mode & 0777, mode_t(0600));
+            QCOMPARE(request(store, [&] { return store.importProfile(destination); }).status,
+                     QString("saved"));
+        } else if (mode == 7) {
+            QCOMPARE(result.error.code, QString("hard-linked-target"));
+            QCOMPARE(readFile(allowed), QByteArray("preserve-hardlink"));
+            QCOMPARE(readFile(destination), QByteArray("preserve-hardlink"));
+        } else
+            QCOMPARE(result.error.code, QString("symlink-loop"));
     }
     void profileResetMaliciousInputAndPartialReceipt() {
         QTemporaryDir dir;

@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- JSON object encoding indexes preserved key order instead of repeatedly scanning
+  it, avoiding quadratic work for wide objects while retaining deterministic order.
+- Migration and source-projection bridges recover exact numeric/URL wrappers with
+  an identity-checked index rather than a full scan for each returned value.
+
+### Security
+
+- Profile imports refuse non-regular files and enforce a configurable 16 MiB byte
+  limit before and during reads, preventing FIFO blocking and unbounded buffering.
+- Profile export admits whitelisted raw values through their descriptors, refusing
+  malformed scalar/collection content that could carry undeclared private data.
+- Profile exports exclude configured-source aliases, including dangling links,
+  and anchor staging/replacement to the same opened parent directory descriptor,
+  preventing later parent-path swaps from redirecting publication.
+
 ## [0.2.0] — 2026-10-29
 
 ### Added

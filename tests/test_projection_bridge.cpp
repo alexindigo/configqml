@@ -2,13 +2,90 @@
 #include "configqmldeclaration.h"
 #include "compatfixture.h"
 #include "confignumber.h"
+#include "modelbudgets.h"
 #include <QJSEngine>
+#include <QElapsedTimer>
+#include <QUrl>
 using namespace configqml;
 using D = ConfigDescriptor;
 using T = D::Type;
 class ProjectionBridgeTest : public QObject {
     Q_OBJECT
 private slots:
+    void atomIdentityBudget_data() {
+        QTest::addColumn<bool>("projection");
+        QTest::newRow("migration") << false;
+        QTest::newRow("projection") << true;
+    }
+    void atomIdentityBudget() {
+        QFETCH(bool, projection);
+        QVariantList numbers;
+        for (int i = 0; i < 100000; ++i)
+            numbers.append(QVariant::fromValue(*ConfigNumber::fromJson(QString::number(i) + ".0")));
+        const QVariantMap raw{{"numbers", numbers}};
+        QList<ConfigDiagnostic> errors;
+        QElapsedTimer timer;
+        timer.start();
+        QVariantMap output;
+        if (projection) {
+            ConfigQmlProjection declaration;
+            declaration.transform =
+                QJSValue(QString("function(i) { return {values:i.raw,"
+                                 "compatibilityRaw:{},effects:[],diagnostics:[]}; }"));
+            const auto spec = declaration.compile(errors);
+            QVERIFY(errors.isEmpty());
+            ConfigProjectionInput input;
+            input.raw = raw;
+            output = spec.transform(input).values;
+        } else {
+            QJSEngine engine;
+            ConfigQmlSchema declaration;
+            declaration.migrations =
+                engine.evaluate("[{fromVersion:0,transform:'function(raw) { return raw; }'}]");
+            const auto steps = declaration.compileMigrations(errors);
+            QVERIFY(errors.isEmpty());
+            QCOMPARE(steps.size(), 1);
+            const auto result = steps[0].transform(raw);
+            QVERIFY(result.ok());
+            output = result.value.toMap();
+        }
+        const auto elapsed = timer.elapsed();
+        QCOMPARE(encodeJsonValue(output).bytes, encodeJsonValue(raw).bytes);
+        qInfo("100000-number %s bridge: %lldms enforce=%d", projection ? "projection" : "migration",
+              elapsed, enforceModelBudgets);
+        if (enforceModelBudgets)
+            QVERIFY2(elapsed < 3000, "Atom lookup must not scan all preceding numeric wrappers");
+    }
+    void atomIdentityIsNotShape() {
+        QJSEngine engine;
+        ConfigQmlSchema declaration;
+        declaration.migrations = engine.evaluate(R"JS([{fromVersion:0,transform:`function(raw) {
+            var original=raw.numbers[0], fake=Object.assign({},original);
+            for (var key of Object.getOwnPropertySymbols(original))
+                Object.defineProperty(fake,key,Object.getOwnPropertyDescriptor(original,key));
+            raw.fake=fake;
+            raw.numbers.reverse();
+            raw.again=original;
+            raw.fresh={decimal:'123'};
+            return raw;
+        }`}])JS");
+        QList<ConfigDiagnostic> errors;
+        const auto steps = declaration.compileMigrations(errors);
+        QVERIFY(errors.isEmpty());
+        const auto token = QVariant::fromValue(*ConfigNumber::fromJson("18446744073709551615"));
+        const QVariantList numbers{token, qint64(-7), -0.0, QUrl("https://example.test/a%2Fb")};
+        const auto result = steps[0].transform({{"numbers", numbers}});
+        QVERIFY(result.ok());
+        const auto output = result.value.toMap();
+        QCOMPARE(encodeJsonValue(output.value("again")).bytes, QByteArray("18446744073709551615"));
+        QCOMPARE(output.value("fake").metaType().id(), QMetaType::QVariantMap);
+        QCOMPARE(output.value("fake").toMap().value("decimal").toString(),
+                 token.value<ConfigNumber>().token());
+        QCOMPARE(output.value("fresh").toMap().value("decimal").toString(), QString("123"));
+        auto reversed = numbers;
+        std::reverse(reversed.begin(), reversed.end());
+        QCOMPARE(output.value("numbers").toList(), reversed);
+    }
     void rejectedResults_data() {
         QTest::addColumn<QString>("body");
         QTest::addColumn<QString>("code");

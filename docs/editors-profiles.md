@@ -103,9 +103,43 @@ store.importProfile(profileFile, [], callback)
 
 Native equivalents take `QList<ConfigPath>` and context/callback. All file work,
 selection, raw projection, validation and grouped import are worker-owned. Export
-uses a 0600 atomic QSaveFile, reports `exported` or `failed`, and refuses a store
-source as its destination. Import uses the normal saved/nothing_to_save/failed
-receipt, including partial multi-file outcomes. Paths must be absolute and clean.
+uses the JSON backend's shared descriptor-relative atomic publisher with 0600
+permissions, reports `exported`
+or `failed`, and refuses a store source as its destination. Import uses the normal
+saved/nothing_to_save/failed receipt, including partial multi-file outcomes. Paths
+must be absolute and clean.
+
+The storage owner resolves the complete export destination with the same bounded
+symlink resolver used for configured sources, including dangling targets and
+symlinked parent directories. It excludes every configured source's resolved
+target, then opens the resolved parent with `O_DIRECTORY | O_NOFOLLOW` and takes
+the same bounded cooperative `<target>.lock` as configured-file publication.
+The shared publisher creates a unique private staging file with
+`openat(O_CREAT | O_EXCL | O_NOFOLLOW, 0600)`, completely writes and fsyncs it,
+checks resolution/source exclusion and the descriptor-relative final identity,
+then uses `renameat` on that same directory descriptor and fsyncs the directory.
+Profiles, configured-file replacement/deletion and no-replace migration backups
+share this publisher; profiles never fall back to pathname-based QSaveFile writes.
+Hard-linked destinations are refused rather than broken by replacement. Retain
+the cooperative sidecar lock file; it must not be unlinked as cleanup.
+
+Once the parent is open, a later parent-component swap cannot redirect staging
+or publication: the export either fails validation or lands in the already-opened
+directory, even if that directory has been renamed. This does **not** implement
+component-by-component traversal anchored at a trusted root. Components above the
+opened parent can change during resolution/open; `O_NOFOLLOW` protects only the
+final parent component. Source exclusion and identity rechecks do not make those
+earlier components race-free. This is the same residual model as configured-file
+publication, not a sandbox against arbitrary hostile directory mutation.
+
+Import accepts regular files only (symlinks to regular files are allowed), refusing
+FIFOs, devices and directories without waiting for input. The opened file identity
+is checked too. `ConfigStoreOptions::profileMaxBytes` / QML `profileMaxBytes` is a
+construction-time positive byte limit, default **16 MiB** (16 × 1024 × 1024), including
+whitespace. Import checks the opened size and bounds every read, including files
+that grow after opening. Excess reports `profile-too-large`; non-regular input
+reports `profile-file-type`; a nonpositive limit reports `profile-size-limit`.
+Refusal does not change settings or block subsequent worker commands.
 
 The version-1 JSON envelope contains `format: 1`, a nonempty `name` and `entries`.
 Each entry contains a segment-array `path`, boolean `present`, and raw `value`
@@ -123,6 +157,12 @@ setting is excluded rather than fabricating a partial record. Nullable null stay
 null. Maps retain opaque keys; declared record fields inside maps/lists are
 whitelisted recursively. Invalid/duplicate/unsafe profile entries and unknown
 atomic record members are refused at import before changing any setting.
+
+Every whitelisted export value must pass its descriptor's shape, type and
+constraints, including scalar elements nested in lists/maps/records. Invalid raw
+overrides fail the entire export with `profile-admission` before publication;
+they are never coerced to empty containers, silently reset or emitted unchecked.
+An existing profile and the original raw sources remain unchanged on refusal.
 
 Profile files are portable preference snapshots, not full-store backups. Raw
 unknown/invalid data remains preserved in the original source files by the normal

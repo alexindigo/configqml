@@ -78,3 +78,34 @@ checkout before publication. Local verification uses a separately hashed archive
 of the release commit, without contacting the unpublished tag.
 The recipe pins qt6-base and qt6-declarative to the adapter's exact Qt version,
 so an incompatible Qt upgrade cannot silently retain the old binary plugin.
+
+## Test timing gates
+
+With `BUILD_TESTING=ON`, the cache STRING `CONFIGQML_TIMING_GATES=AUTO|ON|OFF`
+controls performance-budget comparisons shared by native and QML suites.
+The default **AUTO** recomputes its effective value on every configure: only
+Release or RelWithDebInfo configurations (case-insensitive, including `release`)
+are timed, and only when no `-fsanitize` option is found in `CMAKE_CXX_FLAGS`,
+the active configuration-specific
+`CMAKE_CXX_FLAGS_<CONFIG>` variables, or target compile/interface compile options.
+In AUTO, multi-configuration generators inspect every enabled configuration; a sanitizer
+in any of them disables timing comparisons. Target options are inspected after
+targets (including an embedding parent's additions) have been configured.
+Generator-expression option text is inspected conservatively, so an unevaluated
+sanitizer expression disables timing comparisons too.
+
+AUTO remains AUTO in the cache: reconfiguring Debug to Release turns timings on,
+and adding sanitizer flags turns them off without a cache reset.
+`-DCONFIGQML_TIMING_GATES=OFF` explicitly disables all timing comparisons and stays
+OFF across reconfiguration. **ON explicitly enables them**, including in Debug
+or instrumented configurations, overriding AUTO's classification. Existing ON/OFF
+cache values retain that explicit meaning. Every functional assertion still runs
+in all modes. For example, under AUTO,
+a Release build using `-DCMAKE_CXX_FLAGS_RELEASE='-O2 -DNDEBUG -fsanitize=undefined'`
+compiles the tests with timing gates off; normal Release enforces them. Opaque
+instrumentation hidden inside compiler wrappers should explicitly set OFF.
+
+The `timing_gates` compile/run probes use the parent build's generator (including
+Unix Makefiles) and build tool. Additional Ninja Multi-Config cases run only when
+Ninja is on PATH and a generator availability check succeeds; otherwise they emit
+a skip message without failing or disabling the primary probes.

@@ -4,9 +4,11 @@
 #include "configconsumer_p.h"
 #include <QFile>
 #include <QFileInfo>
-#include <QSaveFile>
 #include <QSet>
 #include <QDir>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace configqml {
 quint64 ConfigStore::applyGroup(const QMap<ConfigPath, std::optional<QVariant>> &edits,
@@ -118,31 +120,93 @@ void ConfigWorker::processGroup(const ConfigCommand &command) {
     recordPersistent(input, before);
     beginSave(command);
 }
-static QVariant portableValue(const ConfigDescriptor &descriptor, const QVariant &raw) {
-    // Whitelist record members; unknown legacy data can contain credentials.
-    if (isNull(raw))
-        return raw;
-    if (descriptor.type == ConfigDescriptor::Type::Record) {
+static std::optional<QVariant> portableValue(const ConfigDescriptor &descriptor,
+                                             const QVariant &raw) {
+    using T = ConfigDescriptor::Type;
+    if (descriptor.sensitive || descriptor.forbidden || descriptor.machineLocal ||
+        descriptor.type == T::SecretRef)
+        return {};
+    QVariant projected = raw;
+    // Raw data is not admitted data. Check container shape before traversing and
+    // whitelist record members, then admit every projected value through its descriptor.
+    if (!isNull(raw) && descriptor.type == T::Record) {
+        if (raw.metaType().id() != QMetaType::QVariantMap)
+            return {};
         QVariantMap result;
         const auto map = raw.toMap();
         for (auto it = descriptor.fields.cbegin(); it != descriptor.fields.cend(); ++it)
-            if (map.contains(it.key()))
-                result[it.key()] = portableValue(it.value(), map.value(it.key()));
-        return result;
-    }
-    if (descriptor.type == ConfigDescriptor::Type::List) {
+            if (map.contains(it.key())) {
+                const auto child = portableValue(it.value(), map.value(it.key()));
+                if (!child)
+                    return {};
+                result[it.key()] = *child;
+            }
+        projected = result;
+    } else if (!isNull(raw) && descriptor.type == T::List) {
+        if (raw.metaType().id() != QMetaType::QVariantList || descriptor.element.size() != 1)
+            return {};
         QVariantList result;
-        for (const auto &item : raw.toList())
-            result.append(portableValue(descriptor.element.first(), item));
-        return result;
-    }
-    if (descriptor.type == ConfigDescriptor::Type::Map) {
+        for (const auto &item : raw.toList()) {
+            const auto child = portableValue(descriptor.element.first(), item);
+            if (!child)
+                return {};
+            result.append(*child);
+        }
+        projected = result;
+    } else if (!isNull(raw) && descriptor.type == T::Map) {
+        if (raw.metaType().id() != QMetaType::QVariantMap || descriptor.element.size() != 1)
+            return {};
         auto result = raw.toMap();
-        for (auto &item : result)
-            item = portableValue(descriptor.element.first(), item);
-        return result;
+        for (auto &item : result) {
+            const auto child = portableValue(descriptor.element.first(), item);
+            if (!child)
+                return {};
+            item = *child;
+        }
+        projected = result;
     }
-    return raw;
+    if (!descriptor.validate(jsonSettingValue(projected, descriptor)).ok())
+        return {};
+    return projected; // Retain the raw numeric/URL representation, not normalized admission.
+}
+static QString readProfile(const QString &path, qint64 limit, QByteArray &bytes) {
+    if (limit <= 0)
+        return "profile-size-limit";
+    struct stat state;
+    const auto name = QFile::encodeName(path);
+    if (::stat(name.constData(), &state) < 0)
+        return "profile-read";
+    if (!S_ISREG(state.st_mode))
+        return "profile-file-type";
+    // Nonblocking open prevents a replacement FIFO from blocking before fstat.
+    const auto fd = ::open(name.constData(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+        return "profile-read";
+    QFile file;
+    if (!file.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) {
+        ::close(fd);
+        return "profile-read";
+    }
+    if (::fstat(fd, &state) < 0)
+        return "profile-read";
+    if (!S_ISREG(state.st_mode))
+        return "profile-file-type";
+    if (state.st_size > limit)
+        return "profile-too-large";
+    char buffer[65536];
+    for (;;) {
+        const auto remaining = limit - bytes.size();
+        // At the boundary probe one byte without growing the admitted buffer.
+        const auto count =
+            file.read(buffer, qMin<qint64>(sizeof(buffer), remaining ? remaining : 1));
+        if (count < 0)
+            return "profile-read";
+        if (count == 0)
+            return {};
+        if (count > remaining)
+            return "profile-too-large";
+        bytes.append(buffer, count);
+    }
 }
 void ConfigWorker::profile(const ConfigCommand &command) {
     auto result = resultFor(command);
@@ -162,17 +226,6 @@ void ConfigWorker::profile(const ConfigCommand &command) {
         fail("profile-path");
         return;
     }
-    if (command.operation == "exportProfile")
-        for (const auto &file : m_options.jsonFiles) {
-            const QFileInfo destination(command.file);
-            const QFileInfo source(m_json->path(file.sourceId));
-            if (destination.absoluteFilePath() == source.absoluteFilePath() ||
-                (!destination.canonicalFilePath().isEmpty() &&
-                 destination.canonicalFilePath() == source.canonicalFilePath())) {
-                fail("profile-is-config-source");
-                return;
-            }
-        }
     for (const auto &prefix : command.selection)
         if (!m_options.schema.descriptor(prefix)) {
             fail("undeclared-path");
@@ -200,30 +253,38 @@ void ConfigWorker::profile(const ConfigCommand &command) {
             const auto source = m_layers->source(route.layerId, route.sourceId);
             const auto raw = valueAt(source->raw, path.mid(route.prefix.size()));
             QVariantMap entry{{"path", path}, {"present", bool(raw)}};
-            if (raw)
-                entry["value"] = portableValue(*m_options.schema.descriptor(path), *raw);
+            if (raw) {
+                const auto value = portableValue(*m_options.schema.descriptor(path), *raw);
+                if (!value) {
+                    fail("profile-admission");
+                    return;
+                }
+                entry["value"] = *value;
+            }
             entries.append(entry);
         }
         const auto bytes = codec.encode(
             {{"format", 1}, {"name", command.profileName}, {"entries", entries}}, "profile");
-        QSaveFile file(command.file);
-        file.setDirectWriteFallback(false);
-        if (!bytes.ok() || !file.open(QIODevice::WriteOnly) ||
-            !file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner) ||
-            file.write(bytes.bytes) != bytes.bytes.size() || !file.commit()) {
+        if (!bytes.ok()) {
             fail("profile-export");
+            return;
+        }
+        const auto error = m_json->exportProfile(command.file, bytes.bytes);
+        if (!error.empty()) {
+            fail(error.code);
             return;
         }
         result.status = "exported";
         post(publish(result));
         return;
     }
-    QFile file(command.file);
-    if (!file.open(QIODevice::ReadOnly)) {
-        fail("profile-read");
+    QByteArray profileBytes;
+    const auto readError = readProfile(command.file, m_options.profileMaxBytes, profileBytes);
+    if (!readError.isEmpty()) {
+        fail(readError);
         return;
     }
-    const auto decoded = codec.decode(file.readAll(), "profile");
+    const auto decoded = codec.decode(profileBytes, "profile");
     const auto format = decoded.raw.value("format");
     if (!decoded.ok() || encodeJsonValue(format).bytes != "1" ||
         decoded.raw.value("name").metaType().id() != QMetaType::QString ||
@@ -265,7 +326,8 @@ void ConfigWorker::profile(const ConfigCommand &command) {
             const auto descriptor = *m_options.schema.descriptor(path);
             const auto raw = entry.value("value");
             const auto checked = m_options.schema.validate(path, jsonSettingValue(raw, descriptor));
-            if (!checked.ok() || portableValue(descriptor, raw) != raw) {
+            const auto portable = portableValue(descriptor, raw);
+            if (!checked.ok() || !portable || *portable != raw) {
                 fail("profile-admission");
                 return;
             }
