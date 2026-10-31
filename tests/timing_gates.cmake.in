@@ -34,7 +34,7 @@ probe(disabled Release 0 -DCONFIGQML_TIMING_GATES=OFF)
 probe(forced_sanitizer Release 0 -DCONFIGQML_TIMING_GATES=ON
     "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG -fsanitize=undefined")
 probe(late_options Release 0)
-probe(cached Release 1)
+probe(cached Release 1 "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG")
 probe(cached Release 0 "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG -fsanitize=undefined")
 foreach(sanitized OFF ON)
     set(build "@CMAKE_CURRENT_BINARY_DIR@/timing-gate-probes/multi-${sanitized}")
