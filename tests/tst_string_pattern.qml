@@ -10,7 +10,8 @@ QtObject {
     property var editor: null
     property string rejectedPath: ""
     property string rejectedCode: ""
-    readonly property string observed: main.ready ? main.values.word : "loading"
+    readonly property var cfg: main.values
+    readonly property string observed: main.ready ? cfg.word : "loading"
     readonly property string preview: editor && editor.ready ? editor.values.word : "loading"
     readonly property bool ready: main.ready && base.ready && invalid.status === ConfigStore.Error && badType.status === ConfigStore.Error
     property ConfigStore invalid: ConfigStore {
@@ -65,9 +66,9 @@ QtObject {
         stage = "checked writers";
         if (!check(invalid.error === "invalid-string-pattern" && badType.error === "string-pattern-type", "QML schema constraints")) return;
         const before = main.info(["word"]).latestInput;
-        if (!rejects(function() { main.values.word = "bad"; }, "property rejection")) return;
-        if (!rejects(function() { main.values.rows = [{id:"x",label:"bad"}]; }, "nested rejection")) return;
-        if (!rejects(function() { main.values.tokens = {"opaque-secret":"bad"}; }, "sensitive rejection")) return;
+        if (!rejects(function() { root.cfg.word = "bad"; }, "property rejection")) return;
+        if (!rejects(function() { root.cfg.rows = [{id:"x",label:"bad"}]; }, "nested rejection")) return;
+        if (!rejects(function() { root.cfg.tokens = {"opaque-secret":"bad"}; }, "sensitive rejection")) return;
         if (!check(rejectedCode === "string-pattern" && rejectedPath === "tokens", "value-free owning-leaf path")) return;
         const scoped = main.scope([], true);
         if (!rejects(function() { scoped.setUser(["word"], "bad"); }, "scoped rejection")) return;
@@ -99,7 +100,7 @@ QtObject {
             if (!check(!editor.dirty && preview === "OK", "overlay invalid no intent")) return;
             editor.values.word = "HI";
             editor.apply(function(saved) {
-                if (!check(saved.status === "saved" && saved.refreshState === "current" && preview === "HI" && main.values.rows[0].label === "UP", "overlay checked replacement")) return;
+                if (!check(saved.status === "saved" && saved.refreshState === "current" && preview === "HI" && root.cfg.rows[0].label === "UP", "overlay checked replacement")) return;
                 editor.resetOverrides(function(reset) {
                     if (!check(reset.status === "saved" && preview === "OK", "checked reset replacement")) return;
                     finished = true;
@@ -108,7 +109,7 @@ QtObject {
         });
     }
     function runRestart(): void {
-        check(observed === "UP" && main.values.rows.length === 1 && main.values.rows[0].label === "UP" && main.values.rows[0].instanceSettings === undefined, "pattern disk restart consumer");
+        check(observed === "UP" && cfg.rows.length === 1 && cfg.rows[0].label === "UP" && cfg.rows[0].instanceSettings === undefined, "pattern disk restart consumer");
         finished = failure === "";
     }
 }

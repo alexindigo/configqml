@@ -72,8 +72,8 @@ public:
                               const QJSValue &callback = {});
     Q_INVOKABLE QString clearRuntime(const QStringList &path, const QJSValue &callback = {});
     Q_INVOKABLE QVariantMap info(const QStringList &path) const;
-    Q_INVOKABLE QAbstractItemModel *listModel(const QStringList &path);
-    Q_INVOKABLE QAbstractItemModel *keyedModel(const QStringList &path);
+    Q_INVOKABLE configqml::ConfigListModel *listModel(const QStringList &path);
+    Q_INVOKABLE configqml::ConfigListModel *keyedModel(const QStringList &path);
     Q_INVOKABLE QString save(const QJSValue &callback = {});
     Q_INVOKABLE QString reload(const QJSValue &callback = {});
     Q_INVOKABLE QString initializeIfMissing(const QStringList &path, const QVariant &value,
@@ -142,7 +142,7 @@ private:
     QString m_error;
     bool m_complete = false;
     bool m_autoSave = true;
-    QMap<ConfigPath, QPointer<QAbstractItemModel>> m_models;
+    QMap<ConfigPath, QPointer<ConfigListModel>> m_models;
     int m_autoSaveInterval = 300;
     qint64 m_profileMaxBytes = 16 * 1024 * 1024;
     ConfigPath m_prefix;

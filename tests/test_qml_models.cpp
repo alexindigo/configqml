@@ -12,7 +12,14 @@
 #include <QTest>
 #include <QElapsedTimer>
 #include "modelbudgets.h"
+#include <type_traits>
+#include <utility>
 using namespace configqml;
+
+static_assert(
+    std::is_same_v<decltype(std::declval<ConfigQmlStore &>().listModel({})), ConfigListModel *>);
+static_assert(
+    std::is_same_v<decltype(std::declval<ConfigQmlStore &>().keyedModel({})), ConfigListModel *>);
 
 class QmlModelsTest : public QObject {
     Q_OBJECT

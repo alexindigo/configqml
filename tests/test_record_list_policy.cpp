@@ -2,13 +2,331 @@
 #include "compatfixture.h"
 #include "configjsoncodec.h"
 #include "confignumber.h"
+#include "storeprobe.h"
+#include <QPersistentModelIndex>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 using namespace configqml;
 using D = ConfigDescriptor;
 using T = D::Type;
+namespace {
+ConfigPath owner(bool same, bool right = false) {
+    return same ? ConfigPath{"layout"} : ConfigPath{right ? "right" : "left", "rows"};
+}
+ConfigStoreOptions transferOptions(bool same, const QString &directory = {}) {
+    auto optional = D::leaf(T::Boolean, false);
+    optional.optional = true;
+    optional.defaultValue.reset();
+    D row;
+    row.type = T::Record;
+    row.fields = {{"id", D::leaf(T::String, QString())}, {"compact", optional}};
+    auto list = D::list(row, {});
+    list.idField = "id";
+    const QVariantList left{QVariantMap{{"id", "hidden"}, {"unknown", "hidden-data"}},
+                            QVariantMap{{"id", "clock"}, {"deprecated", "retain-me"}},
+                            QVariantMap{{"id", "stay"}}};
+    const QVariantList right{QVariantMap{{"id", "other"}}};
+    ConfigStoreOptions o;
+    o.autoSave = false;
+    if (same) {
+        auto layout = D::leaf(T::Record, QVariantMap{{"left", left}, {"right", right}});
+        layout.fields = {{"left", list}, {"right", list}};
+        o.schema = ConfigSchema(D::group({{"layout", layout}}));
+        o.layers = {{"user",
+                     ConfigLayerKind::File,
+                     ConfigAdmissionPolicy::FieldFallback,
+                     {{"user", {}, {}}},
+                     true}};
+        if (!directory.isEmpty())
+            o.jsonFiles = {{"user", "user", directory + "/user.json"}};
+    } else {
+        auto leftList = list, rightList = list;
+        leftList.defaultValue = left;
+        rightList.defaultValue = right;
+        o.schema = ConfigSchema(D::group({{"left", D::group({{"rows", leftList}})},
+                                          {"right", D::group({{"rows", rightList}})}}));
+        o.layers = {{"user",
+                     ConfigLayerKind::File,
+                     ConfigAdmissionPolicy::FieldFallback,
+                     {{"left", {"left"}, {}}, {"right", {"right"}, {}}},
+                     true}};
+        if (!directory.isEmpty())
+            o.jsonFiles = {{"user", "left", directory + "/left.json"},
+                           {"user", "right", directory + "/right.json"}};
+    }
+    for (const bool rightSide : {false, true})
+        o.recordListPolicies.append(
+            {rightSide ? "right" : "left",
+             owner(same, rightSide),
+             same ? QList<ConfigValueSelector>{{ConfigValueSelector::Kind::Key,
+                                                rightSide ? "right" : "left", 0}}
+                  : QList<ConfigValueSelector>{},
+             "id",
+             {},
+             true,
+             true});
+    return o;
+}
+ConfigRecordListMetadata transferMetadata() {
+    ConfigRecordListMetadata metadata;
+    metadata.ready = true;
+    for (const auto &key : {"clock", "stay", "other"})
+        metadata.entries.append({key, true, false, true, {{"compact", false}}});
+    return metadata;
+}
+ConfigRecordListEditOptions transfer(ConfigStore &store, bool same) {
+    ConfigRecordListEdit edit;
+    edit.op = ConfigRecordListEdit::Op::Transfer;
+    const auto address = [](const char *key) {
+        return QList<ConfigValueSelector>{{ConfigValueSelector::Kind::Key, key, 0}};
+    };
+    edit.from = {"left", same ? address("left") : QList<ConfigValueSelector>{},
+                 store.info(owner(same)).publicationGeneration, 0};
+    edit.destination = {"right", same ? address("right") : QList<ConfigValueSelector>{},
+                        store.info(owner(same, true)).publicationGeneration, 1};
+    return {edit.from.generation, edit.from.listAddress, {edit}};
+}
+QVariantList displayed(ConfigStore &store, bool same, bool right = false) {
+    const auto value = store.value(owner(same, right));
+    return same ? value.toMap().value(right ? "right" : "left").toList() : value.toList();
+}
+} // namespace
 class RecordListTest : public QObject {
     Q_OBJECT
 private slots:
+    void samePolicyAddressesAndSameList() {
+        auto o = transferOptions(true);
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        for (const auto &id : {"left", "right"})
+            QCOMPARE(
+                compat::request(
+                    store, [&] { return store.updateRecordListPolicy(id, transferMetadata()); })
+                    .status,
+                QString("projected"));
+        auto edit = transfer(store, true);
+        edit.edits[0].destination = edit.edits[0].from;
+        edit.edits[0].destination.index = 1;
+        QCOMPARE(compat::request(store, [&] { return store.editRecordList("left", edit); }).status,
+                 QString("admitted"));
+        QCOMPARE(displayed(store, true).last().toMap().value("id").toString(), QString("clock"));
+        const auto before = store.value(owner(true));
+        edit = transfer(store, true);
+        edit.edits[0].destination.index = 99;
+        QCOMPARE(
+            compat::request(store, [&] { return store.editRecordList("left", edit); }).error.code,
+            QString("list-edit-operation"));
+        QCOMPARE(store.value(owner(true)), before);
+        // Reuse one Each policy for concrete addresses in a single owning leaf.
+        auto row = D::leaf(T::Record, QVariantMap{{"id", "x"}});
+        row.fields = {{"id", D::leaf(T::String, QString())}};
+        const auto list = D::list(row, {});
+        auto section = D::leaf(T::Record, QVariantMap{{"rows", QVariantList{}}});
+        section.fields = {{"rows", list}};
+        o.schema = ConfigSchema(
+            D::group({{"sections",
+                       D::list(section, {QVariantMap{{"rows", QVariantList{QVariantMap{
+                                                                  {"id", "x"}, {"unknown", 7}}}}},
+                                         QVariantMap{{"rows", QVariantList{}}}})}}));
+        o.recordListPolicies = {{"sections",
+                                 {"sections"},
+                                 {{ConfigValueSelector::Kind::Each, {}, 0},
+                                  {ConfigValueSelector::Kind::Key, "rows", 0}},
+                                 "id"}};
+        ConfigStore nested(o);
+        QTRY_COMPARE(nested.status(), ConfigStore::Status::Ready);
+        ConfigRecordListEdit move;
+        move.op = ConfigRecordListEdit::Op::Transfer;
+        move.from = {"sections",
+                     {{ConfigValueSelector::Kind::Index, {}, 0},
+                      {ConfigValueSelector::Kind::Key, "rows", 0}},
+                     nested.info({"sections"}).publicationGeneration,
+                     0};
+        move.destination = move.from;
+        move.destination.listAddress[0].index = 1;
+        ConfigRecordListEditOptions options{move.from.generation, move.from.listAddress, {move}};
+        QCOMPARE(compat::request(nested, [&] { return nested.editRecordList("sections", options); })
+                     .status,
+                 QString("admitted"));
+        const auto sections = nested.value({"sections"}).toList();
+        QVERIFY(sections.first().toMap().value("rows").toList().isEmpty());
+        QCOMPARE(
+            sections.last().toMap().value("rows").toList().first().toMap().value("unknown").toInt(),
+            7);
+    }
+    void transferRoundTrip_data() {
+        QTest::addColumn<bool>("same");
+        QTest::newRow("one-leaf") << true;
+        QTest::newRow("two-shards") << false;
+    }
+    void transferRoundTrip() {
+        QFETCH(bool, same);
+        QTemporaryDir dir;
+        const auto o = transferOptions(same, dir.path());
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        for (const auto &id : {"left", "right"})
+            QCOMPARE(
+                compat::request(
+                    store, [&] { return store.updateRecordListPolicy(id, transferMetadata()); })
+                    .status,
+                QString("projected"));
+        QCOMPARE(displayed(store, same).size(), 2);
+        QVERIFY(!displayed(store, same).first().toMap().contains("deprecated"));
+        auto *left = same ? nullptr : store.listModel(owner(false));
+        auto *right = same ? nullptr : store.listModel(owner(false, true));
+        std::unique_ptr<QSignalSpy> removed, inserted, reset;
+        QPersistentModelIndex staying;
+        if (left) {
+            removed = std::make_unique<QSignalSpy>(left, &QAbstractItemModel::rowsRemoved);
+            inserted = std::make_unique<QSignalSpy>(right, &QAbstractItemModel::rowsInserted);
+            reset = std::make_unique<QSignalSpy>(right, &QAbstractItemModel::modelReset);
+            staying = left->index(1);
+        }
+        bool coherent = true;
+        const auto connection =
+            connect(&store, &ConfigStore::valuesChanged, &store, [&](const QList<ConfigPath> &) {
+                coherent &= displayed(store, same).size() == 1 &&
+                            displayed(store, same, true).size() == 2 &&
+                            store.info(owner(same)).publicationGeneration ==
+                                store.info(owner(same, true)).publicationGeneration;
+            });
+        auto edit = transfer(store, same);
+        const auto receipt =
+            compat::request(store, [&] { return store.editRecordList("left", edit); });
+        QCOMPARE(receipt.status, QString("admitted"));
+        QCOMPARE(receipt.coverage.size(), same ? 1 : 2);
+        QVERIFY(coherent);
+        disconnect(connection);
+        QCOMPARE(displayed(store, same, true).last().toMap().value("id").toString(),
+                 QString("clock"));
+        if (left) {
+            QCOMPARE(removed->size(), 1);
+            QCOMPARE(inserted->size(), 1);
+            QCOMPARE(reset->size(), 0);
+            QCOMPARE(removed->first().at(1).toInt(), 0);
+            QCOMPARE(inserted->first().at(1).toInt(), 1);
+            QVERIFY(staying.isValid());
+            QCOMPARE(staying.row(), 0);
+            QCOMPARE(left->indexOfRow("stay"), 0);
+            QCOMPARE(right->indexOfRow("clock"), 1);
+        }
+        const auto saved = compat::request(store, [&] { return store.save(); });
+        QCOMPARE(saved.status, QString("saved"));
+        QCOMPARE(saved.publications.size(), same ? 1 : 2);
+        ConfigJsonCodec codec;
+        const auto rawLeft =
+            codec.decode(compat::bytes(dir.filePath(same ? "user.json" : "left.json")), "left").raw;
+        const auto rawRight =
+            same ? rawLeft : codec.decode(compat::bytes(dir.filePath("right.json")), "right").raw;
+        const auto source = same ? rawLeft.value("layout").toMap().value("left").toList()
+                                 : rawLeft.value("rows").toList();
+        const auto destination = same ? rawRight.value("layout").toMap().value("right").toList()
+                                      : rawRight.value("rows").toList();
+        QCOMPARE(source.first().toMap().value("unknown").toString(), QString("hidden-data"));
+        QCOMPARE(source.size(), 2);
+        QCOMPARE(destination.last().toMap().value("deprecated").toString(), QString("retain-me"));
+        QVERIFY(!destination.last().toMap().contains("compact"));
+        ConfigStore restarted(o);
+        QTRY_COMPARE(restarted.status(), ConfigStore::Status::Ready);
+        QCOMPARE(displayed(restarted, same).size(), 2); // Includes the preserved hidden row.
+        QCOMPARE(displayed(restarted, same, true).last().toMap(), destination.last().toMap());
+        for (const auto &id : {"left", "right"})
+            QCOMPARE(compat::request(
+                         restarted,
+                         [&] { return restarted.updateRecordListPolicy(id, transferMetadata()); })
+                         .status,
+                     QString("projected"));
+        QCOMPARE(displayed(restarted, same), displayed(store, same));
+        QCOMPARE(displayed(restarted, same, true), displayed(store, same, true));
+    }
+    void transferRefusals_data() {
+        QTest::addColumn<QString>("reason");
+        for (const auto &reason :
+             {"stale-source", "stale-destination", "masked-source", "masked-destination",
+              "read-only", "admission", "bad-index", "bad-address", "bad-policy", "duplicate-id",
+              "late-batch", "unsettled-destination"})
+            QTest::newRow(reason) << QString(reason);
+    }
+    void transferRefusals() {
+        QFETCH(QString, reason);
+        auto o = transferOptions(false);
+        if (reason == "read-only")
+            o.layers[0].sources.removeLast();
+        if (reason.startsWith("masked")) {
+            const bool right = reason.endsWith("destination");
+            o.layers.append(
+                {"runtime",
+                 ConfigLayerKind::Runtime,
+                 ConfigAdmissionPolicy::FieldFallback,
+                 {{"runtime",
+                   {},
+                   {{right ? "right" : "left", QVariantMap{{"rows", QVariantList{}}}}}}},
+                 false});
+        }
+        if (reason == "admission")
+            o.admission = [](const ConfigInput &input) {
+                return input.path == owner(false, true) ? QString("test-reject") : QString();
+            };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        for (const auto &id : {"left", "right"})
+            QCOMPARE(
+                compat::request(
+                    store, [&] { return store.updateRecordListPolicy(id, transferMetadata()); })
+                    .status,
+                QString("projected"));
+        auto edit = transfer(store, false);
+        QString expected = "list-edit-operation";
+        if (reason.startsWith("stale")) {
+            (reason.endsWith("source") ? edit.edits[0].from : edit.edits[0].destination)
+                .generation = 0;
+            expected = "list-edit-conflict";
+        } else if (reason.startsWith("masked"))
+            expected = "list-edit-masked";
+        else if (reason == "read-only")
+            expected = "no-write-route";
+        else if (reason == "admission")
+            expected = "test-reject";
+        else if (reason == "bad-index")
+            edit.edits[0].destination.index = 99;
+        else if (reason == "bad-address")
+            edit.edits[0].destination.listAddress = {{ConfigValueSelector::Kind::Each, {}, 0}};
+        else if (reason == "bad-policy") {
+            edit.edits[0].destination.policyId = "missing";
+            expected = "list-policy-id";
+        } else if (reason == "duplicate-id") {
+            edit.edits[0].from.index = 0;
+            auto initial = displayed(store, false, true);
+            initial.append(QVariantMap{{"id", "clock"}});
+            QVERIFY(store.setUser(owner(false, true), initial).accepted);
+            QTRY_COMPARE(store.info(owner(false, true)).latestInput,
+                         store.info(owner(false, true)).workerCovered);
+            edit = transfer(store, false);
+            expected = "duplicate-row-id";
+        } else if (reason == "late-batch") {
+            auto invalid = edit.edits.first();
+            invalid.destination.index = 99;
+            edit.edits.append(invalid);
+        } else if (reason == "unsettled-destination") {
+            ConfigStoreTestAccess::run(store, [](ConfigWorker &w) { w.holdInputs(true); });
+            QVERIFY(store.setUser(owner(false, true), displayed(store, false, true)).accepted);
+            expected = "list-edit-conflict";
+        }
+        const auto beforeLeft = store.value(owner(false));
+        const auto beforeRight = store.value(owner(false, true));
+        if (reason == "unsettled-destination")
+            ConfigStoreTestAccess::run(store, [](ConfigWorker &w) { w.holdInputs(false); });
+        const auto result =
+            compat::request(store, [&] { return store.editRecordList("left", edit); });
+        QCOMPARE(result.status, QString("failed"));
+        QCOMPARE(result.error.code, expected);
+        QCOMPARE(store.value(owner(false)), beforeLeft);
+        QCOMPARE(store.value(owner(false, true)), beforeRight);
+        QCOMPARE(store.info(owner(false)).latestInput, store.info(owner(false)).workerCovered);
+        QCOMPARE(store.info(owner(false, true)).latestInput,
+                 store.info(owner(false, true)).workerCovered);
+    }
     void disjointPoliciesComposeOnOneLeaf() {
         D row;
         row.type = T::Record;

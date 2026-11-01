@@ -40,6 +40,12 @@ quint64 ConfigStore::editRecordList(const QString &id, const ConfigRecordListEdi
         selector.key = ownString(selector.key);
     for (auto &edit : command.listEdits->edits) {
         edit.field = ownString(edit.field);
+        if (edit.op == ConfigRecordListEdit::Op::Transfer)
+            for (auto *endpoint : {&edit.from, &edit.destination}) {
+                endpoint->policyId = ownString(endpoint->policyId);
+                for (auto &selector : endpoint->listAddress)
+                    selector.key = ownString(selector.key);
+            }
         if (edit.op == ConfigRecordListEdit::Op::Set ||
             edit.op == ConfigRecordListEdit::Op::Insert) {
             const auto captured = ownValue(edit.value);
@@ -51,8 +57,14 @@ quint64 ConfigStore::editRecordList(const QString &id, const ConfigRecordListEdi
     ConfigInput input;
     input.kind = ConfigInput::Kind::Group;
     input.sequence = command.prefix;
-    const auto path = m_policyPaths.value(id);
-    if (m_policyPaths.contains(id)) {
+    QStringList policies{command.policyId};
+    for (const auto &edit : command.listEdits->edits)
+        if (edit.op == ConfigRecordListEdit::Op::Transfer)
+            policies.append({edit.from.policyId, edit.destination.policyId});
+    for (const auto &policyId : policies) {
+        if (!m_policyPaths.contains(policyId))
+            continue;
+        const auto path = m_policyPaths.value(policyId);
         input.pathGenerations[path] = info(path).pathGeneration + 1;
         input.fences[path] = info(path);
     }
@@ -127,47 +139,100 @@ void ConfigWorker::recordListCommand(const ConfigCommand &command) {
         m_acceptOrigin = "projection";
         m_acceptCause = "metadata";
     } else {
-        const auto fence = command.input->fences.value(policy.path);
-        const auto current = m_previous.information.value(policy.path);
-        if (command.listEdits->generation != current.publicationGeneration ||
-            fence.latestInput > fence.workerCovered ||
-            fence.pathGeneration != m_pathGenerations.value(policy.path) ||
-            fence.contentRevision != current.contentRevision) {
-            fail("list-edit-conflict");
-            return;
+        QList<ConfigRecordListEndpoint> endpoints{
+            {command.policyId, command.listEdits->listAddress, command.listEdits->generation, 0}};
+        QSet<ConfigPath> transferPaths;
+        for (const auto &edit : command.listEdits->edits)
+            if (edit.op == ConfigRecordListEdit::Op::Transfer)
+                for (const auto &endpoint : {edit.from, edit.destination}) {
+                    endpoints.append(endpoint);
+                    if (m_listPolicies.contains(endpoint.policyId))
+                        transferPaths.insert(m_listPolicies.value(endpoint.policyId).path);
+                }
+        QMap<ConfigPath, QVariant> values;
+        for (const auto &endpoint : endpoints) {
+            if (!m_listPolicies.contains(endpoint.policyId)) {
+                fail("list-policy-id");
+                return;
+            }
+            const auto path = m_listPolicies.value(endpoint.policyId).path;
+            const auto fence = command.input->fences.value(path);
+            const auto current = m_previous.information.value(path);
+            if (endpoint.generation != current.publicationGeneration ||
+                fence.latestInput > fence.workerCovered ||
+                fence.pathGeneration != m_pathGenerations.value(path) ||
+                fence.contentRevision != current.contentRevision) {
+                fail("list-edit-conflict");
+                return;
+            }
+            const auto quarantine = quarantined(path);
+            if (!quarantine.isEmpty()) {
+                fail(quarantine);
+                return;
+            }
+            if (transferPaths.contains(path)) {
+                const auto info = m_layers->info(path);
+                if (!info.route.valid() || !info.maskedBy.isEmpty()) {
+                    fail(info.route.valid() ? "list-edit-masked" : "no-write-route");
+                    return;
+                }
+            }
+            values[path] = m_layers->unmaskedValue(path).value_or(QVariant());
         }
-        const auto quarantine = quarantined(policy.path);
-        if (!quarantine.isEmpty()) {
-            fail(quarantine);
-            return;
-        }
-        const auto edited = editRecordListValue(
-            policy, m_listMetadata.value(command.policyId),
-            m_layers->unmaskedValue(policy.path).value_or(QVariant()), *command.listEdits);
-        if (!edited.ok()) {
-            fail("list-edit-operation");
-            return;
-        }
-        const auto checked = m_options.schema.validate(policy.path, edited.value);
-        if (!checked.ok()) {
-            fail(checked.errors.first().code);
-            return;
+        QSet<ConfigPath> editedPaths;
+        if (command.listEdits->edits.isEmpty())
+            editedPaths.insert(policy.path);
+        for (const auto &edit : command.listEdits->edits) {
+            if (edit.op == ConfigRecordListEdit::Op::Transfer) {
+                const auto from = m_listPolicies.value(edit.from.policyId);
+                const auto to = m_listPolicies.value(edit.destination.policyId);
+                editedPaths.insert(from.path);
+                editedPaths.insert(to.path);
+                const auto error = transferRecordListValue(
+                    from, m_listMetadata.value(from.policyId), values[from.path], to,
+                    m_listMetadata.value(to.policyId), values[to.path], edit);
+                if (!error.isEmpty()) {
+                    fail(error);
+                    return;
+                }
+            } else {
+                editedPaths.insert(policy.path);
+                auto options = *command.listEdits;
+                options.edits = {edit};
+                const auto edited =
+                    editRecordListValue(policy, m_listMetadata.value(command.policyId),
+                                        values.value(policy.path), options);
+                if (!edited.ok()) {
+                    fail("list-edit-operation");
+                    return;
+                }
+                values[policy.path] = edited.value;
+            }
         }
         auto input = *command.input;
-        input.edits[policy.path] = checked.value;
-        if (m_options.admission) {
-            auto leaf = input;
-            leaf.kind = ConfigInput::Kind::User;
-            leaf.path = policy.path;
-            leaf.value = checked.value;
-            const auto rejection = m_options.admission(leaf);
-            if (!rejection.isEmpty()) {
-                fail(rejection);
+        for (auto it = values.cbegin(); it != values.cend(); ++it) {
+            if (!editedPaths.contains(it.key()))
+                continue;
+            const auto checked = m_options.schema.validate(it.key(), it.value());
+            if (!checked.ok()) {
+                fail(checked.errors.first().code);
                 return;
+            }
+            input.edits[it.key()] = checked.value;
+            if (m_options.admission) {
+                auto leaf = input;
+                leaf.kind = ConfigInput::Kind::User;
+                leaf.path = it.key();
+                leaf.value = checked.value;
+                const auto rejection = m_options.admission(leaf);
+                if (!rejection.isEmpty()) {
+                    fail(rejection);
+                    return;
+                }
             }
         }
         const auto before = *m_layers;
-        const auto written = m_layers->setUser(policy.path, checked.value);
+        const auto written = m_layers->applyEdits(input.edits);
         if (!written.accepted) {
             fail(written.errors.first().code);
             return;
@@ -178,9 +243,13 @@ void ConfigWorker::recordListCommand(const ConfigCommand &command) {
         scheduleAutoSave();
         result.status = "admitted";
         result.maskedBy = m_layers->info(policy.path).maskedBy;
+        for (auto it = input.edits.cbegin(); it != input.edits.cend(); ++it)
+            result.coverage.append({it.key(), m_layers->info(it.key()).route.sourceId,
+                                    m_pathInputs.value(it.key()), m_pathIntents.value(it.key())});
     }
-    result.coverage.append({policy.path, m_layers->info(policy.path).route.sourceId,
-                            m_pathInputs.value(policy.path), m_pathIntents.value(policy.path)});
+    if (command.policyMetadata)
+        result.coverage.append({policy.path, m_layers->info(policy.path).route.sourceId,
+                                m_pathInputs.value(policy.path), m_pathIntents.value(policy.path)});
     post(publish(result));
 }
 } // namespace configqml

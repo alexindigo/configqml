@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-31
+
+### Added
+
+- Declared record-list transfer moves original rows between lists without losing
+  unknown members or persisting normalization defaults. Both endpoint generations
+  are fenced; same-leaf and cross-leaf changes admit atomically in one store
+  publication, with ordinary per-route save outcomes across shards.
+
 ## [0.2.1] — 2026-10-31
 
 ### Fixed
@@ -102,7 +111,8 @@
 - Native/QML quick starts, executable standalone examples, complete shipped
   contracts and technical release gates.
 
-[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/alexindigo/configqml/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/alexindigo/configqml/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/alexindigo/configqml/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/alexindigo/configqml/releases/tag/v0.1.0

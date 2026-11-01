@@ -116,7 +116,8 @@ foreach(library configqml configqml_core)
         message(FATAL_ERROR "Plugin linkage escaped installed prefix: ${links}")
     endif()
 endforeach()
-run(${clean} "@_qmllint@" -I "${qmldir}"
+include("@CMAKE_CURRENT_SOURCE_DIR@/cmake/ConfigQmlLint.cmake")
+run(${clean} "@_qmllint@" ${_configqml_qmllint_args} -I "${qmldir}"
     "${root}/examples/qml/Settings.qml")
 # qml's own Qt runtime is uninstrumented; preload the compiler's ASan runtime only
 # when testing the instrumented installed plugin, not as a library-path fallback.

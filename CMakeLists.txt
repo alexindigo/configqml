@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(configqml VERSION 0.2.1 DESCRIPTION "Layered configuration for Qt" LANGUAGES CXX)
+project(configqml VERSION 0.3.0 DESCRIPTION "Layered configuration for Qt" LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -8,6 +8,7 @@ find_package(Qt6 6.12 REQUIRED COMPONENTS Core)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 include(cmake/ConfigQmlInstallPath.cmake)
+include(cmake/ConfigQmlLint.cmake)
 set(_configqml_include_dir "${CMAKE_INSTALL_INCLUDEDIR}/configqml")
 set(_configqml_cmake_dir "${CMAKE_INSTALL_LIBDIR}/cmake/configqml")
 set(_configqml_data_dir "${CMAKE_INSTALL_DATADIR}/configqml")
@@ -178,9 +179,14 @@ if(BUILD_TESTING)
             add_test(NAME qml_${suite} COMMAND test_qml_${suite})
             set_tests_properties(qml_${suite} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QSG_RHI_BACKEND=software")
             add_test(NAME ${suite}_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
-                -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_${suite}.qml)
+                ${_configqml_qmllint_args} -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_${suite}.qml)
         endforeach()
         get_target_property(_qmllint Qt6::qmllint IMPORTED_LOCATION)
+        add_test(NAME qml_lint_policy COMMAND ${CMAKE_COMMAND}
+            -DQMLLINT=$<TARGET_FILE:Qt6::qmllint>
+            -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/qmllint_policy.cmake)
         get_filename_component(_qt_tools_dir "${_qmllint}" DIRECTORY)
         find_program(_qml NAMES qml qml6 HINTS "${_qt_tools_dir}" REQUIRED NO_DEFAULT_PATH)
         execute_process(COMMAND "${_qtpaths}" --query QT_INSTALL_PLUGINS
@@ -216,7 +222,7 @@ if(BUILD_TESTING)
             QML_EDITOR_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_editors.qml")
         add_test(NAME qml_editors COMMAND test_qml_editors)
         add_test(NAME editors_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
-            -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_editors.qml)
+            ${_configqml_qmllint_args} -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_editors.qml)
         add_executable(test_qml_models tests/test_qml_models.cpp)
         target_link_libraries(test_qml_models PRIVATE configqml::configqml Qt6::Test Qt6::Quick)
         target_compile_definitions(test_qml_models PRIVATE
@@ -225,7 +231,7 @@ if(BUILD_TESTING)
         add_test(NAME qml_models COMMAND test_qml_models)
         set_tests_properties(qml_models PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QSG_RHI_BACKEND=software")
         add_test(NAME models_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
-            -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_models.qml)
+            ${_configqml_qmllint_args} -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_models.qml)
         add_executable(test_qml tests/test_qml.cpp)
         target_link_libraries(test_qml PRIVATE configqml::configqml Qt6::Test)
         target_compile_definitions(test_qml PRIVATE
@@ -257,13 +263,13 @@ if(BUILD_TESTING)
             QML_FILE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_json_files.qml")
         add_test(NAME import_files COMMAND test_import_files)
         add_test(NAME json_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
-            -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_json_files.qml)
+            ${_configqml_qmllint_args} -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_json_files.qml)
         add_test(NAME private_isolation COMMAND ${CMAKE_COMMAND}
             -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
             -DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/private_isolation.cmake)
         add_test(NAME qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
-            -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_facade.qml)
+            ${_configqml_qmllint_args} -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_facade.qml)
     endif()
     add_executable(test_core_link tests/test_core_link.cpp)
     target_link_libraries(test_core_link PRIVATE configqml::core)

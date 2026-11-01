@@ -29,13 +29,20 @@ struct ConfigRecordListMetadata {
     bool ready = false;
     QList<ConfigRecordListEntry> entries;
 };
+struct ConfigRecordListEndpoint {
+    QString policyId;
+    QList<ConfigValueSelector> listAddress;
+    quint64 generation = 0;
+    qsizetype index = 0;
+};
 struct ConfigRecordListEdit {
-    enum class Op { Set, Unset, Remove, Insert, Move };
+    enum class Op { Set, Unset, Remove, Insert, Move, Transfer };
     Op op = Op::Set;
     qsizetype index = 0;
     QString field;
     QVariant value;
     qsizetype to = 0;
+    ConfigRecordListEndpoint from, destination;
 };
 struct ConfigRecordListEditOptions {
     quint64 generation = 0;
@@ -55,6 +62,13 @@ ConfigValueResult editRecordListValue(const ConfigRecordListPolicySpec &policy,
                                       const ConfigRecordListMetadata &metadata,
                                       const QVariant &value,
                                       const ConfigRecordListEditOptions &options);
+// Mutates only detached candidate values; failure leaves both unchanged. Same-leaf
+// callers pass the same QVariant reference for source and destination.
+QString transferRecordListValue(const ConfigRecordListPolicySpec &fromPolicy,
+                                const ConfigRecordListMetadata &fromMetadata, QVariant &fromValue,
+                                const ConfigRecordListPolicySpec &toPolicy,
+                                const ConfigRecordListMetadata &toMetadata, QVariant &toValue,
+                                const ConfigRecordListEdit &edit);
 QString validateRecordListPolicy(const ConfigSchema &schema,
                                  const ConfigRecordListPolicySpec &policy);
 } // namespace configqml

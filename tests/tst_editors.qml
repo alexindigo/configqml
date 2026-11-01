@@ -10,10 +10,11 @@ QtObject {
     property var second: null
     property var receipt: ({})
     property int calls: 0
-    property int observed: store.ready ? store.values.a.n : -1
-    property int other: store.ready ? store.values.b.n : -1
+    readonly property var cfg: store.values
+    property int observed: store.ready ? cfg.a.n : -1
+    property int other: store.ready ? cfg.b.n : -1
     property int preview: editor && editor.values.a.n !== undefined ? editor.values.a.n : -1
-    property int rows: store.ready ? store.values.a.rows.length : -1
+    property int rows: store.ready ? cfg.a.rows.length : -1
     property ConfigStore store: ConfigStore {
         autoSave: false
         schema: ConfigSchema {
@@ -81,8 +82,8 @@ QtObject {
                             function(result) { receipt = result; calls++ })
     }
     function change(): void {
-        store.values.a.n = 17
-        store.values.b.n = 18
+        cfg.a.n = 17
+        cfg.b.n = 18
     }
     function scopes(): bool {
         first = store.scope(["a"])

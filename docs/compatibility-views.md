@@ -104,3 +104,50 @@ Ordinary whole-leaf assignments retain their existing meaning: the whole submitt
 value is explicit user choice, not an inferred diff of a detached display copy.
 Property/model generations install coherently before completion. Unrelated path
 publications do not invalidate a displayed leaf's address generation.
+
+### Raw-preserving transfer (0.3.0)
+
+The same `editRecordList` command accepts a transfer operation:
+
+```js
+store.editRecordList("left", {
+    generation: store.info(["left", "rows"]).publicationGeneration,
+    listAddress: [],
+    edits: [{op: "transfer",
+        from: {policyId: "left", listAddress: [],
+               generation: leftGeneration, index: selectedIndex},
+        to: {policyId: "right", listAddress: [],
+             generation: rightGeneration, index: insertionIndex}}]
+}, callback)
+```
+
+Capture both endpoints from the displayed generation before delayed interaction.
+Each endpoint has exactly `policyId`, concrete `listAddress`, decimal-string
+`generation`, and nonnegative integer `index`. The outer envelope retains its
+existing meaning for local edits; all supplied generations are checked against
+the initial publication before executing the batch. Indices apply sequentially.
+For a transfer back into the same list, the destination is an insertion slot
+**after removal**, including the end slot (the same final-index convention as
+`move`). Other-list insertion uses the existing insert boundary around hidden
+rows. Native callers use `ConfigRecordListEdit::Op::Transfer`, `from` and
+`destination` (`ConfigRecordListEndpoint`); `to` remains the native integer member
+for the existing Move operation.
+
+The worker moves the original unnormalized row, retaining unknown/deprecated
+members and its declared row ID, without inserting housekeeping defaults.
+Hidden sibling rows remain in their original lists. Destination policy metadata
+may change the displayed projection or hide the transferred row. A selection can
+follow its row ID with the destination model's `indexOfRow`; a removed source
+delegate is not reused across models.
+
+Both endpoints must be writable and unmasked. A stale/unsettled endpoint fails
+with `list-edit-conflict`; a masked endpoint with `list-edit-masked`; an unrouted
+endpoint with `no-write-route`. Malformed operations/addresses/indices, unknown
+policies, schema validation, quarantine and native admission failures refuse the
+entire batch. Same-leaf changes are one atomic replacement; different leaves in
+the same store use one worker transaction and coherent publication generation,
+both or neither. Caches install before notifications/completion; list models emit
+their normal keyed remove/insert notifications. Save/autosave remains separate:
+cross-shard persistence reports actual per-route outcomes, including partial
+failure, and is **not** a filesystem transaction. Cross-store transfers are not
+part of this command.

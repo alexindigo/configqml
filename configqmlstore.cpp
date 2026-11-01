@@ -350,7 +350,7 @@ QVariantMap ConfigQmlStore::info(const QStringList &relative) const {
                                                {"sourceId", info.provenance.route.sourceId}}
                                  : QVariantMap{}}};
 }
-QAbstractItemModel *ConfigQmlStore::listModel(const QStringList &queryPath) {
+ConfigListModel *ConfigQmlStore::listModel(const QStringList &queryPath) {
     const auto path = ownPath(m_prefix + queryPath);
     auto *source = m_core ? m_core->listModel(path) : nullptr;
     if (!source) {
@@ -365,7 +365,7 @@ QAbstractItemModel *ConfigQmlStore::listModel(const QStringList &queryPath) {
             [this, path] { reject(path, "read-only-model"); });
     return source;
 }
-QAbstractItemModel *ConfigQmlStore::keyedModel(const QStringList &queryPath) {
+ConfigListModel *ConfigQmlStore::keyedModel(const QStringList &queryPath) {
     const auto path = ownPath(m_prefix + queryPath);
     auto *source = m_core ? m_core->keyedModel(path) : nullptr;
     if (!source) {

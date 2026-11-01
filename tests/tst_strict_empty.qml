@@ -7,10 +7,10 @@ QtObject {
     property string failure: ""
     property bool finished: false
     readonly property bool ready: store.ready
-    readonly property int observedA: store.ready ? store.values.a : -1
-    readonly property int observedB: store.ready ? store.values.b : -1
+    readonly property var cfg: store.values
+    readonly property int observedA: store.ready ? cfg.a : -1
+    readonly property int observedB: store.ready ? cfg.b : -1
     property ConfigStore store: ConfigStore {
-        id: store
         autoSave: false
         evidenceDirectory: root.directory + "/evidence"
         schema: ConfigSchema {
@@ -35,7 +35,7 @@ QtObject {
             failure = "strict-empty-initial";
             return;
         }
-        store.values.a = 3;
+        cfg.a = 3;
         store.save(function(result) {
             if (result.status !== "saved" || root.observedA !== 3 || root.observedB !== 0
                     || result.evidence.length < 3) {

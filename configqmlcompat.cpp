@@ -23,6 +23,18 @@ bool index(const QVariant &value, qsizetype &out) { return qmlIndex(value, out);
 bool selectors(const QVariant &value, QList<ConfigValueSelector> &out, bool each) {
     return qmlSelectors(value, out, each);
 }
+bool endpoint(const QVariant &value, ConfigRecordListEndpoint &out) {
+    const auto record = value.toMap();
+    const auto generation = record.value("generation");
+    bool valid = false;
+    out.generation = generation.toString().toULongLong(&valid);
+    out.policyId = record.value("policyId").toString();
+    return map(value) && exact(record, {"policyId", "listAddress", "generation", "index"}) &&
+           string(record.value("policyId")) && string(generation) && valid &&
+           QString::number(out.generation) == generation.toString() &&
+           selectors(record.value("listAddress"), out.listAddress, false) &&
+           index(record.value("index"), out.index);
+}
 QVariantMap errorMap(const ConfigError &error) {
     return {{"code", error.code}, {"sourceId", error.sourceId}, {"file", error.file},
             {"path", error.path}, {"line", error.line},         {"operation", error.operation}};
@@ -197,8 +209,13 @@ QString ConfigQmlStore::editRecordList(const QString &id, const QJSValue &option
         const auto edit = raw.toMap();
         const auto op = edit.value("op").toString();
         ConfigRecordListEdit command;
-        valid &= map(raw) && string(edit.value("op")) && index(edit.value("index"), command.index);
-        if (op == "set" || op == "unset") {
+        valid &= map(raw) && string(edit.value("op"));
+        if (op == "transfer") {
+            command.op = ConfigRecordListEdit::Op::Transfer;
+            valid &= exact(edit, {"op", "from", "to"}) &&
+                     endpoint(edit.value("from"), command.from) &&
+                     endpoint(edit.value("to"), command.destination);
+        } else if (op == "set" || op == "unset") {
             command.op =
                 op == "set" ? ConfigRecordListEdit::Op::Set : ConfigRecordListEdit::Op::Unset;
             valid &= exact(edit, op == "set" ? QStringList{"op", "index", "field", "value"}
@@ -218,6 +235,8 @@ QString ConfigQmlStore::editRecordList(const QString &id, const QJSValue &option
             valid &= exact(edit, {"op", "index", "to"}) && index(edit.value("to"), command.to);
         } else
             valid = false;
+        if (op != "transfer")
+            valid &= index(edit.value("index"), command.index);
         input.edits.append(command);
     }
     if (!valid) {
