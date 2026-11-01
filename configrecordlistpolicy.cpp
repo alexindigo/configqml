@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configrecordlistpolicy.h"
 #include <QSet>
+#include <functional>
 
 namespace configqml {
 namespace {
@@ -90,16 +91,17 @@ QVariant project(const ConfigRecordListPolicySpec &policy, const ConfigRecordLis
     out.error = "list-policy-value";
     return {};
 }
-ConfigValueResult edit(const ConfigRecordListPolicySpec &policy,
-                       const ConfigRecordListMetadata &metadata, const QVariant &value,
-                       const ConfigRecordListEditOptions &options, qsizetype depth) {
+ConfigValueResult transformList(const ConfigRecordListPolicySpec &policy,
+                                const QList<ConfigValueSelector> &address, const QVariant &value,
+                                const std::function<ConfigValueResult(QVariantList)> &transform,
+                                qsizetype depth = 0) {
     const auto fail = [] {
         return ConfigValueResult{{}, {ConfigDiagnosticBuilder().make({}, "list-edit-operation")}};
     };
-    if (depth < options.listAddress.size()) {
+    if (depth < address.size()) {
         if (depth >= policy.listPath.size())
             return fail();
-        const auto selected = options.listAddress[depth];
+        const auto selected = address[depth];
         const auto expected = policy.listPath[depth];
         if (selected.kind == Selector::Kind::Each ||
             (expected.kind != Selector::Kind::Each && !(selected == expected)))
@@ -108,7 +110,8 @@ ConfigValueResult edit(const ConfigRecordListPolicySpec &policy,
             auto map = value.toMap();
             if (!map.contains(selected.key))
                 return fail();
-            auto result = edit(policy, metadata, map.value(selected.key), options, depth + 1);
+            auto result =
+                transformList(policy, address, map.value(selected.key), transform, depth + 1);
             if (!result.ok())
                 return result;
             map[selected.key] = result.value;
@@ -118,7 +121,8 @@ ConfigValueResult edit(const ConfigRecordListPolicySpec &policy,
             auto list = value.toList();
             if (selected.index < 0 || selected.index >= list.size())
                 return fail();
-            auto result = edit(policy, metadata, list[selected.index], options, depth + 1);
+            auto result =
+                transformList(policy, address, list[selected.index], transform, depth + 1);
             if (!result.ok())
                 return result;
             list[selected.index] = result.value;
@@ -128,62 +132,73 @@ ConfigValueResult edit(const ConfigRecordListPolicySpec &policy,
     }
     if (depth != policy.listPath.size() || !listValue(value))
         return fail();
-    auto raw = value.toList();
-    for (const auto &operation : options.edits) {
-        QList<qsizetype> mapping;
-        QString error;
-        const auto display = normalize(policy, metadata, raw, mapping, error);
-        if (!error.isEmpty() || operation.index < 0 || operation.index > display.size())
-            return fail();
-        if (operation.op == ConfigRecordListEdit::Op::Insert) {
-            if (!mapValue(operation.value))
-                return fail();
-            const auto index = operation.index < mapping.size() ? mapping[operation.index]
-                               : mapping.isEmpty()              ? raw.size()
-                                                                : mapping.last() + 1;
-            raw.insert(index, operation.value);
-            continue;
-        }
-        if (operation.index == mapping.size())
-            return fail();
-        const auto index = mapping[operation.index];
-        switch (operation.op) {
-        case ConfigRecordListEdit::Op::Set:
-        case ConfigRecordListEdit::Op::Unset: {
-            if (operation.field.isEmpty())
-                return fail();
-            auto row = raw[index].toMap();
-            if (operation.op == ConfigRecordListEdit::Op::Set)
-                row[operation.field] = operation.value;
-            else
-                row.remove(operation.field);
-            raw[index] = row;
-            break;
-        }
-        case ConfigRecordListEdit::Op::Remove:
-            raw.removeAt(index);
-            break;
-        case ConfigRecordListEdit::Op::Move: {
-            if (operation.to < 0 || operation.to >= mapping.size())
-                return fail();
-            if (operation.to == operation.index)
-                break;
-            const auto row = raw.takeAt(index);
-            QList<qsizetype> remaining;
-            normalize(policy, metadata, raw, remaining, error);
-            const auto target = operation.to < remaining.size() ? remaining[operation.to]
-                                : remaining.isEmpty()           ? raw.size()
-                                                                : remaining.last() + 1;
-            raw.insert(target, row);
-            break;
-        }
-        case ConfigRecordListEdit::Op::Insert:
-            break;
-        default:
-            return fail();
-        }
-    }
-    return {raw, {}};
+    return transform(value.toList());
+}
+ConfigValueResult edit(const ConfigRecordListPolicySpec &policy,
+                       const ConfigRecordListMetadata &metadata, const QVariant &value,
+                       const ConfigRecordListEditOptions &options) {
+    return transformList(
+        policy, options.listAddress, value, [&](QVariantList raw) -> ConfigValueResult {
+            const auto fail = [] {
+                return ConfigValueResult{
+                    {}, {ConfigDiagnosticBuilder().make({}, "list-edit-operation")}};
+            };
+            for (const auto &operation : options.edits) {
+                QList<qsizetype> mapping;
+                QString error;
+                const auto display = normalize(policy, metadata, raw, mapping, error);
+                if (!error.isEmpty() || operation.index < 0 || operation.index > display.size())
+                    return fail();
+                if (operation.op == ConfigRecordListEdit::Op::Insert) {
+                    if (!mapValue(operation.value))
+                        return fail();
+                    const auto index = operation.index < mapping.size() ? mapping[operation.index]
+                                       : mapping.isEmpty()              ? raw.size()
+                                                                        : mapping.last() + 1;
+                    raw.insert(index, operation.value);
+                    continue;
+                }
+                if (operation.index == mapping.size())
+                    return fail();
+                const auto index = mapping[operation.index];
+                switch (operation.op) {
+                case ConfigRecordListEdit::Op::Set:
+                case ConfigRecordListEdit::Op::Unset: {
+                    if (operation.field.isEmpty())
+                        return fail();
+                    auto row = raw[index].toMap();
+                    if (operation.op == ConfigRecordListEdit::Op::Set)
+                        row[operation.field] = operation.value;
+                    else
+                        row.remove(operation.field);
+                    raw[index] = row;
+                    break;
+                }
+                case ConfigRecordListEdit::Op::Remove:
+                    raw.removeAt(index);
+                    break;
+                case ConfigRecordListEdit::Op::Move: {
+                    if (operation.to < 0 || operation.to >= mapping.size())
+                        return fail();
+                    if (operation.to == operation.index)
+                        break;
+                    const auto row = raw.takeAt(index);
+                    QList<qsizetype> remaining;
+                    normalize(policy, metadata, raw, remaining, error);
+                    const auto target = operation.to < remaining.size() ? remaining[operation.to]
+                                        : remaining.isEmpty()           ? raw.size()
+                                                                        : remaining.last() + 1;
+                    raw.insert(target, row);
+                    break;
+                }
+                case ConfigRecordListEdit::Op::Insert:
+                    break;
+                default:
+                    return fail();
+                }
+            }
+            return {raw, {}};
+        });
 }
 } // namespace
 QString validateRecordListPolicy(const ConfigSchema &schema,
@@ -228,6 +243,51 @@ ConfigValueResult editRecordListValue(const ConfigRecordListPolicySpec &policy,
                                       const ConfigRecordListMetadata &metadata,
                                       const QVariant &value,
                                       const ConfigRecordListEditOptions &options) {
-    return edit(policy, metadata, value, options, 0);
+    return edit(policy, metadata, value, options);
+}
+QString transferRecordListValue(const ConfigRecordListPolicySpec &fromPolicy,
+                                const ConfigRecordListMetadata &fromMetadata, QVariant &fromValue,
+                                const ConfigRecordListPolicySpec &toPolicy,
+                                const ConfigRecordListMetadata &toMetadata, QVariant &toValue,
+                                const ConfigRecordListEdit &operation) {
+    const auto fail = [] {
+        return ConfigValueResult{{}, {ConfigDiagnosticBuilder().make({}, "list-edit-operation")}};
+    };
+    QVariant row;
+    const auto removed = transformList(fromPolicy, operation.from.listAddress, fromValue,
+                                       [&](QVariantList raw) -> ConfigValueResult {
+                                           QList<qsizetype> mapping;
+                                           QString error;
+                                           normalize(fromPolicy, fromMetadata, raw, mapping, error);
+                                           if (!error.isEmpty() || operation.from.index < 0 ||
+                                               operation.from.index >= mapping.size())
+                                               return fail();
+                                           row = raw.takeAt(mapping[operation.from.index]);
+                                           return {raw, {}};
+                                       });
+    if (!removed.ok())
+        return "list-edit-operation";
+    const bool sameLeaf = &fromValue == &toValue;
+    const auto inserted = transformList(
+        toPolicy, operation.destination.listAddress, sameLeaf ? removed.value : toValue,
+        [&](QVariantList raw) -> ConfigValueResult {
+            QList<qsizetype> mapping;
+            QString error;
+            normalize(toPolicy, toMetadata, raw, mapping, error);
+            const auto index = operation.destination.index;
+            if (!error.isEmpty() || index < 0 || index > mapping.size())
+                return fail();
+            const auto target = index < mapping.size() ? mapping[index]
+                                : mapping.isEmpty()    ? raw.size()
+                                                       : mapping.last() + 1;
+            raw.insert(target, row);
+            return {raw, {}};
+        });
+    if (!inserted.ok())
+        return "list-edit-operation";
+    fromValue = sameLeaf ? inserted.value : removed.value;
+    if (!sameLeaf)
+        toValue = inserted.value;
+    return {};
 }
 } // namespace configqml

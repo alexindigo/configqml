@@ -7,9 +7,9 @@ QtObject {
     property string failure: ""
     property bool finished: false
     readonly property bool ready: store.ready
-    readonly property int observed: store.ready ? store.values.good.n : -1
+    readonly property var cfg: store.values
+    readonly property int observed: store.ready ? cfg.good.n : -1
     property ConfigStore store: ConfigStore {
-        id: store
         autoSave: false
         evidenceDirectory: root.directory + "/evidence"
         schema: ConfigSchema {
@@ -33,7 +33,7 @@ QtObject {
             failure = "startup-metadata";
             return;
         }
-        store.values.good.n = 8;
+        cfg.good.n = 8;
         store.save(function(result) {
             if (result.status !== "saved" || root.observed !== 8 || !store.sourceStates[0].quarantined)
                 root.failure = "startup-unrelated-route";

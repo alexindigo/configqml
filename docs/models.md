@@ -6,6 +6,13 @@ same methods. Paths are arrays of opaque segments. An invalid kind/path returns
 null natively and throws a value-free diagnostic in QML. A valid native handle
 can be obtained while Loading and receives its initial rows before Ready.
 
+Both QML-facing methods declare their concrete `ConfigListModel` return type.
+Its existing anonymous QML registration exposes `generation` and `indexOfRow`
+to qmllint as well as at runtime; consumers need no untyped model workaround.
+Runtime-authored setting namespaces still use the documented dynamic `cfg`
+handle. Qt view accessors such as `Repeater.itemAt` return a generic Item, so
+cast known delegates to their declared type before accessing type-specific fields.
+
 ```qml
 readonly property var cfg: store.values
 readonly property var widgets: store.ready ? store.listModel(["bar", "widgets"]) : null

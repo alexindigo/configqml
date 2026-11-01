@@ -61,6 +61,7 @@ private slots:
         const bool overlay = QString(COMPAT_FIXTURE).endsWith("tst_overlay_editor.qml");
         const bool pattern = QString(COMPAT_FIXTURE).endsWith("tst_string_pattern.qml");
         const bool sourceEvents = QString(COMPAT_FIXTURE).endsWith("tst_source_events.qml");
+        const bool recordList = QString(COMPAT_FIXTURE).endsWith("tst_record_list_policy.qml");
         if (sourceEvents)
             QVERIFY(QDir().mkpath(dir.filePath("live")));
         if (retained)
@@ -130,7 +131,7 @@ private slots:
                                   qPrintable(root->property("stage").toString()), 10000);
         QCOMPARE(root->property("failure").toString(), QString());
         QVERIFY(root->property("finished").toBool());
-        if (strictEmpty || overlay || pattern) {
+        if (strictEmpty || overlay || pattern || recordList) {
             if (strictEmpty) {
                 QVERIFY(!QFileInfo::exists(dir.filePath("user.json")));
                 QVERIFY(QFileInfo::exists(dir.filePath("user.json.lock")));
@@ -143,8 +144,20 @@ private slots:
             QVERIFY2(consumer, qPrintable(restarted.errorString()));
             QTRY_VERIFY(consumer->property("ready").toBool());
             QVERIFY(QMetaObject::invokeMethod(consumer.get(), "runRestart"));
+            QTRY_VERIFY(consumer->property("finished").toBool() ||
+                        !consumer->property("failure").toString().isEmpty());
             QCOMPARE(consumer->property("failure").toString(), QString());
             QVERIFY(consumer->property("finished").toBool());
+        }
+        if (recordList) {
+            ConfigJsonCodec codec;
+            const auto raw = codec.decode(compat::bytes(dir.filePath("user.json")), "user").raw;
+            QCOMPARE(raw.value("rows").toList().size(), 1);
+            QCOMPARE(raw.value("rows").toList().first().toMap().value("id").toString(),
+                     QString("hidden"));
+            const auto destination = raw.value("destination").toList();
+            QCOMPARE(destination.size(), 1);
+            QVERIFY(destination.first().toMap().contains("deprecated"));
         }
         if (retained) {
             ConfigJsonCodec codec;
