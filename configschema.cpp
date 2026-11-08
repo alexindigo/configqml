@@ -603,6 +603,10 @@ QVariant closeValue(const ConfigDescriptor &d, const QVariant &value, const Conf
                     bool sourceRoot, bool ignoreOpen, QList<ConfigPath> &removed) {
     if (isNull(value))
         return value;
+    // Invalid collection descriptors are reported by schema validation. Without
+    // exactly one element descriptor there is no safe child traversal.
+    if ((d.type == Type::Map || d.type == Type::List) && d.element.size() != 1)
+        return value;
     if ((d.type == Type::Group || d.type == Type::Record || d.type == Type::Map) &&
         value.metaType().id() == QMetaType::QVariantMap) {
         auto map = value.toMap();

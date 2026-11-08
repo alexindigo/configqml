@@ -36,7 +36,7 @@ ConfigLayers::ConfigLayers(const ConfigSchema &schema, const QList<ConfigLayer> 
                 source.unknownData != ConfigUnknownData::Strict)
                 m_errors.append(
                     m_schema.diagnostics().make(source.prefix, "unknown-data-declaration"));
-            if (d && source.unknownData == ConfigUnknownData::Strict) {
+            if (m_schema.valid() && d && source.unknownData == ConfigUnknownData::Strict) {
                 const auto defaults =
                     valueAt(schema.defaults(), source.prefix).value_or(QVariantMap{});
                 if (closedEmptyRecord(*d) ||
@@ -407,7 +407,8 @@ ConfigOperation ConfigLayers::admit(LayerState &layer, SourceState &state,
     source.bytes = QByteArray(input.bytes.constData(), input.bytes.size());
     source.revision = QByteArray(input.revision.constData(), input.revision.size());
     source.fallbackFor = ownString(input.fallbackFor);
-    if (!projected && source.available && source.unknownData == ConfigUnknownData::Strict) {
+    if (m_schema.valid() && !projected && source.available &&
+        source.unknownData == ConfigUnknownData::Strict) {
         const auto descriptor = m_schema.descriptor(source.prefix);
         if (descriptor) {
             const auto closed = closeConfigValue(*descriptor, source.raw, source.prefix, true);

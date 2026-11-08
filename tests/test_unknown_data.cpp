@@ -67,6 +67,50 @@ ConfigResult edit(ConfigStore &store, const QList<E> &edits) {
 class UnknownDataTest : public QObject {
     Q_OBJECT
 private slots:
+    void invalidSchemaStrictCollections_data() {
+        QTest::addColumn<bool>("map");
+        QTest::addColumn<int>("elements");
+        QTest::addColumn<bool>("json");
+        for (bool map : {false, true})
+            for (int elements : {0, 2})
+                for (bool json : {false, true})
+                    QTest::newRow(qPrintable(
+                        QString("%1-%2-%3").arg(map ? "map" : "list").arg(elements).arg(json)))
+                        << map << elements << json;
+    }
+    void invalidSchemaStrictCollections() {
+        QFETCH(bool, map);
+        QFETCH(int, elements);
+        QFETCH(bool, json);
+        D collection(map ? T::Map : T::List);
+        collection.optional = true;
+        for (int i = 0; i < elements; ++i)
+            collection.element.append(D::leaf(T::Boolean, false));
+        const ConfigSchema invalid(D::group({{"items", collection}}));
+        QVERIFY(!invalid.valid());
+        const QVariant value =
+            map ? QVariant(QVariantMap{{"entry", true}}) : QVariant(QVariantList{true});
+        ConfigSource source{"strict", {}, {{"items", value}}};
+        source.unknownData = ConfigUnknownData::Strict;
+        source.json = json;
+        ConfigLayers layers(invalid, {{"user",
+                                       ConfigLayerKind::File,
+                                       ConfigAdmissionPolicy::FieldFallback,
+                                       {source},
+                                       true}});
+        QVERIFY(!layers.valid());
+        const auto errors = layers.diagnostics("user", "strict");
+        QVERIFY(!errors.isEmpty());
+        QCOMPARE(errors.first().code, QString("invalid-schema"));
+        QCOMPARE(layers.source("user", "strict")->raw, source.raw);
+        QVERIFY(layers.takeUnknownDataDiagnostics().isEmpty());
+        const auto checked = invalid.validate({"items"}, value);
+        QVERIFY(!checked.ok());
+        QCOMPARE(checked.errors.first().code, QString("invalid-schema"));
+        const auto closed = closeConfigValue(collection, value, {"items"});
+        QCOMPARE(closed.value, value);
+        QVERIFY(closed.removed.isEmpty());
+    }
     void failedPublicationDefersWarningsAndReusesEvidence() {
         QTemporaryDir dir;
         const auto path = dir.filePath("user.json");
