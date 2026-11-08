@@ -131,7 +131,25 @@ against its accepted baseline, rebases disjoint foreign edits and preserves
 unknown raw data. Atomic records/lists and namespace resets conflict as whole
 paths; foreign changes to namespace structure cannot be overwritten as disjoint
 leaf edits. Overlap reports failed/path-conflict and retains the input and failed
-attempt. Later saves do not silently retry failed work or recapture it.
+attempt. Later saves, including autosave, attempt remaining work against its captured base;
+unrelated routes can publish and a resolved source no longer poisons later saves.
+
+| # | Conflict policy | Ordinary foreign changes |
+|---|---|---|
+| 1 | `PathIntent` (default) | Merge disjoint paths; refuse overlapping paths. |
+| 2 | `StrictSourcePreimage` | Refuse changed bytes/presence or link/parent identity; exact-byte restoration resolves frozen work. |
+| 3 | `StrictPendingRebase` (0.5.0) | Ordinary unfrozen sources accept fresh foreign data under the lock and apply local-wins leaf intent; evidence and override warnings are required. A frozen source holds even newer edits strictly until resolution. |
+
+Both strict publication policies require `evidenceDirectory`. Retained groups
+never rebase. See [strict-files.md](strict-files.md) for the complete overlap,
+identity, evidence and frozen-attempt contract, independent of `unknownData`.
+Failures before a successful locked read do not freeze pending-rebase work.
+No-effect refusals after that read pin the original capture; actual/uncertain
+effects pin their computed preflight base. Restoring the appropriate captured
+content permits retry. Required files still honor foreign deletion during
+pending-rebase publication; startup and reload presence checks are unchanged.
+Out-of-range native conflict-policy values fail with `conflict-policy`, including
+when startup reading is off.
 
 Publication uses a unique 0600 staging file beside the resolved target, a complete-write
 loop, fsync, fresh identity check, atomic rename, parent-directory fsync and

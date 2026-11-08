@@ -64,6 +64,10 @@ struct ConfigPendingIntent {
     ConfigPath path;
     ConfigFileEdit edit;
     QString reservation;
+    std::optional<ConfigSourcePreimage> frozen = std::nullopt;
+    QVariantMap frozenBase = {};
+    std::optional<ConfigRevision> frozenRebasedOnto = std::nullopt;
+    QList<ConfigPath> frozenOverrides = {};
 };
 struct ConfigRetainedCapture {
     ConfigGroupInfo info;
@@ -135,6 +139,11 @@ private:
                                   const ConfigBackendResult &outcome, bool published = true);
     static void finalizePublicationState(ConfigResult &result);
     bool reloadFiles(const std::optional<ConfigCommand> &command = {});
+    ConfigError acceptFileObservations(const QMap<QString, ConfigBackendResult> &reads,
+                                       const std::optional<ConfigCommand> &command,
+                                       ConfigResult *result, const QString &phase,
+                                       const QString &cause);
+    void freezeOrdinary(const QString &id, const ConfigJsonTransaction &transaction);
     void armWatches();
     void scheduleAutoSave();
     void processGroup(const ConfigCommand &command);
@@ -166,6 +175,7 @@ private:
     QVariantMap canonicalMemory(const QString &id, const QVariantMap &raw, bool migration = false);
     QMap<QString, ConfigPath> m_strictSources;
     QList<ConfigError> m_unknownWarnings;
+    QMap<QByteArray, ConfigEvidenceReference> m_attemptEvidence;
     QMap<QByteArray, QList<ConfigEvidenceReference>> m_unknownEvidence;
     void recordListCommand(const ConfigCommand &command);
     QString quarantined(const ConfigPath &path) const;
@@ -217,6 +227,8 @@ private:
     QMap<QString, QList<ConfigPendingIntent>> m_saveIntents;
     QMap<QString, QVariantMap> m_saveBases;
     QMap<QString, ConfigRevision> m_saveRevisions;
+    QSet<QString> m_saveRebase;
+    bool m_savePublished = false;
     QVariantMap m_activeRaw;
     bool m_unresolvedSave = false;
     bool m_recoveryRead = false;

@@ -185,14 +185,21 @@ QVariantMap qmlResult(const ConfigResult &input, const ConfigDiagnosticBuilder &
                                     {"observationOrder", QString::number(item.observationOrder)}});
     for (auto it = r.masks.cbegin(); it != r.masks.cend(); ++it)
         masks.append(QVariantMap{{"path", it.key()}, {"maskedBy", it.value()}});
-    for (const auto &p : r.publications)
-        publications.append(QVariantMap{{"sourceId", p.sourceId},
-                                        {"success", p.success},
-                                        {"revision", QString::fromLatin1(p.revision.token)},
-                                        {"publicationState", p.state},
-                                        {"file", p.error.file},
-                                        {"phase", p.error.operation},
-                                        {"error", p.error.code}});
+    for (const auto &p : r.publications) {
+        QVariantList overridden;
+        for (const auto &path : p.overriddenPaths)
+            overridden.append(QVariant(path));
+        publications.append(QVariantMap{
+            {"sourceId", p.sourceId},
+            {"success", p.success},
+            {"revision", QString::fromLatin1(p.revision.token)},
+            {"publicationState", p.state},
+            {"file", p.error.file},
+            {"phase", p.error.operation},
+            {"error", p.error.code},
+            {"rebasedOnto", p.rebasedOnto ? QString::fromLatin1(p.rebasedOnto->token) : QString()},
+            {"overriddenPaths", overridden}});
+    }
     return {{"requestId", QString::number(r.requestId)},
             {"storeId", r.storeId},
             {"operation", r.operation},

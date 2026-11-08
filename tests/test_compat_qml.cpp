@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configqmlstore.h"
 #include "compatfixture.h"
+#include "confignumber.h"
 #include <QQmlEngine>
 #include <QQmlComponent>
 #include <QTemporaryDir>
@@ -63,6 +64,12 @@ private slots:
         const bool sourceEvents = QString(COMPAT_FIXTURE).endsWith("tst_source_events.qml");
         const bool recordList = QString(COMPAT_FIXTURE).endsWith("tst_record_list_policy.qml");
         const bool unknownData = QString(COMPAT_FIXTURE).endsWith("tst_unknown_data.qml");
+        const bool pendingRebase = QString(COMPAT_FIXTURE).endsWith("tst_pending_rebase.qml");
+        const bool sharedParents = QString(COMPAT_FIXTURE).endsWith("tst_shared_parents.qml");
+        if (sharedParents)
+            QVERIFY(!QFileInfo::exists(dir.filePath("settings")));
+        if (pendingRebase)
+            compat::put(dir.filePath("user.json"), "{\"a\":1,\"b\":1}");
         if (unknownData)
             compat::put(
                 dir.filePath("user.json"),
@@ -86,6 +93,16 @@ private slots:
         if (retained)
             QVERIFY(obstruction.block()); // After Ready; startup remains a real successful load.
         QVERIFY(QMetaObject::invokeMethod(root.get(), "run"));
+        if (pendingRebase) {
+            // The local edit is queued before this nonparticipating writer, and
+            // StartupSnapshot deliberately leaves discovery to locked preflight.
+            QSaveFile foreign(dir.filePath("user.json"));
+            QVERIFY(foreign.open(QIODevice::WriteOnly));
+            const QByteArray bytes = "{\"a\":7,\"b\":4,\"opaque\":true}";
+            QCOMPARE(foreign.write(bytes), bytes.size());
+            QVERIFY(foreign.commit());
+            QVERIFY(QMetaObject::invokeMethod(root.get(), "foreignWritten"));
+        }
         if (sourceEvents) {
             QElapsedTimer deadline;
             deadline.start();
@@ -136,7 +153,26 @@ private slots:
                                   qPrintable(root->property("stage").toString()), 10000);
         QCOMPARE(root->property("failure").toString(), QString());
         QVERIFY(root->property("finished").toBool());
-        if (strictEmpty || overlay || pattern || recordList || unknownData) {
+        if (strictEmpty || overlay || pattern || recordList || unknownData || pendingRebase ||
+            sharedParents) {
+            if (sharedParents) {
+                for (const auto &file : {"general", "bar", "wallpaper"})
+                    QVERIFY(QFileInfo::exists(dir.filePath(QString("settings/%1.json").arg(file))));
+                const auto read = [&](const QString &name) {
+                    return ConfigJsonCodec()
+                        .decode(compat::bytes(dir.filePath("settings/" + name + ".json")), name)
+                        .raw;
+                };
+                QCOMPARE(read("general")
+                             .value("scaleRatio")
+                             .value<ConfigNumber>()
+                             .real()
+                             .value.toDouble(),
+                         1.74);
+                QCOMPARE(read("bar").value("position").toString(), QString("left"));
+                QCOMPARE(read("wallpaper").value("directory").toString(),
+                         QString("/owner-wallpapers"));
+            }
             if (strictEmpty) {
                 QVERIFY(!QFileInfo::exists(dir.filePath("user.json")));
                 QVERIFY(QFileInfo::exists(dir.filePath("user.json.lock")));

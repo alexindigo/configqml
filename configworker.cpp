@@ -4,6 +4,7 @@
 #include <QElapsedTimer>
 #include "confignumber.h"
 #include <QDataStream>
+#include <QCryptographicHash>
 #include <QIODevice>
 #include <QThread>
 #include <QFileInfo>
@@ -148,8 +149,13 @@ void ConfigWorker::initialize() {
         state.sourceId = file.sourceId;
         state.path = file.path;
         m_sourceStates.append(state);
+        if (file.conflictPolicy != ConfigConflictPolicy::PathIntent &&
+            file.conflictPolicy != ConfigConflictPolicy::StrictSourcePreimage &&
+            file.conflictPolicy != ConfigConflictPolicy::StrictPendingRebase)
+            m_initializationError = "conflict-policy";
         if ((file.startupErrorPolicy == ConfigStartupErrorPolicy::SkipProjectionRetainError ||
-             file.conflictPolicy == ConfigConflictPolicy::StrictSourcePreimage) &&
+             file.conflictPolicy == ConfigConflictPolicy::StrictSourcePreimage ||
+             file.conflictPolicy == ConfigConflictPolicy::StrictPendingRebase) &&
             m_options.evidenceDirectory.isEmpty())
             m_initializationError = "evidence-directory";
         bool found = false;
@@ -531,6 +537,21 @@ QString ConfigWorker::retainObservation(const QString &id, const ConfigBackendRe
                                                                                 : "unavailable";
     observation.bytes = read.bytes;
     observation.revision = read.revision;
+    QByteArray attemptKey;
+    if (command && command->requestId == m_save.requestId && result == &m_saveResult) {
+        attemptKey =
+            QCryptographicHash::hash(encodeMemoryValue({{"source", id},
+                                                        {"phase", phase},
+                                                        {"role", role},
+                                                        {"presence", observation.presence},
+                                                        {"bytesState", observation.bytesState},
+                                                        {"revision", read.revision.token},
+                                                        {"exists", read.revision.exists},
+                                                        {"bytes", read.bytes}}),
+                                     QCryptographicHash::Sha256);
+        if (m_attemptEvidence.contains(attemptKey))
+            return {}; // This attempt already owns the exact retained observation/reference.
+    }
     observation.observationOrder = ++m_observationOrder;
     if (command) {
         observation.requestId =
@@ -545,6 +566,8 @@ QString ConfigWorker::retainObservation(const QString &id, const ConfigBackendRe
     const auto reference = retainEvidence(m_options.evidenceDirectory, observation);
     if (!reference)
         return "evidence-retention";
+    if (!attemptKey.isEmpty())
+        m_attemptEvidence.insert(attemptKey, *reference);
     for (auto &state : m_sourceStates)
         if (state.sourceId == id)
             state.evidence.append(*reference);
@@ -749,14 +772,45 @@ void ConfigWorker::process(const ConfigCommand &command) {
     }
     post(publish(result));
 }
+void ConfigWorker::freezeOrdinary(const QString &id, const ConfigJsonTransaction &transaction) {
+    if (!m_save.groupToken.isEmpty() ||
+        m_files.value(id).conflictPolicy != ConfigConflictPolicy::StrictPendingRebase ||
+        !transaction.preflightRead)
+        return;
+    // No-effect refusals keep P/B, so restoring original content resolves them.
+    // Only a real/uncertain effect captures the foreign base it computed against.
+    const auto base = transaction.published ? transaction.preflightBase : std::nullopt;
+    const auto pinned =
+        base.value_or(ConfigSourcePreimage{m_saveRevisions.value(id), m_saveBytes.value(id)});
+    ConfigJsonCodec codec(m_options.schema.diagnostics().at(m_routes.value(id).prefix));
+    const auto raw =
+        base ? (pinned.revision.exists ? codec.decode(pinned.bytes, id).raw : QVariantMap{})
+             : m_saveBases.value(id);
+    QSet<quint64> attempted;
+    for (const auto &intent : m_saveIntents.value(id))
+        attempted.insert(intent.id);
+    for (auto &intent : m_intents[id])
+        if (attempted.contains(intent.id) && !intent.frozen) {
+            intent.frozen = pinned;
+            intent.frozenBase = raw;
+            if (transaction.published) {
+                intent.frozenRebasedOnto = transaction.rebasedOnto;
+                intent.frozenOverrides = transaction.overriddenPaths;
+            }
+        }
+}
 void ConfigWorker::beginSave(const ConfigCommand &command) {
     m_autoTimer->stop();
+    m_json->beginPublication();
     m_save = command;
     m_saveResult = resultFor(command);
     m_saveIntents.clear();
     m_saveBases.clear();
     m_saveRevisions.clear();
     m_saveBytes.clear();
+    m_attemptEvidence.clear();
+    m_saveRebase.clear();
+    m_savePublished = false;
     m_recoveryRead = false;
     m_recoveryChecked.clear();
     m_recoveryWhole.clear();
@@ -795,6 +849,20 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
         m_saveBytes[id] = command.groupToken.isEmpty()
                               ? m_pendingBytes.value(id, m_sourceBytes.value(id))
                               : m_groups.value(command.groupToken).bytes.value(id);
+        if (command.groupToken.isEmpty() &&
+            m_files.value(id).conflictPolicy == ConfigConflictPolicy::StrictPendingRebase) {
+            bool frozen = false;
+            for (const auto &intent : intents)
+                if (intent.frozen) {
+                    frozen = true;
+                    m_saveBases[id] = intent.frozenBase;
+                    m_saveRevisions[id] = intent.frozen->revision;
+                    m_saveBytes[id] = intent.frozen->bytes;
+                    break;
+                }
+            if (!frozen)
+                m_saveRebase.insert(id);
+        }
         if (command.groupToken.isEmpty())
             for (const auto &path : m_options.schema.leaves()) {
                 quint64 through = 0;
@@ -835,6 +903,7 @@ void ConfigWorker::continueSave() {
             outcome->error = {"readback-mismatch", m_activeSource, "readback"};
         }
         recordPublication(m_saveResult, m_activeSource, *outcome);
+        m_savePublished |= outcome->success;
         if (outcome->success) {
             confirmed(m_activeSource, decodeMemoryValue(outcome->bytes), *outcome);
         } else {
@@ -893,11 +962,26 @@ void ConfigWorker::continueSave() {
                 applyFileEdit(raw, edit);
             edits = {{{}, raw, false}};
         }
+        ConfigJsonBackend::PendingAcceptor acceptPending;
+        if (m_saveRebase.contains(m_activeSource))
+            acceptPending = [this](const ConfigBackendResult &read) {
+                return acceptFileObservations({{m_activeSource, read}}, m_save, &m_saveResult,
+                                              "preflight", "preflight");
+            };
         auto transaction =
             m_json->reconcile(m_activeSource, m_saveBases.value(m_activeSource), edits,
                               ConfigSourcePreimage{m_saveRevisions.value(m_activeSource),
                                                    m_saveBytes.value(m_activeSource)},
-                              canonicalizer(m_activeSource, m_save, &m_saveResult));
+                              canonicalizer(m_activeSource, m_save, &m_saveResult), acceptPending);
+        // Frozen retries retain the original classification, not a new rebase.
+        for (const auto &intent : m_saveIntents.value(m_activeSource))
+            if (intent.frozenRebasedOnto) {
+                transaction.rebasedOnto = intent.frozenRebasedOnto;
+                for (const auto &path : intent.frozenOverrides)
+                    if (!transaction.overriddenPaths.contains(path))
+                        transaction.overriddenPaths.append(path);
+            }
+        m_savePublished |= transaction.published;
         if (transaction.published)
             m_unknownWarnings.append(transaction.warnings);
         const auto &outcome = transaction.outcome;
@@ -909,7 +993,40 @@ void ConfigWorker::continueSave() {
                 retentionError = error;
         }
         recordPublication(m_saveResult, m_activeSource, outcome, transaction.published);
+        if (transaction.rebasedOnto) {
+            if (outcome.success && !transaction.published)
+                m_saveResult.publications.append(
+                    {m_activeSource, true, outcome.revision, "known", {}});
+            if (!m_saveResult.publications.isEmpty() &&
+                m_saveResult.publications.last().sourceId == m_activeSource) {
+                auto &fact = m_saveResult.publications.last();
+                fact.rebasedOnto = transaction.rebasedOnto;
+                if (transaction.published)
+                    fact.overriddenPaths = transaction.overriddenPaths;
+            }
+            if (transaction.published) {
+                const auto warn = [&](const ConfigPath &path, const QString &code) {
+                    auto warning = m_options.schema.diagnostics().error(
+                        m_options.schema.diagnostics().make(path, code), m_activeSource, "rebase",
+                        m_json->path(m_activeSource));
+                    for (const auto &reference : m_saveResult.evidence)
+                        if (reference.sourceId == m_activeSource && reference.role == "foreign")
+                            warning.evidence.append(reference);
+                    m_unknownWarnings.append(warning);
+                };
+                for (qsizetype i = 0; i < qMin(qsizetype(64), transaction.overriddenPaths.size());
+                     ++i)
+                    warn(transaction.overriddenPaths[i], "foreign-value-overridden");
+                if (transaction.overriddenPaths.size() > 64)
+                    warn(m_routes.value(m_activeSource).prefix,
+                         "foreign-value-overridden-truncated");
+            }
+        }
         if (outcome.success) {
+            if (transaction.preflightBase && transaction.rebasedOnto) {
+                m_saveRevisions[m_activeSource] = transaction.preflightBase->revision;
+                m_saveBytes[m_activeSource] = transaction.preflightBase->bytes;
+            }
             confirmed(m_activeSource, transaction.raw, outcome);
             const auto retention = observeSource(m_activeSource, outcome, {}, false);
             if (!retention.isEmpty()) {
@@ -929,6 +1046,8 @@ void ConfigWorker::continueSave() {
             m_saveResult.status = "failed";
             m_saveResult.error = {retentionError, m_activeSource, "readback"};
         }
+        if (!outcome.success || !retentionError.isEmpty())
+            freezeOrdinary(m_activeSource, transaction);
         armWatches();
         continueSave();
         return;
@@ -965,8 +1084,9 @@ void ConfigWorker::finalizePublicationState(ConfigResult &result) {
         result.publicationState = "partial";
 }
 void ConfigWorker::finishSave() {
+    m_json->endPublication();
     if (m_saveResult.status.isEmpty())
-        m_saveResult.status = m_saveResult.publications.isEmpty() ? "nothing_to_save" : "saved";
+        m_saveResult.status = m_savePublished ? "saved" : "nothing_to_save";
     if (m_saveResult.status != "failed" && m_save.groupToken.isEmpty() &&
         m_saveResult.excludedGroups.isEmpty())
         m_saveResult.coveredRevisions = m_revisions;
@@ -1113,15 +1233,7 @@ void ConfigWorker::armWatches() {
             m_watcher->addPath(path);
 }
 bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
-    std::optional<ConfigResult> result;
-    if (command) {
-        result = resultFor(*command);
-        result->status = "reloaded";
-    }
-    QList<ConfigError> errors;
-    QMap<QString, QList<ConfigSource>> replacements;
-    QMap<QString, QList<ConfigSource>> diskReplacements;
-    bool changed = false;
+    QMap<QString, ConfigBackendResult> reads;
     for (auto it = m_files.cbegin(); it != m_files.cend(); ++it) {
         const auto sourcePrefix = m_fileRoutes.value(it.key()).prefix;
         if (!m_reloadSelection.isEmpty()) {
@@ -1141,19 +1253,43 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
         if (!command && (it->watchMode != ConfigWatchMode::Live || !m_json->changed(it.key())))
             continue;
         auto id = m_json->submit({ConfigBackendRequest::Operation::Read, it.key(), {}, {}});
-        const auto read = *m_json->take(id);
+        reads[it.key()] = *m_json->take(id);
+    }
+    std::optional<ConfigResult> result;
+    if (command) {
+        result = resultFor(*command);
+        result->status = "reloaded";
+    }
+    const auto error = acceptFileObservations(reads, command, result ? &*result : nullptr, "read",
+                                              command ? "reload" : "watch");
+    armWatches();
+    return error.empty();
+}
+ConfigError ConfigWorker::acceptFileObservations(const QMap<QString, ConfigBackendResult> &reads,
+                                                 const std::optional<ConfigCommand> &command,
+                                                 ConfigResult *result, const QString &phase,
+                                                 const QString &cause) {
+    // Flush earlier own routes before installing this source's foreign facts.
+    if (cause == "preflight" && !m_acceptOrigin.isEmpty())
+        post(publish());
+    QList<ConfigError> errors;
+    QMap<QString, QList<ConfigSource>> replacements, diskReplacements;
+    QMap<QString, ConfigSource> admitted;
+    bool changed = false;
+    for (auto it = reads.cbegin(); it != reads.cend(); ++it) {
+        const auto &read = it.value();
+        const auto file = m_files.value(it.key());
         const auto route = m_fileRoutes.value(it.key());
         ConfigJsonCodec codec(m_options.schema.diagnostics().at(route.prefix));
         auto decoded =
             read.revision.exists ? codec.decode(read.bytes, it.key()) : ConfigDecodeResult{};
         ConfigError error = !read.success ? read.error : decoded.error;
         const auto retention = observeSource(it.key(), read, error, false);
-        const auto retained =
-            retainObservation(it.key(), read, "read", read.success ? "foreign" : "late", command,
-                              result ? &*result : nullptr);
+        const auto retained = retainObservation(it.key(), read, phase,
+                                                read.success ? "foreign" : "late", command, result);
         if (!retention.isEmpty() || !retained.isEmpty())
             error = {"evidence-retention", it.key(), "read"};
-        if (!read.revision.exists && !it->optional && error.empty())
+        if (!read.revision.exists && !file.optional && cause != "preflight" && error.empty())
             error = {"required-file-missing", it.key(), "read"};
         if (!error.empty()) {
             error.file = m_json->path(it.key());
@@ -1187,28 +1323,27 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
                     {"migration-pending-intent", it.key(), "migration", m_json->path(it.key())});
                 continue;
             }
-            // Reuse the same transform/backup/publication owner on every load,
-            // including explicit and watched reloads. No facade migration path.
-            m_options.layers = {{route.layerId,
-                                 ConfigLayerKind::File,
-                                 ConfigAdmissionPolicy::FieldFallback,
-                                 {source},
-                                 m_routes.contains(it.key())}};
-            const bool migrated = migrateSources();
-            if (migrated)
-                source = m_options.layers.first().sources.first();
-            else
-                errors.append(
-                    {m_initializationError, it.key(), "migration", m_json->path(it.key())});
-            m_initializationError.clear();
-            m_options.layers.clear();
-            if (!migrated)
-                continue;
+            if (cause != "preflight") {
+                // Reuse the same transform/backup/publication owner on every load,
+                // including explicit and watched reloads. No facade migration path.
+                m_options.layers = {{route.layerId,
+                                     ConfigLayerKind::File,
+                                     ConfigAdmissionPolicy::FieldFallback,
+                                     {source},
+                                     m_routes.contains(it.key())}};
+                const bool migrated = migrateSources();
+                if (migrated)
+                    source = m_options.layers.first().sources.first();
+                else
+                    errors.append(
+                        {m_initializationError, it.key(), "migration", m_json->path(it.key())});
+                m_initializationError.clear();
+                m_options.layers.clear();
+                if (!migrated)
+                    continue;
+            }
         }
-        const ConfigRevision admittedRevision{source.exists, source.revision};
-        m_json->confirm(it.key(), admittedRevision);
-        if (!m_dirty.contains(it.key()))
-            m_baselines[it.key()] = source.raw;
+        admitted[it.key()] = source;
         diskReplacements[route.layerId].append(source);
         for (const auto &edit : pendingEdits(it.key()))
             applyFileEdit(source.raw, edit);
@@ -1216,13 +1351,21 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
             source.exists = true;
         source.localIntent = !m_intents.value(it.key()).isEmpty();
         replacements[route.layerId].append(source);
-        m_revisions[it.key()] = admittedRevision;
-        m_sourceBytes[it.key()] = source.bytes;
         changed = true;
     }
-    m_diskLayers->replaceAllSources(diskReplacements);
+    std::optional<ConfigLayers> diskCandidate, candidate;
+    auto *disk = m_diskLayers.get(), *display = m_layers.get();
+    if (cause == "preflight") {
+        diskCandidate = *disk;
+        candidate = *display;
+        disk = &*diskCandidate;
+        display = &*candidate;
+    }
+    const auto diskAdmission = disk->replaceAllSources(diskReplacements);
+    bool admissionRejected = !diskAdmission.accepted;
     if (!replacements.isEmpty()) {
-        const auto admission = m_layers->replaceAllSources(replacements);
+        const auto admission = display->replaceAllSources(replacements);
+        admissionRejected |= !admission.accepted;
         if (!admission.accepted && !admission.errors.isEmpty()) {
             const auto diagnostic = admission.errors.first();
             QString id;
@@ -1233,24 +1376,49 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
             errors.append(m_options.schema.diagnostics().error(diagnostic, id, "admission",
                                                                m_json->path(id)));
         }
+        if (cause == "preflight" && admission.accepted && !diskAdmission.accepted &&
+            !diskAdmission.errors.isEmpty()) {
+            const auto diagnostic = diskAdmission.errors.first();
+            const auto id = reads.firstKey(); // Preflight admits one locked source.
+            errors.append(m_options.schema.diagnostics().error(diagnostic, id, "admission",
+                                                               m_json->path(id)));
+        }
     }
-    armWatches();
+    // ConfigLayers keeps rejected raw observations/diagnostics separately from
+    // last-good admission. Preserve both on reload, including its source witness.
+    // Preflight can retain rejection evidence but cannot accept it as a rebase.
+    if (cause != "preflight" || !admissionRejected) {
+        if (cause == "preflight") {
+            *m_diskLayers = std::move(*diskCandidate);
+            *m_layers = std::move(*candidate);
+        }
+        for (auto it = admitted.cbegin(); it != admitted.cend(); ++it) {
+            const ConfigRevision revision{it->exists, it->revision};
+            m_json->confirm(it.key(), revision);
+            if (!m_dirty.contains(it.key()))
+                m_baselines[it.key()] = it->raw;
+            m_revisions[it.key()] = revision;
+            m_sourceBytes[it.key()] = it->bytes;
+        }
+    } else
+        changed = false;
     if (result && !errors.isEmpty()) {
         result->status = "failed";
         result->error = errors.first();
     }
-    if (changed || result || !errors.isEmpty()) {
+    if (changed || (result && cause == "reload") || !errors.isEmpty()) {
         if (changed) {
             m_acceptOrigin = "external";
-            m_acceptCause = command ? "reload" : "watch";
+            m_acceptCause = cause;
         }
-        post(publish(result));
+        post(publish(result && cause == "reload" ? std::optional<ConfigResult>(*result)
+                                                 : std::nullopt));
     }
     for (const auto &error : errors) {
         ConfigWorkerPacket packet;
         packet.sourceError = error;
         post(packet);
     }
-    return errors.isEmpty();
+    return errors.isEmpty() ? ConfigError{} : errors.first();
 }
 } // namespace configqml

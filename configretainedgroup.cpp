@@ -219,8 +219,17 @@ QList<ConfigPendingIntent> ConfigWorker::eligibleIntents(const QString &source,
             if (m_groups.value(command.groupToken).intents.value(source).contains(intent.id))
                 result.append(intent);
         } else if (intent.input <= command.prefix && intent.reservation.isEmpty() &&
-                   (intent.edit.pruneEmpty || !reserved(intent.path)))
-            result.append(intent);
+                   (intent.edit.pruneEmpty || !reserved(intent.path))) {
+            bool capturedCleanup = false;
+            if (intent.edit.pruneEmpty &&
+                m_files.value(source).conflictPolicy == ConfigConflictPolicy::StrictPendingRebase)
+                for (const auto &capture : m_groups)
+                    capturedCleanup |= capture.info.state != "succeeded" &&
+                                       capture.info.state != "released" &&
+                                       capture.intents.value(source).contains(intent.id);
+            if (!capturedCleanup)
+                result.append(intent);
+        }
     }
     return result;
 }
@@ -234,14 +243,16 @@ void ConfigWorker::recordPersistentEdit(const ConfigRoute &route, const ConfigPa
         m_pendingBytes[route.sourceId] = m_sourceBytes.value(route.sourceId);
     }
     const auto relative = path.mid(route.prefix.size());
+    const auto descriptor = m_options.schema.descriptor(path);
     auto append = [&](const ConfigPath &absolute, const std::optional<QVariant> &v,
                       const std::optional<ConfigPath> &fence, bool prune) {
         ConfigFileEdit edit{absolute.mid(route.prefix.size()), v, ifMissing};
         edit.fencePath = fence;
         edit.pruneEmpty = prune;
+        edit.namespaceReset =
+            !value && descriptor && descriptor->type == ConfigDescriptor::Type::Group;
         m_intents[route.sourceId].append({++m_nextIntent, input, absolute, edit, {}});
     };
-    const auto descriptor = m_options.schema.descriptor(path);
     if (!value && descriptor && descriptor->type == ConfigDescriptor::Type::Group) {
         const auto source = before.source(route.layerId, route.sourceId);
         const auto raw = source ? valueAt(source->raw, relative).value_or(QVariantMap{})
@@ -302,6 +313,14 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
             ids.insert(intent.id);
     auto &remaining = m_intents[id];
     remaining.removeIf([&](const ConfigPendingIntent &intent) { return ids.contains(intent.id); });
+    for (auto &intent : remaining)
+        if (intent.frozen && sameSourcePreimage(*intent.frozen, {m_saveRevisions.value(id),
+                                                                 m_saveBytes.value(id)})) {
+            // Correlated own descendants may advance a frozen ordinary witness,
+            // just as retained captures do; foreign rebases cannot advance it.
+            intent.frozen = ConfigSourcePreimage{outcome.revision, outcome.bytes};
+            intent.frozenBase = raw;
+        }
     m_baselines[id] = raw;
     m_revisions[id] = outcome.revision;
     m_pendingRevisions[id] = outcome.revision;
@@ -309,6 +328,11 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
     m_pendingBytes[id] = outcome.bytes;
     for (auto &capture : m_groups)
         if (capture.bases.contains(id)) {
+            if (m_files.value(id).conflictPolicy == ConfigConflictPolicy::StrictPendingRebase &&
+                capture.info.groupToken != m_save.groupToken &&
+                !sameSourcePreimage({capture.revisions.value(id), capture.bytes.value(id)},
+                                    {m_saveRevisions.value(id), m_saveBytes.value(id)}))
+                continue; // An ordinary rebase cannot launder foreign data into a capture.
             if (capture.info.groupToken == m_save.groupToken)
                 capture.confirmedRevisions[id] = outcome.revision;
             capture.bases[id] = raw;
@@ -536,11 +560,18 @@ void ConfigWorker::retainedGroupCommand(const ConfigCommand &command) {
                     if (!intent.edit.pruneEmpty)
                         intent.reservation = token;
                     capture.intents[source.key()].insert(intent.id);
-                    capture.bases[source.key()] = m_baselines.value(source.key());
-                    capture.revisions[source.key()] =
-                        m_pendingRevisions.value(source.key(), m_revisions.value(source.key()));
-                    capture.bytes[source.key()] =
-                        m_pendingBytes.value(source.key(), m_sourceBytes.value(source.key()));
+                    if (!capture.bases.contains(source.key()) || intent.frozen) {
+                        capture.bases[source.key()] =
+                            intent.frozen ? intent.frozenBase : m_baselines.value(source.key());
+                        capture.revisions[source.key()] =
+                            intent.frozen ? intent.frozen->revision
+                                          : m_pendingRevisions.value(
+                                                source.key(), m_revisions.value(source.key()));
+                        capture.bytes[source.key()] =
+                            intent.frozen ? intent.frozen->bytes
+                                          : m_pendingBytes.value(source.key(),
+                                                                 m_sourceBytes.value(source.key()));
+                    }
                 }
         for (const auto &path : leaves) {
             const auto id = m_layers->info(path).route.sourceId;

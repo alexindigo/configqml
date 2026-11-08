@@ -76,8 +76,20 @@ Save/flush/close results have exactly three statuses:
 Results include request/store identity, operation, input prefix, confirmed covered
 revisions, per-source publication outcomes, known/uncertain/partial state and a
 structured value-free error. An uncertain route is never called saved. Partial
-success remains failed, with each route's actual state. Later save/flush cannot
-silently retry or erase a retained rejection or failed attempt.
+success remains failed, with each route's actual state. Later saves, including
+autosave, attempt remaining source work against its capture without recapturing it;
+resolved publication failures do not poison later prefixes. Prior receipts remain
+evidence. Retained-group retries still require the explicit group API.
+Rejected input receipts remain in failure history, but cannot mark later
+publishing saves failed. Only terminal worker loss propagates to queued saves.
+
+With `StrictPendingRebase`, route outcomes additionally expose `rebasedOnto`
+(the foreign revision string, empty if absent) and `overriddenPaths` (an array of
+sanitized segment-array paths). A covered no-write rebase can include a route
+fact while returning `nothing_to_save`. Nonfatal local-wins notices use
+`sourceWarning` with phase `rebase`, code `foreign-value-overridden`, path and
+foreign evidence references; at most 64 plus one truncation notice. Preflight
+discovery publishes an `external` source generation before the save's own one.
 
 `save()` captures the reported sequence prefix, never the facade graph. A→B→A
 across save boundaries produces three ordered captures/publications, not one
@@ -88,7 +100,7 @@ delivered in request order. The callback is detached before consumer reentry.
 ingress at that prefix, flushes it, then releases the worker after ordered
 completion. Later writes fail visibly. Read-only stores never write on these
 requests. `x=1; close()` publishes x=1; empty flush returns nothing-to-save; flush
-after a failed save returns failed and retains evidence. Memory backend delays
+after an unresolved failed save returns failed and retains evidence. Memory backend delays
 hold the request queue without blocking the GUI. Unexpected worker exceptions or
 protocol failure stop persistence visibly; the owner is never recreated/replayed.
 
