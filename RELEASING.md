@@ -68,8 +68,13 @@ BUILD_TESTING defaults off; packaging must not require Qt Test or Quick.
 
 ## Gate 3 — Arch package
 
-The host transport creates `qt6-configqml-0.4.0.tar.gz` from the release commit
-using `git archive --format=tar.gz --prefix=configqml-0.4.0/ <release-commit>`.
+The host transport creates `qt6-configqml-0.4.0.tar.gz` from the release commit:
+
+```sh
+git archive --format=tar.gz --prefix=configqml-0.4.0/ \
+  --output=qt6-configqml-0.4.0.tar.gz <release-commit>
+```
+
 Archiving/delivery is read/copy work only. It delivers that archive and the
 candidate recipe to the guest's `packaging/`, recording the archive SHA256.
 The local filename matches the recipe's downloaded filename; makepkg uses it
