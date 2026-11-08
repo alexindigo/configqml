@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-08
+
+### Added
+
+- Record-list match addresses, schema-typed container creation, raw list copy
+  with display-equivalence checks, identity ancestor policies and per-operation
+  targets. Creation and cross-leaf edits share the existing atomic admission.
+- Per-source `unknownData: Preserve | Strict` and Record-only `open` metadata.
+  Strict strips unknown data at admission, refuses undeclared members on writes,
+  and canonicalizes the next normal publication with warnings and retained
+  original-file evidence. Preserve remains the default with unchanged writes.
+- QML `sourceWarning.evidence` and native `ConfigError::evidence` expose retained
+  original-byte references for Strict publication removals. Open members remain
+  excluded from portable profiles.
+
+### Changed
+
+- Rebuild native dependents for pre-1.0 ABI changes to `ConfigSource`,
+  `ConfigDescriptor`, `ConfigError`, `ConfigValueSelector`, record-list structs
+  and JSON transactions. `ConfigEvidenceReference` is now declared in
+  `configbackend.h`.
+
 ## [0.3.0] — 2026-10-31
 
 ### Added
@@ -111,7 +133,8 @@
 - Native/QML quick starts, executable standalone examples, complete shipped
   contracts and technical release gates.
 
-[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/alexindigo/configqml/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/alexindigo/configqml/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/alexindigo/configqml/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/alexindigo/configqml/compare/v0.1.0...v0.2.0

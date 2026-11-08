@@ -238,9 +238,9 @@ for the full operation lifetime, not borrow a consumer which may be destroyed.
 
 ## Verification
 
-Build/tests execute only in agora VM 806 dev-niri-configqml, workspace
-`/home/tester/Projects/cqm3`, through `/home/user/.local/bin/agora-niri ssh 806`.
-Set TMPDIR to that workspace's tmp and LANG=C.UTF-8. Full CTest includes native
+Build/tests execute only in the dedicated feature VM named by
+[RELEASING.md](../RELEASING.md). Set TMPDIR to that workspace's disk-backed tmp
+and LANG=C.UTF-8. Full CTest includes native
 restart/raw-preservation, real independent writer processes, faulty publication,
 watch/delete/recreate/retarget, conditional presence, 29-shard echo/fan-out and
 GUI-event timing coverage. Process tests retain each child's status, exit code,

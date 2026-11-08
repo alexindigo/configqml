@@ -1,27 +1,34 @@
 # Releasing configqml — technical gates only
 
 Run these gates before handing a candidate to the release coordinator. Release
-publication is a separate owner operation. All project commands below run inside
-agora VM **806 `dev-niri-configqml`**, via `/home/user/.local/bin/agora-niri ssh 806`,
-workspace `/home/tester/Projects/cqm8`. Set `TMPDIR=$PWD/tmp` and create that
-disk-backed directory first. Wrap each guest command in `timeout`; do not fall
-back to a physical host if the guest is unavailable.
+publication is a separate owner operation. All builds and tests below run inside
+an isolated test VM. Prepare a fresh per-release VM from a clean image, install
+the exact Qt version and build tools there, and record the guest name, hosting
+machine, disk-backed workspace and access route with the candidate's evidence.
+The Arch package gate requires an Arch Linux x86_64 guest. If the selected VM is
+unavailable, stop rather than falling back to the physical host.
+
+The commands assume an active session inside that test VM, in its disk-backed
+workspace, with the candidate delivered by `git archive` into `source/`.
+Set `TMPDIR=$PWD/tmp` and create that directory first. Use a fresh workspace for
+each candidate. Source archiving, delivery and checksum collection may run on
+the host as read/copy work; compilation and runtime verification stay in the VM.
 
 ## Gate 1 — full Release and sanitizer suites
 
 From the guest workspace with the candidate delivered into `source/`:
 
 ```sh
-cmake -S source -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
-cmake --build build-release --parallel 4
-ctest --test-dir build-release --output-on-failure --no-tests=error
-cmake -S source -B build-san -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
+timeout 1800 cmake -S source -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+timeout 1800 cmake --build build-release --parallel 4
+timeout 1800 ctest --test-dir build-release --output-on-failure --no-tests=error
+timeout 1800 cmake -S source -B build-san -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
   -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
   -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
   -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
-cmake --build build-san --parallel 4
+timeout 1800 cmake --build build-san --parallel 4
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
-  ctest --test-dir build-san --output-on-failure --no-tests=error
+  timeout 1800 ctest --test-dir build-san --output-on-failure --no-tests=error
 ```
 
 Require nonzero test discovery and 100% passed, no sanitizer findings. The
@@ -47,37 +54,46 @@ gate when only installation logic changed.
 ## Gate 2 — Core-only distribution
 
 ```sh
-cmake -S source -B build-core -G Ninja -DCMAKE_BUILD_TYPE=Release \
+timeout 1800 cmake -S source -B build-core -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCONFIGQML_BUILD_QML=OFF -DCMAKE_INSTALL_PREFIX="$PWD/core-prefix"
-cmake --build build-core --parallel 4
-cmake --install build-core
-cmake -S source/examples/native -B core-consumer -G Ninja -DCMAKE_PREFIX_PATH="$PWD/core-prefix"
-cmake --build core-consumer --parallel 2
-core-consumer/configqml-native
+timeout 1800 cmake --build build-core --parallel 4
+timeout 1800 cmake --install build-core
+timeout 1800 cmake -S source/examples/native -B core-consumer -G Ninja -DCMAKE_PREFIX_PATH="$PWD/core-prefix"
+timeout 1800 cmake --build core-consumer --parallel 2
+timeout 60 core-consumer/configqml-native
 ```
 
-Require `CONFIGQML_NATIVE_OK`, exit 0, no QtQml imported target or dependency.
+Require `CONFIGQML_NATIVE_OK 0.4.0`, exit 0, no QtQml imported target or dependency.
 BUILD_TESTING defaults off; packaging must not require Qt Test or Quick.
 
 ## Gate 3 — Arch package
 
-Create `qt6-configqml-0.3.0.tar.gz` from the release commit using
-`git archive --prefix=configqml-0.3.0/ <release-commit>`, deliver it and the
-candidate recipe to the guest's `packaging/`, and record the archive SHA256.
+The host transport creates `qt6-configqml-0.4.0.tar.gz` from the release commit
+using `git archive --format=tar.gz --prefix=configqml-0.4.0/ <release-commit>`.
+Archiving/delivery is read/copy work only. It delivers that archive and the
+candidate recipe to the guest's `packaging/`, recording the archive SHA256.
 The local filename matches the recipe's downloaded filename; makepkg uses it
 without a network fetch. In that guest directory:
 
 ```sh
-makepkg --printsrcinfo > generated.SRCINFO
-diff -u .SRCINFO generated.SRCINFO
-makepkg --cleanbuild --noconfirm
-namcap PKGBUILD qt6-configqml-0.3.0-1-x86_64.pkg.tar.zst
-sudo pacman -U --noconfirm qt6-configqml-0.3.0-1-x86_64.pkg.tar.zst
+timeout 60 makepkg --printsrcinfo > generated.SRCINFO
+timeout 60 diff -u .SRCINFO generated.SRCINFO
+timeout 1800 makepkg --cleanbuild --noconfirm
+timeout 120 sudo pacman -U --noconfirm qt6-configqml-0.4.0-1-x86_64.pkg.tar.zst
+timeout 60 namcap PKGBUILD qt6-configqml-0.4.0-1-x86_64.pkg.tar.zst
+timeout 60 pacman -Qkk qt6-configqml
 env -u QML_IMPORT_PATH -u QML2_IMPORT_PATH -u LD_LIBRARY_PATH QT_FORCE_STDERR_LOGGING=1 \
-  /usr/lib/qt6/bin/qml -a core ../source/examples/qml/Settings.qml
+  timeout 60 /usr/lib/qt6/bin/qml -a core ../source/examples/qml/Settings.qml
+env -u CMAKE_PREFIX_PATH -u configqml_DIR -u LD_LIBRARY_PATH \
+  timeout 1800 cmake -S ../source/examples/native -B ../package-native -G Ninja
+timeout 1800 cmake --build ../package-native --parallel 2
+timeout 60 ../package-native/configqml-native
+timeout 60 ldd ../package-native/configqml-native
 ```
 
-Require clean namcap output and `CONFIGQML_QML_OK`, exit 0. Check package headers,
+Require clean namcap output, 0 altered package files, `CONFIGQML_QML_OK` and
+`CONFIGQML_NATIVE_OK 0.4.0`, exit 0, with native libraries from `/usr/lib`.
+Check package headers,
 CMake exports, libraries, QML metadata/plugin and both license texts. The external
 packaging checkout needs the published archive's real checksum before submission.
 Rebuild on Qt minor version changes because of the isolated private API.
