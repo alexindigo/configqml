@@ -79,6 +79,7 @@ remain the native schema contract.
 Native CTest covers ordered exact-prefix persistence, held effects/replies,
 ordinary and terminal rejection, masks, read-only capability, partial/uncertain
 outcomes, context cancellation, emitter destruction at each native boundary,
-thread affinity, timings and Core-only linkage. Builds and tests run in agora
-VM 806 `dev-niri-configqml` via `agora-niri`, with disk-backed TMPDIR. Run the
-complete suite in Debug with `QT_FATAL_WARNINGS=1`, and the sanitizer build too.
+thread affinity, timings and Core-only linkage. Builds and tests use the dedicated
+feature VM named by [RELEASING.md](../RELEASING.md), with disk-backed TMPDIR.
+Run the complete suite in Debug with `QT_FATAL_WARNINGS=1`, and the sanitizer
+build too.

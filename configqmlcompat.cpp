@@ -21,19 +21,25 @@ bool map(const QVariant &value) { return value.metaType().id() == QMetaType::QVa
 bool list(const QVariant &value) { return value.metaType().id() == QMetaType::QVariantList; }
 bool index(const QVariant &value, qsizetype &out) { return qmlIndex(value, out); }
 bool selectors(const QVariant &value, QList<ConfigValueSelector> &out, bool each) {
-    return qmlSelectors(value, out, each);
+    return qmlSelectors(value, out, each, !each);
 }
-bool endpoint(const QVariant &value, ConfigRecordListEndpoint &out) {
+bool endpoint(const QVariant &value, ConfigRecordListEndpoint &out, bool indexed,
+              bool source = false) {
     const auto record = value.toMap();
     const auto generation = record.value("generation");
     bool valid = false;
     out.generation = generation.toString().toULongLong(&valid);
     out.policyId = record.value("policyId").toString();
-    return map(value) && exact(record, {"policyId", "listAddress", "generation", "index"}) &&
+    QStringList required{"policyId", "listAddress", "generation"};
+    if (indexed)
+        required.append("index");
+    out.ensure = record.value("ensure").toBool();
+    return map(value) && exact(record, required, source ? QStringList{} : QStringList{"ensure"}) &&
+           (!record.contains("ensure") || boolean(record.value("ensure"))) &&
            string(record.value("policyId")) && string(generation) && valid &&
            QString::number(out.generation) == generation.toString() &&
            selectors(record.value("listAddress"), out.listAddress, false) &&
-           index(record.value("index"), out.index);
+           (!indexed || index(record.value("index"), out.index));
 }
 QVariantMap errorMap(const ConfigError &error) {
     return {{"code", error.code}, {"sourceId", error.sourceId}, {"file", error.file},
@@ -201,51 +207,66 @@ QString ConfigQmlStore::editRecordList(const QString &id, const QJSValue &option
     const auto generation = record.value("generation");
     input.generation = generation.toString().toULongLong(&generationValid);
     bool valid = captured.ok() && map(captured.value) &&
-                 exact(record, {"generation", "listAddress", "edits"}) && string(generation) &&
+                 exact(record, {"generation", "listAddress", "edits"}, {"ensure"}) &&
+                 string(generation) &&
+                 (!record.contains("ensure") || boolean(record.value("ensure"))) &&
                  generationValid && QString::number(input.generation) == generation.toString() &&
                  selectors(record.value("listAddress"), input.listAddress, false) &&
                  list(record.value("edits"));
+    input.ensure = record.value("ensure").toBool();
     for (const auto &raw : record.value("edits").toList()) {
         const auto edit = raw.toMap();
         const auto op = edit.value("op").toString();
         ConfigRecordListEdit command;
         valid &= map(raw) && string(edit.value("op"));
-        if (op == "transfer") {
-            command.op = ConfigRecordListEdit::Op::Transfer;
+        if (op == "transfer" || op == "copy") {
+            command.op =
+                op == "copy" ? ConfigRecordListEdit::Op::Copy : ConfigRecordListEdit::Op::Transfer;
             valid &= exact(edit, {"op", "from", "to"}) &&
-                     endpoint(edit.value("from"), command.from) &&
-                     endpoint(edit.value("to"), command.destination);
+                     endpoint(edit.value("from"), command.from, op == "transfer", true) &&
+                     endpoint(edit.value("to"), command.destination, op == "transfer");
         } else if (op == "set" || op == "unset") {
             command.op =
                 op == "set" ? ConfigRecordListEdit::Op::Set : ConfigRecordListEdit::Op::Unset;
-            valid &= exact(edit, op == "set" ? QStringList{"op", "index", "field", "value"}
-                                             : QStringList{"op", "index", "field"}) &&
+            valid &= exact(edit,
+                           op == "set" ? QStringList{"op", "index", "field", "value"}
+                                       : QStringList{"op", "index", "field"},
+                           {"at"}) &&
                      string(edit.value("field"));
             command.field = edit.value("field").toString();
             command.value = edit.value("value");
         } else if (op == "remove") {
             command.op = ConfigRecordListEdit::Op::Remove;
-            valid &= exact(edit, {"op", "index"});
+            valid &= exact(edit, {"op", "index"}, {"at"});
         } else if (op == "insert") {
             command.op = ConfigRecordListEdit::Op::Insert;
-            valid &= exact(edit, {"op", "index", "value"});
+            valid &= exact(edit, {"op", "index", "value"}, {"at"});
             command.value = edit.value("value");
         } else if (op == "move") {
             command.op = ConfigRecordListEdit::Op::Move;
-            valid &= exact(edit, {"op", "index", "to"}) && index(edit.value("to"), command.to);
+            valid &=
+                exact(edit, {"op", "index", "to"}, {"at"}) && index(edit.value("to"), command.to);
         } else
             valid = false;
-        if (op != "transfer")
+        if (op != "transfer" && op != "copy") {
             valid &= index(edit.value("index"), command.index);
+            if (edit.contains("at")) {
+                command.at = ConfigRecordListEndpoint{};
+                valid &= endpoint(edit.value("at"), *command.at, false);
+            }
+        }
         input.edits.append(command);
     }
     if (!valid) {
         reject({}, captured.ok() ? "list-edit-operation" : captured.errors.first().code);
         return {};
     }
-    if (m_policyRecords.contains(id)) {
-        const auto recordDescriptor = m_policyRecords.value(id);
+    {
         for (auto &edit : input.edits) {
+            const auto target = edit.at ? edit.at->policyId : id;
+            if (!m_policyRecords.contains(target))
+                continue;
+            const auto recordDescriptor = m_policyRecords.value(target);
             if (edit.op == ConfigRecordListEdit::Op::Insert) {
                 const auto checked = admitQmlValue(recordDescriptor, edit.value);
                 if (!checked.ok()) {

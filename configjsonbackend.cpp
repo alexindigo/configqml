@@ -432,10 +432,9 @@ std::optional<ConfigBackendResult> ConfigJsonBackend::take(quint64 requestId) {
         return {};
     return m_results.take(requestId);
 }
-ConfigJsonTransaction
-ConfigJsonBackend::reconcile(const QString &sourceId, const QVariantMap &baseline,
-                             const QList<ConfigFileEdit> &edits,
-                             const std::optional<ConfigSourcePreimage> &preimage) {
+ConfigJsonTransaction ConfigJsonBackend::reconcile(
+    const QString &sourceId, const QVariantMap &baseline, const QList<ConfigFileEdit> &edits,
+    const std::optional<ConfigSourcePreimage> &preimage, const Canonicalizer &canonicalize) {
     const auto id = ownString(sourceId);
     ConfigJsonTransaction t;
     auto &r = t.outcome;
@@ -529,6 +528,13 @@ ConfigJsonBackend::reconcile(const QString &sourceId, const QVariantMap &baselin
     bool applied = false;
     for (const auto &edit : edits)
         applied |= applyFileEdit(t.raw, edit);
+    if (canonicalize) {
+        const auto before = t.raw;
+        const auto error = canonicalize(t.raw, r, t.warnings);
+        if (!error.empty())
+            return fail(error);
+        applied |= before != t.raw;
+    }
     if (!applied)
         return t;
     auto choices = t.raw;

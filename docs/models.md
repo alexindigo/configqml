@@ -196,9 +196,9 @@ next owned, sequence-fenced input prefix normally.
 
 ## Verification
 
-Run the full Debug and ASan/UBSan CTest suites in agora VM 806
-`dev-niri-configqml`, workspace `/home/tester/Projects/cqm4`, via agora-niri with
-timeouts and disk-backed TMPDIR. `models` uses QAbstractItemModelTester and native
+Run the full Debug and ASan/UBSan CTest suites in the dedicated feature VM
+named by [RELEASING.md](../RELEASING.md), with timeouts and disk-backed TMPDIR.
+`models` uses QAbstractItemModelTester and native
 consumers; `qml_models` cold-loads real offscreen ListView/Repeater delegates.
 `models_qml_lint` checks the import graph. Test-only Gui/Quick dependencies do not
 enter `configqml::core` or `configqml::configqml`; `core_link` checks production

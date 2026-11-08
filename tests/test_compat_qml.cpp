@@ -62,6 +62,11 @@ private slots:
         const bool pattern = QString(COMPAT_FIXTURE).endsWith("tst_string_pattern.qml");
         const bool sourceEvents = QString(COMPAT_FIXTURE).endsWith("tst_source_events.qml");
         const bool recordList = QString(COMPAT_FIXTURE).endsWith("tst_record_list_policy.qml");
+        const bool unknownData = QString(COMPAT_FIXTURE).endsWith("tst_unknown_data.qml");
+        if (unknownData)
+            compat::put(
+                dir.filePath("user.json"),
+                "{\"record\":{\"id\":\"old\",\"extra\":5},\"open\":{\"opaque\":true},\"rogue\":4}");
         if (sourceEvents)
             QVERIFY(QDir().mkpath(dir.filePath("live")));
         if (retained)
@@ -131,7 +136,7 @@ private slots:
                                   qPrintable(root->property("stage").toString()), 10000);
         QCOMPARE(root->property("failure").toString(), QString());
         QVERIFY(root->property("finished").toBool());
-        if (strictEmpty || overlay || pattern || recordList) {
+        if (strictEmpty || overlay || pattern || recordList || unknownData) {
             if (strictEmpty) {
                 QVERIFY(!QFileInfo::exists(dir.filePath("user.json")));
                 QVERIFY(QFileInfo::exists(dir.filePath("user.json.lock")));
@@ -158,6 +163,20 @@ private slots:
             const auto destination = raw.value("destination").toList();
             QCOMPARE(destination.size(), 1);
             QVERIFY(destination.first().toMap().contains("deprecated"));
+            for (const auto &name : {"identity-before.json", "identity-after.json"}) {
+                const auto screens = codec.decode(compat::bytes(dir.filePath(name)), "user")
+                                         .raw.value("screens")
+                                         .toList();
+                QCOMPARE(screens.size(), 2);
+                QCOMPARE(screens[0].toMap().value("name").toString(), QString("DP-1"));
+                QCOMPARE(screens[1].toMap().value("name").toString(), QString("new"));
+                QCOMPARE(screens[0].toMap().value("position").toString(), QString("left"));
+                const auto widgets = screens[0].toMap().value("widgets").toList();
+                QCOMPARE(widgets.size(), 2);
+                QVERIFY(widgets[0].toMap().value("opaque").toBool());
+                QVERIFY(widgets[1].toMap().value("deprecated").toBool());
+                QVERIFY(!widgets[1].toMap().contains("compact"));
+            }
         }
         if (retained) {
             ConfigJsonCodec codec;

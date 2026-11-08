@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configworker_p.h"
 #include "confignumber.h"
+#include <QCryptographicHash>
 
 namespace configqml {
 bool ConfigWorker::migrateSources() {
@@ -100,7 +101,10 @@ bool ConfigWorker::migrateSources() {
                 ConfigSourcePreimage{
                     {migration.original.diskExists.value_or(migration.original.exists),
                      migration.original.revision},
-                    migration.original.bytes});
+                    migration.original.bytes},
+                canonicalizer(updated.id, {}, &result));
+            if (transaction.published)
+                m_unknownWarnings.append(transaction.warnings);
             for (const auto &observation : transaction.observations) {
                 const auto error =
                     retainObservation(updated.id, observation.result, observation.phase,
@@ -124,6 +128,7 @@ bool ConfigWorker::migrateSources() {
             m_sourceBytes[updated.id] = outcome.bytes;
         } else {
             // The memory backend's seed below is its initial confirmed publication.
+            updated.raw = canonicalMemory(updated.id, updated.raw, true);
             updated.bytes = encodeMemoryValue(updated.raw);
         }
         for (auto &layer : m_options.layers)
@@ -135,5 +140,82 @@ bool ConfigWorker::migrateSources() {
             return finish(retentionError, updated.id);
     }
     return finish();
+}
+ConfigJsonBackend::Canonicalizer
+ConfigWorker::canonicalizer(const QString &id, const std::optional<ConfigCommand> &command,
+                            ConfigResult *result) {
+    if (!m_strictSources.contains(id))
+        return {};
+    return [this, id, command, result](QVariantMap &raw, const ConfigBackendResult &original,
+                                       QList<ConfigError> &pendingWarnings) -> ConfigError {
+        const auto prefix = m_strictSources.value(id);
+        const auto descriptor = *m_options.schema.descriptor(prefix);
+        const auto closed = closeConfigValue(descriptor, raw, prefix, true);
+        ConfigJsonCodec codec(m_options.schema.diagnostics().at(prefix));
+        const auto disk =
+            original.revision.exists ? codec.decode(original.bytes, id).raw : QVariantMap{};
+        const auto diskClosure = closeConfigValue(descriptor, disk, prefix, true);
+        QList<ConfigEvidenceReference> evidence;
+        if (!diskClosure.removed.isEmpty()) {
+            const auto observation = QCryptographicHash::hash(
+                encodeMemoryValue(QVariantMap{
+                    {"sourceId", id},
+                    {"revision", original.revision.token},
+                    {"bytesDigest",
+                     QCryptographicHash::hash(original.bytes, QCryptographicHash::Sha256)}}),
+                QCryptographicHash::Sha256);
+            if (!m_unknownEvidence.contains(observation)) {
+                ConfigResult retained;
+                const auto error = retainObservation(id, original, "unknown-data", "unknown-data",
+                                                     command, &retained);
+                if (!error.isEmpty())
+                    return {error, id, "unknown-data", m_json->path(id)};
+                m_unknownEvidence.insert(observation, retained.evidence);
+            }
+            evidence = m_unknownEvidence.value(observation);
+            if (result)
+                result->evidence.append(evidence);
+        }
+        const auto baseline = closeConfigValue(descriptor, m_baselines.value(id), prefix, true);
+        QList<ConfigPath> warnings;
+        for (const auto &path : diskClosure.removed)
+            if (!baseline.removed.contains(path))
+                warnings.append(path);
+        // Migration output can itself introduce unknown members, not present on disk.
+        for (const auto &path : closed.removed)
+            if ((!command || !baseline.removed.contains(path)) && !warnings.contains(path))
+                warnings.append(path);
+        const auto warn = [&](const ConfigPath &path, const QString &code) {
+            auto warning = m_options.schema.diagnostics().error(
+                m_options.schema.diagnostics().make(path, code), id, "unknown-data",
+                m_json->path(id));
+            warning.evidence = evidence;
+            pendingWarnings.append(warning);
+        };
+        for (qsizetype i = 0; i < qMin(qsizetype(64), warnings.size()); ++i)
+            warn(warnings[i], "unknown-data-removed");
+        if (warnings.size() > 64)
+            warn(prefix, "unknown-data-truncated");
+        raw = closed.value.toMap();
+        return {};
+    };
+}
+QVariantMap ConfigWorker::canonicalMemory(const QString &id, const QVariantMap &raw,
+                                          bool migration) {
+    if (!m_strictSources.contains(id))
+        return raw;
+    const auto prefix = m_strictSources.value(id);
+    const auto closed = closeConfigValue(*m_options.schema.descriptor(prefix), raw, prefix, true);
+    if (migration) {
+        for (qsizetype i = 0; i < qMin(qsizetype(64), closed.removed.size()); ++i)
+            m_unknownWarnings.append(m_options.schema.diagnostics().error(
+                m_options.schema.diagnostics().make(closed.removed[i], "unknown-data-removed"), id,
+                "unknown-data"));
+        if (closed.removed.size() > 64)
+            m_unknownWarnings.append(m_options.schema.diagnostics().error(
+                m_options.schema.diagnostics().make(prefix, "unknown-data-truncated"), id,
+                "unknown-data"));
+    }
+    return closed.value.toMap();
 }
 } // namespace configqml

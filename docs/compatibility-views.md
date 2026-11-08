@@ -151,3 +151,52 @@ their normal keyed remove/insert notifications. Save/autosave remains separate:
 cross-shard persistence reports actual per-route outcomes, including partial
 failure, and is **not** a filesystem transaction. Cross-store transfers are not
 part of this command.
+
+## Container creation and inheritance (0.4.0)
+
+With `unknownData: Strict`, container creation remains schema-typed; copy and
+transfer from Preserve sources refuse `undeclared-member` if their carried raw
+data is not closed for the destination. Per-op `at` targets check every route
+within the same atomic admission. A whole-leaf normalized display assignment may
+be refused if registry-injected fields are undeclared; use raw-preserving edits
+or declare intentional open members. Source projections remain independent of
+unknown-data mode; applications own the compatibility choice.
+
+Record-list edit addresses may use `{field:"name", equals:"DP-1"}` at an
+`each` position. The field must be a declared required, nonnullable String.
+The first matching record is selected; later duplicates stay untouched.
+This selector is address-only, never a policy or overlay selector.
+
+`ensure: true` on an envelope, `at` target or destination creates missing
+schema-typed Record/Map/List containers and appends a missing matched record
+containing only its match field. It never creates an owning leaf, creates an
+index, replaces null/wrong-type data or materializes defaults. Creation is
+atomic with the batch and final schema validation; ensured empty batches and
+ensured sources are refused.
+
+`{op:"copy", from:{policyId,listAddress,generation},
+to:{policyId,listAddress,generation,ensure:true}}` inherits an entire raw list
+into an absent destination. Existing lists, including `[]`, are refused.
+Hidden rows, unknown members and numeric atoms survive, without injected
+defaults. Source and destination displays must be equal after projection, or
+the batch fails with `list-edit-conflict`. Sources must be settled and unmasked;
+their fences are checked without advancing their path generation.
+
+Local set/unset/remove/insert/move operations may include
+`at:{policyId,listAddress,generation,ensure?}`. Addresses resolve sequentially,
+so later operations can use containers created earlier. Same-leaf operations
+have one admission; cross-leaf operations use the transfer transaction (both
+or neither admitted, coherent publication, separate per-route save receipts).
+
+Absent containers use the owning leaf's publication generation, not a new
+container generation. A concurrent creation makes a captured absence stale.
+Malformed addresses and present copy destinations fail `list-edit-operation`;
+stale fences or display mismatch fail `list-edit-conflict`. Transfer/copy
+destinations require writable unmasked routes; copy sources must be unmasked.
+
+An identity ancestor policy (`pruneUnknown: false`, `normalizeFields: false`)
+may coexist with pruning/normalizing descendant policies. It preserves ancestor row order
+and member key sets, allowing record-level edits and application-defined
+prune-on-empty decisions. Descendant projections still control their own
+nested displayed lists. Same-depth overlaps and normalizing ancestors remain
+declaration errors.

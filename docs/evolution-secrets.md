@@ -2,6 +2,12 @@
 
 ## Versioned raw migrations
 
+Strict unknown-data closure runs after durable transforms, so transforms still
+see legacy keys. Their output is canonicalized in the same publication, with
+removal warnings; the versioned backup keeps exact original bytes. Source
+projections have no mode coupling: applications must choose a mode compatible
+with the raw keys their transforms need.
+
 Native `ConfigSchema(root, version, migrations)` accepts ordered
 `ConfigMigration{fromVersion, transform}` functions. Each returns a
 `ConfigValueResult` containing a plain raw QVariantMap or errors. Captures must be

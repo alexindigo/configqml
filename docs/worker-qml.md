@@ -204,3 +204,10 @@ File/watcher conflict behavior and collection models are documented in
 documented in [editors-profiles.md](editors-profiles.md), and migrations/admission/
 secrets in [evolution-secrets.md](evolution-secrets.md). Installed-package
 compatibility and exact Qt coupling are documented in [distribution](distribution.md).
+
+## Source closure declarations (0.4.0)
+
+`MemorySource` and `JsonFileSource` expose `unknownData` (`Preserve`, the default,
+or `Strict`). `ConfigValue` exposes Record-only `open`. Declaration metadata is
+frozen at construction. Strict setter refusals use `undeclared-member` before
+local read-your-writes exposure, including sealed QML schema admissions.

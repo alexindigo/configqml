@@ -214,6 +214,12 @@ void ConfigWorker::overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransac
                 identityDescriptor->type == ConfigDescriptor::Type::Map)
                 t->error = "overlay-selection";
             else {
+                const auto route = m_layers->info(s.ownerPath).route;
+                const auto source = m_layers->source(route.layerId, route.sourceId);
+                if (s.mode == ConfigOverlayMode::Editor && source &&
+                    source->unknownData == ConfigUnknownData::Strict && !recordDescriptor->open &&
+                    !recordDescriptor->fields.contains(s.overrideKey))
+                    t->error = "undeclared-member";
                 const auto expected = identityDescriptor->validate(s.identityValue);
                 const auto actual = identityDescriptor->validate(*identity);
                 if (!expected.ok() || !actual.ok() || actual.value != expected.value)

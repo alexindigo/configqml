@@ -126,14 +126,14 @@ static std::optional<QVariant> portableValue(const ConfigDescriptor &descriptor,
     if (descriptor.sensitive || descriptor.forbidden || descriptor.machineLocal ||
         descriptor.type == T::SecretRef)
         return {};
-    QVariant projected = raw;
+    QVariant projected = closeConfigValue(descriptor, raw, {}, false, true).value;
     // Raw data is not admitted data. Check container shape before traversing and
     // whitelist record members, then admit every projected value through its descriptor.
     if (!isNull(raw) && descriptor.type == T::Record) {
         if (raw.metaType().id() != QMetaType::QVariantMap)
             return {};
         QVariantMap result;
-        const auto map = raw.toMap();
+        const auto map = projected.toMap();
         for (auto it = descriptor.fields.cbegin(); it != descriptor.fields.cend(); ++it)
             if (map.contains(it.key())) {
                 const auto child = portableValue(it.value(), map.value(it.key()));
@@ -146,7 +146,7 @@ static std::optional<QVariant> portableValue(const ConfigDescriptor &descriptor,
         if (raw.metaType().id() != QMetaType::QVariantList || descriptor.element.size() != 1)
             return {};
         QVariantList result;
-        for (const auto &item : raw.toList()) {
+        for (const auto &item : projected.toList()) {
             const auto child = portableValue(descriptor.element.first(), item);
             if (!child)
                 return {};
@@ -156,7 +156,7 @@ static std::optional<QVariant> portableValue(const ConfigDescriptor &descriptor,
     } else if (!isNull(raw) && descriptor.type == T::Map) {
         if (raw.metaType().id() != QMetaType::QVariantMap || descriptor.element.size() != 1)
             return {};
-        auto result = raw.toMap();
+        auto result = projected.toMap();
         for (auto &item : result) {
             const auto child = portableValue(descriptor.element.first(), item);
             if (!child)

@@ -168,3 +168,10 @@ Profile files are portable preference snapshots, not full-store backups. Raw
 unknown/invalid data remains preserved in the original source files by the normal
 backend. Applications migrating legacy mixed preference/credential files must
 deliberately classify and move credentials with their own provider.
+
+## Open records and Strict sources (0.4.0)
+
+Profile export/import keeps its declared-field whitelist even for `open` Records;
+opaque members never become portable merely because ordinary writes permit them.
+Strict source write checks also apply to drafts and retained groups. Refused
+draft Apply keeps its edits; multi-leaf admissions remain all-or-nothing.

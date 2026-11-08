@@ -5,7 +5,8 @@
 #include "configrecordlistpolicy.h"
 namespace configqml {
 bool qmlIndex(const QVariant &value, qsizetype &out);
-bool qmlSelectors(const QVariant &value, QList<ConfigValueSelector> &out, bool each = false);
+bool qmlSelectors(const QVariant &value, QList<ConfigValueSelector> &out, bool each = false,
+                  bool match = false);
 ConfigValueResult captureQmlValue(const QVariant &value, const ConfigPath &path = {},
                                   const ConfigDiagnosticBuilder &diagnostics = {});
 ConfigAdmission admitQmlInput(const ConfigSchema &schema, const ConfigPath &path,

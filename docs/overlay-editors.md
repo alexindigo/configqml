@@ -131,3 +131,10 @@ through `overlayOpened(requestId, ConfigOverlayEditor*)`, emitted after handle
 installation and before the normal `completed(opened)` result; native results
 contain `editorId`, not a QObject payload. `value`, `setValue` and `unset` use
 relative ConfigPaths, and Apply/reset/discard use normal native callbacks.
+
+## Strict owner records (0.4.0)
+
+Editor-mode open rejects an undeclared `overrideKey` in a closed Record owned by
+a Strict source with `undeclared-member`. Declare the member or mark the Record
+`open` to permit it. Apply still uses the common owner write check; view mode
+does not create overrides. Preserve behavior is unchanged.

@@ -38,6 +38,8 @@ struct ConfigJsonTransaction {
         QString phase, role;
     };
     QList<Observation> observations;
+    // Candidate diagnostics become publication facts only when published is true.
+    QList<ConfigError> warnings;
 };
 struct ConfigSourcePreimage {
     ConfigRevision revision;
@@ -47,6 +49,8 @@ bool applyFileEdit(QVariantMap &raw, const ConfigFileEdit &edit);
 class ConfigJsonBackend : public ConfigBackend {
 public:
     using FaultHook = std::function<QString(const QString &phase, const QString &file)>;
+    using Canonicalizer = std::function<ConfigError(QVariantMap &, const ConfigBackendResult &,
+                                                    QList<ConfigError> &)>;
     explicit ConfigJsonBackend(const QList<ConfigJsonFile> &files, FaultHook hook = {},
                                const QMap<QString, ConfigDiagnosticBuilder> &diagnostics = {});
     ConfigBackendCapabilities capabilities() const override;
@@ -54,7 +58,8 @@ public:
     std::optional<ConfigBackendResult> take(quint64 requestId) override;
     ConfigJsonTransaction reconcile(const QString &sourceId, const QVariantMap &baseline,
                                     const QList<ConfigFileEdit> &edits,
-                                    const std::optional<ConfigSourcePreimage> &preimage = {});
+                                    const std::optional<ConfigSourcePreimage> &preimage = {},
+                                    const Canonicalizer &canonicalize = {});
     ConfigError preserveBackup(const QString &sourceId, int version, const QByteArray &original);
     ConfigError exportProfile(const QString &file, const QByteArray &bytes);
     bool changed(const QString &sourceId) const;

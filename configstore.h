@@ -160,6 +160,9 @@ private:
     bool m_threadStopped = false;
     ConfigSchema m_schema;
     QMap<ConfigPath, ConfigRoute> m_userRoutes;
+    QSet<ConfigPath> m_strictUserPrefixes, m_strictRuntimePrefixes;
+    std::optional<ConfigDiagnostic> unknownMember(const ConfigPath &path, const QVariant &value,
+                                                  bool runtime = false) const;
     QString m_userLayerId;
     QString m_storeId;
     ConfigSnapshot m_cache;

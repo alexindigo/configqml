@@ -1,5 +1,26 @@
 # Core conventions
 
+## Unknown data (0.4.0)
+
+Each source has `unknownData: Preserve | Strict` (native `ConfigUnknownData`),
+default Preserve. Preserve accepts and keeps undeclared record members on every
+write; only setting paths are closed. Existing unknown namespace keys survive
+unrelated writes. Whole-leaf assignment is still replacement, not a merge.
+
+Strict strips undeclared Group names and closed Record members at admission,
+then refuses new such members on every write with `undeclared-member`.
+One structural closure defines load, write and publication behavior. It recurses
+through List elements and Map values; Map keys are opaque. Null/type mismatches
+and invalid declared data remain admission-policy concerns. `_configqmlVersion`
+is reserved source-root metadata and survives closure.
+
+`ConfigValue.open: true` / `ConfigDescriptor::open` is valid only on Records.
+It keeps undeclared members verbatim; declared children still close recursively.
+It has no effect in Preserve mode and does not widen profile export/import.
+A field-less closed Record or noncanonical schema default under a Strict source
+is an `unknown-data-declaration` error. Source modes are construction metadata;
+replacement observations must retain the declared mode.
+
 This is the native core contract, targeting C++17/Qt 6.12 on Linux. Production
 sources are at the repository root. `configqml::core` links Qt Core only;
 test binaries link that production library rather than compiling its sources.

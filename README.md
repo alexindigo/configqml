@@ -27,6 +27,11 @@ Declared [overlay views and editors](docs/overlay-editors.md) combine a scoped
 base with sparse record overrides: live read-only runtime values and separately
 captured revision-fenced previews, with worker-owned merge/difference and receipts.
 
+Version 0.4.0 adds raw-preserving record-list container creation and inheritance,
+plus opt-in per-source Strict unknown-data closure and open Records. Preserve is
+the default. See [compatibility views](docs/compatibility-views.md) and
+[source modes](docs/json-files.md#per-source-unknown-data-mode-040).
+
 ## Install
 
 Arch Linux package: `qt6-configqml` (AUR; publication follows the first release).
@@ -52,7 +57,7 @@ Use C++17 and Qt **6.12** on Linux. The production target links only Qt Core;
 Qt Test is used by the test executables. With an installed package:
 
 ```cmake
-find_package(configqml 0.3.0 REQUIRED COMPONENTS Core)
+find_package(configqml 0.4.0 REQUIRED COMPONENTS Core)
 target_link_libraries(myapp PRIVATE configqml::core)
 ```
 
@@ -134,14 +139,12 @@ the shipped native/QML API, persistence, collections, drafts and evolution.
 
 ## Development
 
-All builds/tests for this project run in **agora VM 806 `dev-niri-configqml`**,
-accessed via `/home/user/.local/bin/agora-niri`, in the disk-backed workspace
-`/home/tester/Projects/cqm8`. If unavailable, stop rather than using a host.
-After delivering source to its `source/` subdirectory, from the laptop:
-
-```sh
-timeout 600s /home/user/.local/bin/agora-niri ssh 806 -- 'timeout 560s env TMPDIR=/home/tester/Projects/cqm8/tmp XDG_CACHE_HOME=/home/tester/Projects/cqm8/cache LANG=C.UTF-8 bash -c "cmake -S /home/tester/Projects/cqm8/source -B /home/tester/Projects/cqm8/build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON && cmake --build /home/tester/Projects/cqm8/build-release --parallel 4 && ctest --test-dir /home/tester/Projects/cqm8/build-release --output-on-failure --no-tests=error"'
-```
+Builds and tests run inside an isolated test VM with Qt and the build tools
+installed there. Use a fresh per-feature or per-release VM, a disk-backed
+workspace and TMPDIR, and bounded commands. Record the actual guest, hosting
+machine and access route with the verification evidence. If that VM is
+unavailable, stop rather than falling back to the physical host.
+See [RELEASING.md](RELEASING.md) for the guest-side verification commands.
 
 Enable the tracked hook with `git config core.hooksPath .githooks`. It runs only
 clang-format, shellcheck, shfmt and whitespace checks in a resource-capped Podman

@@ -160,6 +160,13 @@ private:
     QList<ConfigPath> m_reloadSelection;
     void profile(const ConfigCommand &command);
     bool migrateSources();
+    ConfigJsonBackend::Canonicalizer canonicalizer(const QString &id,
+                                                   const std::optional<ConfigCommand> &command = {},
+                                                   ConfigResult *result = nullptr);
+    QVariantMap canonicalMemory(const QString &id, const QVariantMap &raw, bool migration = false);
+    QMap<QString, ConfigPath> m_strictSources;
+    QList<ConfigError> m_unknownWarnings;
+    QMap<QByteArray, QList<ConfigEvidenceReference>> m_unknownEvidence;
     void recordListCommand(const ConfigCommand &command);
     QString quarantined(const ConfigPath &path) const;
     QString observeSource(const QString &id, const ConfigBackendResult &read,

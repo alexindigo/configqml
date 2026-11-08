@@ -1,5 +1,11 @@
 # Strict source conflicts, evidence and empty shards
 
+The three Strict settings are independent: `unknownData: Strict` closes source
+data, `conflictPolicy: StrictSourcePreimage` fences whole-file foreign changes,
+and a schema node's `admissionPolicy: Strict` rejects invalid layer admission.
+None implies either of the others. Unknown-data removals retain role
+`unknown-data` evidence before publication; see [json-files.md](json-files.md).
+
 `ConfigJsonFile::conflictPolicy` / `JsonFileSource.conflictPolicy` defaults to
 `PathIntent`: the existing cooperative writer protocol merges disjoint foreign
 path edits. Select `StrictSourcePreimage` when a save must refuse *any* foreign

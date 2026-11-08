@@ -44,8 +44,7 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
         policy.keyField = ownString(policy.keyField);
         for (auto &field : policy.preservedFields)
             field = ownString(field);
-        for (auto &selector : policy.listPath)
-            selector.key = ownString(selector.key);
+        policy.listPath = ownValueSelectors(policy.listPath);
         m_policyPaths[policy.policyId] = policy.path;
     }
     for (auto &file : owned.jsonFiles) {
@@ -73,6 +72,12 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
             if (layer.writable && layer.kind == ConfigLayerKind::File) {
                 m_userRoutes[source.prefix] = {layer.id, source.id, source.prefix};
                 m_userLayerId = layer.id;
+            }
+            if (source.unknownData == ConfigUnknownData::Strict) {
+                if (layer.writable)
+                    m_strictUserPrefixes.insert(source.prefix);
+                if (layer.kind == ConfigLayerKind::Runtime)
+                    m_strictRuntimePrefixes.insert(source.prefix);
             }
         }
     }
@@ -162,6 +167,19 @@ bool ConfigStore::canWriteUser(const ConfigPath &path) const {
             return true;
     return false;
 }
+std::optional<ConfigDiagnostic>
+ConfigStore::unknownMember(const ConfigPath &path, const QVariant &value, bool runtime) const {
+    for (const auto &prefix : runtime ? m_strictRuntimePrefixes : m_strictUserPrefixes)
+        if (startsWith(path, prefix)) {
+            const auto descriptor = m_schema.descriptor(path);
+            if (descriptor) {
+                const auto closed = closeConfigValue(*descriptor, value, path);
+                if (!closed.removed.isEmpty())
+                    return m_schema.diagnostics().make(closed.removed.first(), "undeclared-member");
+            }
+        }
+    return {};
+}
 quint64 ConfigStore::registerRequest(QObject *context, Callback callback) {
     const auto id = m_owner->reserveRequest();
     m_pending.insert(id, {context ? context : this, std::move(callback)});
@@ -200,6 +218,11 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
         if (target != m_userLayerId || (!canWriteUser(path) && !coversSource))
             checked.errors = {diagnostics.make(path, "read-only-path")};
     }
+    if (checked.ok() && (kind == ConfigInput::Kind::User || kind == ConfigInput::Kind::Initialize ||
+                         kind == ConfigInput::Kind::Runtime))
+        if (const auto error =
+                unknownMember(path, checked.value, kind == ConfigInput::Kind::Runtime))
+            checked.errors = {*error};
     if (checked.ok() && kind != ConfigInput::Kind::Runtime &&
         kind != ConfigInput::Kind::ClearRuntime)
         for (const auto &source : m_sourceStates) {

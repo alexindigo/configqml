@@ -8,6 +8,10 @@
 #include <optional>
 
 namespace configqml {
+struct ConfigEvidenceReference {
+    QString evidenceId, directory, sourceId, phase, role;
+    quint64 observationOrder = 0;
+};
 struct ConfigError {
     ConfigError() = default;
     ConfigError(QString code, QString sourceId, QString operation, QString file = {},
@@ -20,6 +24,7 @@ struct ConfigError {
     QString file;
     QStringList path;
     qsizetype line = 0;
+    QList<ConfigEvidenceReference> evidence;
     bool empty() const { return code.isEmpty(); }
 };
 struct ConfigBackendCapabilities {

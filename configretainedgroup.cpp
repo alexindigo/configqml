@@ -70,6 +70,9 @@ quint64 ConfigStore::retainGroup(const ConfigRetainedGroupOptions &options, QObj
             edit.present ? m_schema.validate(edit.path, edit.value) : ConfigValueResult{};
         if (!captured.ok())
             command.conversionError = captured.errors.first().code;
+        else if (edit.present)
+            if (const auto error = unknownMember(edit.path, captured.value))
+                command.conversionError = error->code;
         edit.value = captured.value;
         input.edits[edit.path] =
             edit.present ? std::optional<QVariant>(captured.value) : std::nullopt;
