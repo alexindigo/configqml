@@ -420,6 +420,7 @@ private slots:
         auto record =
             D::leaf(T::Record, QVariantMap{{"title", QString()}, {"url", *url.defaultValue}});
         record.fields = {{"title", title}, {"url", url}};
+        record.open = true; // Open data stays outside the profile whitelist.
         auto map = D::leaf(T::Map, QVariantMap{});
         map.element = {record};
         auto privateRecord = record;

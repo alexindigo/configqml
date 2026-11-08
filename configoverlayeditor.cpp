@@ -39,13 +39,14 @@ quint64 ConfigStore::openOverlay(const ConfigOverlayOptions &options, QObject *c
     s.owner = m_owner->overlayEndpoint();
     s.ownerPath = ownPath(options.ownerPath);
     s.ownerGeneration = options.ownerGeneration;
-    s.entryPath = options.entryPath;
-    s.identityPath = options.identityPath;
+    s.entryPath = ownValueSelectors(options.entryPath);
+    s.identityPath = ownValueSelectors(options.identityPath);
     s.overrideKey = ownString(options.overrideKey);
     for (auto *selectors : {&s.entryPath, &s.identityPath})
-        for (auto &selector : *selectors) {
-            selector.key = ownString(selector.key);
-            if (selector.kind == ConfigValueSelector::Kind::Each || selector.index < 0)
+        for (const auto &selector : *selectors) {
+            if ((selector.kind != ConfigValueSelector::Kind::Key &&
+                 selector.kind != ConfigValueSelector::Kind::Index) ||
+                selector.index < 0)
                 t->error = "overlay-selection";
         }
     const auto identity = ownValue(options.identityValue);

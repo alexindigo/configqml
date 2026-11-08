@@ -75,6 +75,22 @@ E copy(ConfigStore &store, const QString &name) {
 class ContainersTest : public QObject {
     Q_OBJECT
 private slots:
+    void matchAddressOwnsBorrowedStrings() {
+        ConfigStore store(options());
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QChar storage[] = {QChar('D'), QChar('P'), QChar('-'), QChar('1')};
+        auto at = address(QString::fromRawData(storage, 4));
+        const auto result = compat::request(store, [&] {
+            const auto id = store.editRecordList(
+                "left", {endpoint(store, "left").generation, at, {insert()}, true});
+            storage[3] = QChar('2');
+            return id;
+        });
+        QCOMPARE(result.status, QString("admitted"));
+        const auto screens = store.value({"screens"}).toList();
+        QCOMPARE(screens.size(), 2);
+        QVERIFY(screens.first().toMap().contains("widgets"));
+    }
     void typedMapCreationAndNumericCopy() {
         D row(D::Type::Record);
         row.fields = {{"id", D::leaf(D::Type::String, QString())}};

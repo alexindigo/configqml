@@ -22,6 +22,7 @@ struct ConfigRecordListPolicySpec {
     QStringList preservedFields;
     bool pruneUnknown = false, normalizeFields = false;
 };
+QList<ConfigValueSelector> ownValueSelectors(const QList<ConfigValueSelector> &input);
 struct ConfigRecordListEntry {
     QString key;
     bool available = false, retain = false, normalize = false;

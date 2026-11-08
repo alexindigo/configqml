@@ -154,6 +154,14 @@ part of this command.
 
 ## Container creation and inheritance (0.4.0)
 
+With `unknownData: Strict`, container creation remains schema-typed; copy and
+transfer from Preserve sources refuse `undeclared-member` if their carried raw
+data is not closed for the destination. Per-op `at` targets check every route
+within the same atomic admission. A whole-leaf normalized display assignment may
+be refused if registry-injected fields are undeclared; use raw-preserving edits
+or declare intentional open members. Source projections remain independent of
+unknown-data mode; applications own the compatibility choice.
+
 Record-list edit addresses may use `{field:"name", equals:"DP-1"}` at an
 `each` position. The field must be a declared required, nonnullable String.
 The first matching record is selected; later duplicates stay untouched.

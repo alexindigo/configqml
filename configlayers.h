@@ -7,6 +7,7 @@
 namespace configqml {
 enum class ConfigLayerKind { File, Environment, Runtime };
 enum class ConfigAdmissionPolicy { RejectInput, FieldFallback, RetainLastGood };
+enum class ConfigUnknownData { Preserve, Strict };
 
 struct ConfigSource {
     QString id;
@@ -21,6 +22,7 @@ struct ConfigSource {
     std::optional<bool> diskExists;
     bool localIntent = false;
     bool pruneResetNamespaces = false; // Worker compiles JsonFileSource.deleteWhenEmpty here.
+    ConfigUnknownData unknownData = ConfigUnknownData::Preserve;
 };
 struct ConfigLayer {
     QString id;
@@ -106,6 +108,7 @@ public:
     QString fallbackState(const QString &sourceId) const;
     QList<ConfigProjectionEffectsEvent> takeProjectionEffects();
     QList<QPair<QString, ConfigDiagnostic>> takeProjectionDiagnostics();
+    QList<QPair<QString, ConfigDiagnostic>> takeUnknownDataDiagnostics();
 
 private:
     friend class ConfigWorker;
@@ -144,6 +147,8 @@ private:
     QList<ConfigProjectionEffectsEvent> m_effects;
     QList<QPair<QString, ConfigDiagnostic>> m_projectionDiagnostics;
     QSet<QString> m_effectRuns;
+    QList<QPair<QString, ConfigDiagnostic>> m_unknownDiagnostics;
+    QSet<QByteArray> m_unknownRuns;
     bool m_deferProjections = false;
     ConfigSchema m_schema;
     QList<LayerState> m_layers;

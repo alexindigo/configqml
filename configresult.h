@@ -31,10 +31,6 @@ struct ConfigPublication {
     QString state = "known";
     ConfigError error;
 };
-struct ConfigEvidenceReference {
-    QString evidenceId, directory, sourceId, phase, role;
-    quint64 observationOrder = 0;
-};
 struct ConfigSourceState {
     QString sourceId;
     ConfigPath prefix;

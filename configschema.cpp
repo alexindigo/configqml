@@ -37,6 +37,8 @@ static bool less(const QVariant &a, const QVariant &b, Type type) {
 }
 
 static bool supportedConstraints(const ConfigDescriptor &d) {
+    if (d.open && d.type != Type::Record)
+        return false;
     if (d.type < Type::Group || d.type > Type::SecretRef ||
         d.admissionPolicy < ConfigDescriptor::AdmissionPolicy::Inherit ||
         d.admissionPolicy > ConfigDescriptor::AdmissionPolicy::Tolerant)
@@ -590,11 +592,67 @@ ConfigDescriptor &ConfigDescriptor::operator=(ConfigDescriptor other) noexcept {
     swap(element, other.element);
     swap(idField, other.idField);
     swap(stringPattern, other.stringPattern);
+    swap(open, other.open);
     swap(m_compiledStringPattern, other.m_compiledStringPattern);
     swap(m_stringExpression, other.m_stringExpression);
     return *this;
 }
 
+namespace {
+QVariant closeValue(const ConfigDescriptor &d, const QVariant &value, const ConfigPath &path,
+                    bool sourceRoot, bool ignoreOpen, QList<ConfigPath> &removed) {
+    if (isNull(value))
+        return value;
+    if ((d.type == Type::Group || d.type == Type::Record || d.type == Type::Map) &&
+        value.metaType().id() == QMetaType::QVariantMap) {
+        auto map = value.toMap();
+        for (auto it = map.begin(); it != map.end();) {
+            const auto childPath = path + ConfigPath{it.key()};
+            if (d.type == Type::Map) {
+                it.value() = closeValue(d.element.first(), it.value(), childPath, false, ignoreOpen,
+                                        removed);
+                ++it;
+            } else if (d.fields.contains(it.key())) {
+                it.value() = closeValue(d.fields.value(it.key()), it.value(), childPath, false,
+                                        ignoreOpen, removed);
+                ++it;
+            } else if ((sourceRoot && it.key() == "_configqmlVersion") ||
+                       (d.type == Type::Record && d.open && !ignoreOpen)) {
+                ++it;
+            } else {
+                removed.append(childPath);
+                it = map.erase(it);
+            }
+        }
+        return map;
+    }
+    if (d.type == Type::List && value.metaType().id() == QMetaType::QVariantList) {
+        auto list = value.toList();
+        for (qsizetype i = 0; i < list.size(); ++i)
+            list[i] = closeValue(d.element.first(), list[i], path + ConfigPath{QString::number(i)},
+                                 false, ignoreOpen, removed);
+        return list;
+    }
+    return value; // Invalid declared values are admission's responsibility.
+}
+} // namespace
+ConfigClosure closeConfigValue(const ConfigDescriptor &descriptor, const QVariant &value,
+                               const ConfigPath &path, bool sourceRoot, bool ignoreOpen) {
+    ConfigClosure result;
+    result.value = closeValue(descriptor, value, path, sourceRoot, ignoreOpen, result.removed);
+    return result;
+}
+bool closedEmptyRecord(const ConfigDescriptor &d) {
+    if (d.type == Type::Record && d.fields.isEmpty() && !d.open)
+        return true;
+    for (const auto &field : d.fields)
+        if (closedEmptyRecord(field))
+            return true;
+    for (const auto &element : d.element)
+        if (closedEmptyRecord(element))
+            return true;
+    return false;
+}
 std::optional<ConfigDescriptor> ConfigSchema::descriptor(const ConfigPath &path) const {
     auto d = m_root;
     for (const auto &key : path) {

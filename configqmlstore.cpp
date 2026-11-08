@@ -125,6 +125,7 @@ void ConfigQmlStore::componentComplete() {
                                               true,
                                               {},
                                               false});
+        options.layers[index].sources.last().unknownData = ConfigUnknownData(source->unknownData);
         if (file)
             options.layers[index].sources.last().fallbackFor = ownString(file->fallbackFor);
         if (!options.layers[index].sources.isEmpty() && options.layers[index].sources.size() > 1 &&
@@ -169,9 +170,19 @@ void ConfigQmlStore::componentComplete() {
     });
     connect(m_core, &ConfigStore::sourceWarning, this, [this](const auto &input) {
         const auto warning = m_diagnostics.sanitize(input);
+        QVariantList evidence;
+        for (const auto &ref : warning.evidence)
+            evidence.append(
+                QVariantMap{{"evidenceId", ref.evidenceId},
+                            {"directory", ref.directory},
+                            {"sourceId", ref.sourceId},
+                            {"phase", ref.phase},
+                            {"role", ref.role},
+                            {"observationOrder", QString::number(ref.observationOrder)}});
         const QVariantMap value{{"code", warning.code},       {"sourceId", warning.sourceId},
                                 {"phase", warning.operation}, {"file", warning.file},
-                                {"path", warning.path},       {"line", warning.line}};
+                                {"path", warning.path},       {"line", warning.line},
+                                {"evidence", evidence}};
         ConfigConsumerGuard(this).invoke([&] { emit sourceWarning(value); });
     });
     connect(m_core, &ConfigStore::migrationCompleted, this, [this](const auto &result) {

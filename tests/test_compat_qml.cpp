@@ -62,6 +62,11 @@ private slots:
         const bool pattern = QString(COMPAT_FIXTURE).endsWith("tst_string_pattern.qml");
         const bool sourceEvents = QString(COMPAT_FIXTURE).endsWith("tst_source_events.qml");
         const bool recordList = QString(COMPAT_FIXTURE).endsWith("tst_record_list_policy.qml");
+        const bool unknownData = QString(COMPAT_FIXTURE).endsWith("tst_unknown_data.qml");
+        if (unknownData)
+            compat::put(
+                dir.filePath("user.json"),
+                "{\"record\":{\"id\":\"old\",\"extra\":5},\"open\":{\"opaque\":true},\"rogue\":4}");
         if (sourceEvents)
             QVERIFY(QDir().mkpath(dir.filePath("live")));
         if (retained)
@@ -131,7 +136,7 @@ private slots:
                                   qPrintable(root->property("stage").toString()), 10000);
         QCOMPARE(root->property("failure").toString(), QString());
         QVERIFY(root->property("finished").toBool());
-        if (strictEmpty || overlay || pattern || recordList) {
+        if (strictEmpty || overlay || pattern || recordList || unknownData) {
             if (strictEmpty) {
                 QVERIFY(!QFileInfo::exists(dir.filePath("user.json")));
                 QVERIFY(QFileInfo::exists(dir.filePath("user.json.lock")));

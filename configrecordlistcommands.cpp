@@ -36,13 +36,7 @@ quint64 ConfigStore::editRecordList(const QString &id, const ConfigRecordListEdi
     ConfigCommand command{requestId, m_sequence + 1, "editRecordList", {}};
     command.policyId = ownString(id);
     command.listEdits = options;
-    const auto ownSelectors = [](QList<ConfigValueSelector> &selectors) {
-        for (auto &selector : selectors) {
-            selector.key = ownString(selector.key);
-            selector.value = ownString(selector.value);
-        }
-    };
-    ownSelectors(command.listEdits->listAddress);
+    command.listEdits->listAddress = ownValueSelectors(command.listEdits->listAddress);
     for (auto &edit : command.listEdits->edits) {
         edit.field = ownString(edit.field);
         QList<ConfigRecordListEndpoint *> endpoints;
@@ -53,7 +47,7 @@ quint64 ConfigStore::editRecordList(const QString &id, const ConfigRecordListEdi
             endpoints.append(&*edit.at);
         for (auto *endpoint : endpoints) {
             endpoint->policyId = ownString(endpoint->policyId);
-            ownSelectors(endpoint->listAddress);
+            endpoint->listAddress = ownValueSelectors(endpoint->listAddress);
         }
         if (edit.op == ConfigRecordListEdit::Op::Set ||
             edit.op == ConfigRecordListEdit::Op::Insert) {

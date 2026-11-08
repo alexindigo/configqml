@@ -4,6 +4,14 @@
 #include <functional>
 
 namespace configqml {
+QList<ConfigValueSelector> ownValueSelectors(const QList<ConfigValueSelector> &input) {
+    auto selectors = input;
+    for (auto &selector : selectors) {
+        selector.key = ownString(selector.key);
+        selector.value = ownString(selector.value);
+    }
+    return selectors;
+}
 namespace {
 using Selector = ConfigValueSelector;
 using Selectors = QList<Selector>;

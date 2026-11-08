@@ -52,6 +52,48 @@ mutation does not reconfigure an existing store.
 
 ## Raw data and admission
 
+### Per-source unknown-data mode (0.4.0)
+
+`JsonFileSource.unknownData` and `MemorySource.unknownData` default to `Preserve`.
+Opt in with `unknownData: JsonFileSource.Strict`; native sources use
+`source.unknownData = ConfigUnknownData::Strict`. This applies to File,
+Environment and Runtime sources, including read-only sources.
+
+Strict removes unknown data from the admitted raw tree before validation and
+derived views. Original bytes and conflict baselines remain exact disk truth.
+Read-only sources are stripped only in memory. Removal emits value-free
+`sourceWarning` records in phase `unknown-data`, code `unknown-data-removed`,
+with sourceId, file and top-most path. Sensitive path segments are redacted.
+An observation emits at most 64 removals plus `unknown-data-truncated`.
+Repeated admission of the same observation does not repeat its warnings.
+
+`fallbackFor` activation counts the stripped target raw: a Strict target holding
+only unknown keys activates its fallback, while Preserve suppresses it. Reserved
+`_configqmlVersion` metadata still counts as a key. Source projections over a
+Strict source receive stripped raw in memory, before any file publication.
+
+Loading adds no dirtiness and never writes. Save with no intents remains
+`nothing_to_save`. At the next normal publication of a Strict source, closure
+runs on the fresh tree after conflict checks and intent application. Foreign
+unknown additions are warned about too; existing null/wrong-type declared data
+is not repaired. `deleteWhenEmpty` uses the resulting canonical tree.
+
+Writable Strict sources require `evidenceDirectory`. Before a JSON publication
+removes unknown disk data, its exact pre-publication bytes are retained with
+role `unknown-data`; retention failure prevents that publication. Save results
+and source states carry the reference; save-time warnings include `evidence`.
+Memory publication is canonical too, without claiming disk durability.
+Save-time removal warnings are emitted only after publication takes effect,
+including uncertain after-effects. A pre-publication failure emits no removal
+warning; retries reuse unknown-data evidence for an unchanged preflight
+observation. Removal paths use structural indices, so a foreign list reorder
+can report a previously observed member at its new index.
+
+Strict can discard newer-version or sibling-tool data on a later save. The
+application chooses the mode per source. No Source-projection restriction or
+input declaration is enforced: projection authors must account for stripped
+inputs and their loss from later persisted files. Preserve protects such data.
+
 `ConfigJsonCodec` retains exact number lexemes, unknown keys and original object
 key order for surviving keys (new keys append deterministically). Arrays remain
 atomic settings. Whitespace and comments are not preserved; JSON comments and

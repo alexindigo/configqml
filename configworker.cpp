@@ -81,6 +81,16 @@ void ConfigWorker::initialize() {
     if (!declarations.valid() && m_initializationError.isEmpty())
         m_initializationError = declarations.errors().first().code;
     m_backend = std::make_unique<ConfigMemoryBackend>();
+    // Publication policy belongs to writable routes, not same-ID observations
+    // in read-only or transient layers.
+    for (const auto &layer : m_options.layers)
+        for (const auto &source : layer.sources)
+            if (layer.writable && layer.kind == ConfigLayerKind::File &&
+                source.unknownData == ConfigUnknownData::Strict) {
+                m_strictSources[source.id] = source.prefix;
+                if (m_options.evidenceDirectory.isEmpty())
+                    m_initializationError = "evidence-directory";
+            }
     if (!m_options.evidenceDirectory.isEmpty() &&
         (!QDir::isAbsolutePath(m_options.evidenceDirectory) ||
          QDir::cleanPath(m_options.evidenceDirectory) != m_options.evidenceDirectory ||
@@ -218,6 +228,7 @@ void ConfigWorker::initialize() {
     m_diskLayers->removeTransientLayers();
     m_diskLayers->takeProjectionEffects();
     m_diskLayers->takeProjectionDiagnostics();
+    m_diskLayers->takeUnknownDataDiagnostics();
     m_acceptOrigin = "startup";
     m_acceptCause = "startup";
     if (m_initializationError.isEmpty() && !m_layers->rejectedDiagnostics().isEmpty()) {
@@ -420,9 +431,16 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
     for (auto &state : *packet.sourceStates)
         state.fallbackState = m_layers->fallbackState(state.sourceId);
     packet.projectionEffects = m_layers->takeProjectionEffects();
+    if (m_diskLayers)
+        m_diskLayers->takeUnknownDataDiagnostics();
     for (const auto &diagnostic : m_layers->takeProjectionDiagnostics())
         packet.projectionDiagnostics.append(m_options.schema.diagnostics().error(
             diagnostic.second, diagnostic.first, "projection-warning"));
+    for (const auto &diagnostic : m_layers->takeUnknownDataDiagnostics())
+        packet.projectionDiagnostics.append(m_options.schema.diagnostics().error(
+            diagnostic.second, diagnostic.first, "unknown-data", m_json->path(diagnostic.first)));
+    packet.projectionDiagnostics.append(m_unknownWarnings);
+    m_unknownWarnings.clear();
     if (!m_acceptOrigin.isEmpty() && m_diskLayers) {
         ConfigSourceAccepted event;
         event.eventId = QString::number(++m_sourceEventId);
@@ -883,7 +901,10 @@ void ConfigWorker::continueSave() {
         auto transaction =
             m_json->reconcile(m_activeSource, m_saveBases.value(m_activeSource), edits,
                               ConfigSourcePreimage{m_saveRevisions.value(m_activeSource),
-                                                   m_saveBytes.value(m_activeSource)});
+                                                   m_saveBytes.value(m_activeSource)},
+                              canonicalizer(m_activeSource, m_save, &m_saveResult));
+        if (transaction.published)
+            m_unknownWarnings.append(transaction.warnings);
         const auto &outcome = transaction.outcome;
         for (const auto &observation : transaction.observations) {
             const auto error =
@@ -920,6 +941,7 @@ void ConfigWorker::continueSave() {
     m_activeRaw = m_saveBases.value(m_activeSource);
     for (const auto &intent : m_saveIntents.value(m_activeSource))
         applyFileEdit(m_activeRaw, intent.edit);
+    m_activeRaw = canonicalMemory(m_activeSource, m_activeRaw);
     m_activeBytes = encodeMemoryValue(m_activeRaw);
     m_activeBackend = m_backend->submit({ConfigBackendRequest::Operation::Publish, m_activeSource,
                                          m_activeBytes, m_saveRevisions.value(m_activeSource)});

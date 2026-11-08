@@ -3,6 +3,7 @@
 #include "configjsoncodec.h"
 #include "configsourceprojection_p.h"
 #include <QSet>
+#include <QCryptographicHash>
 #include <QScopeGuard>
 #include <limits>
 #include <algorithm>
@@ -31,6 +32,18 @@ ConfigLayers::ConfigLayers(const ConfigSchema &schema, const QList<ConfigLayer> 
         QSet<QString> sourceIds;
         for (const auto &source : layer.sources) {
             const auto d = schema.descriptor(source.prefix);
+            if (source.unknownData != ConfigUnknownData::Preserve &&
+                source.unknownData != ConfigUnknownData::Strict)
+                m_errors.append(
+                    m_schema.diagnostics().make(source.prefix, "unknown-data-declaration"));
+            if (d && source.unknownData == ConfigUnknownData::Strict) {
+                const auto defaults =
+                    valueAt(schema.defaults(), source.prefix).value_or(QVariantMap{});
+                if (closedEmptyRecord(*d) ||
+                    !closeConfigValue(*d, defaults, source.prefix, true).removed.isEmpty())
+                    m_errors.append(
+                        m_schema.diagnostics().make(source.prefix, "unknown-data-declaration"));
+            }
             if (source.id.isEmpty() || sourceIds.contains(source.id) || !d ||
                 d->type != ConfigDescriptor::Type::Group)
                 m_errors.append(m_schema.diagnostics().make(source.prefix, "source-descriptor"));
@@ -394,6 +407,30 @@ ConfigOperation ConfigLayers::admit(LayerState &layer, SourceState &state,
     source.bytes = QByteArray(input.bytes.constData(), input.bytes.size());
     source.revision = QByteArray(input.revision.constData(), input.revision.size());
     source.fallbackFor = ownString(input.fallbackFor);
+    if (!projected && source.available && source.unknownData == ConfigUnknownData::Strict) {
+        const auto descriptor = m_schema.descriptor(source.prefix);
+        if (descriptor) {
+            const auto closed = closeConfigValue(*descriptor, source.raw, source.prefix, true);
+            const auto observation = QCryptographicHash::hash(
+                encodeJsonValue(QVariantList{layer.descriptor.id, source.id,
+                                             QString::fromLatin1(source.revision.toHex()),
+                                             source.raw})
+                    .bytes,
+                QCryptographicHash::Sha256);
+            if (!m_unknownRuns.contains(observation)) {
+                m_unknownRuns.insert(observation);
+                for (qsizetype i = 0; i < qMin(qsizetype(64), closed.removed.size()); ++i)
+                    m_unknownDiagnostics.append(
+                        {source.id,
+                         m_schema.diagnostics().make(closed.removed[i], "unknown-data-removed")});
+                if (closed.removed.size() > 64)
+                    m_unknownDiagnostics.append(
+                        {source.id,
+                         m_schema.diagnostics().make(source.prefix, "unknown-data-truncated")});
+            }
+            source.raw = closed.value.toMap();
+        }
+    }
     if (!projected)
         for (const auto &projection : m_projections)
             if (projection.sourceIds.contains(source.id)) {
@@ -493,7 +530,8 @@ ConfigOperation ConfigLayers::replaceAllSources(const QMap<QString, QList<Config
             for (auto &state : layer->sources)
                 if (state.source.id == source.id) {
                     found = true;
-                    if (state.source.prefix != source.prefix)
+                    if (state.source.prefix != source.prefix ||
+                        state.source.unknownData != source.unknownData)
                         return {false,
                                 {m_schema.diagnostics().make(source.prefix, "source-topology")}};
                     const auto admitted = candidate.admit(*layer, state, source);
@@ -654,6 +692,17 @@ ConfigWriteResult ConfigLayers::write(const ConfigPath &path, const QVariant &va
                     m_intentRevision};
         for (auto &source : layer.sources)
             if (source.source.id == target.sourceId) {
+                if (source.source.unknownData == ConfigUnknownData::Strict) {
+                    const auto closed =
+                        closeConfigValue(*m_schema.descriptor(path), checked.value, path);
+                    if (!closed.removed.isEmpty())
+                        return {false,
+                                {m_schema.diagnostics().make(closed.removed.first(),
+                                                             "undeclared-member")},
+                                {},
+                                {},
+                                m_intentRevision};
+                }
                 putValue(source.source.raw, path.mid(target.prefix.size()), checked.value);
                 source.source.exists = true;
                 source.source.localIntent = true;
@@ -755,6 +804,11 @@ ConfigWriteResult ConfigLayers::erase(const ConfigPath &path, const QString &lay
         false, {m_schema.diagnostics().make(path, "read-only-target")}, {}, {}, m_intentRevision};
 }
 
+QList<QPair<QString, ConfigDiagnostic>> ConfigLayers::takeUnknownDataDiagnostics() {
+    auto diagnostics = std::move(m_unknownDiagnostics);
+    m_unknownDiagnostics.clear();
+    return diagnostics;
+}
 ConfigWriteResult ConfigLayers::setUser(const ConfigPath &path, const QVariant &value) {
     return write(ownPath(path), value, false);
 }

@@ -67,6 +67,7 @@ class ConfigQmlValue : public ConfigDeclaration {
     Q_PROPERTY(bool forbidden MEMBER forbidden)
     Q_PROPERTY(QString idField MEMBER idField)
     Q_PROPERTY(QString stringPattern MEMBER stringPattern)
+    Q_PROPERTY(bool open MEMBER open)
 public:
     enum ValueType {
         Boolean,
@@ -90,6 +91,7 @@ public:
     QVariant minimum, maximum;
     QString idField, stringPattern;
     bool optional = false, nullable = false, forbidden = false;
+    bool open = false;
     ConfigDescriptor compile(QList<ConfigDiagnostic> &errors,
                              const ConfigPath &path = {}) const override;
 };
@@ -105,11 +107,15 @@ class ConfigMemorySource : public QObject {
     Q_PROPERTY(Kind kind MEMBER kind)
     Q_PROPERTY(bool shippedDefaults MEMBER shippedDefaults)
     Q_PROPERTY(AdmissionPolicy admissionPolicy MEMBER admissionPolicy)
+    Q_PROPERTY(UnknownData unknownData MEMBER unknownData)
 public:
     enum Kind { File, Environment, Runtime };
     Q_ENUM(Kind)
     enum AdmissionPolicy { RejectInput, FieldFallback, RetainLastGood };
     Q_ENUM(AdmissionPolicy)
+    enum UnknownData { Preserve, Strict };
+    Q_ENUM(UnknownData)
+    UnknownData unknownData = Preserve;
     AdmissionPolicy admissionPolicy = FieldFallback;
     using QObject::QObject;
     QString layerId = "user", sourceId = "memory";

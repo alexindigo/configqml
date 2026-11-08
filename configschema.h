@@ -54,6 +54,7 @@ struct ConfigDescriptor {
     QList<ConfigDescriptor> element; // Exactly one for List/Map; value-owned recursive descriptor.
     QString idField;       // Optional required scalar record field selecting list row identity.
     QString stringPattern; // Empty is unconstrained; String descriptors only.
+    bool open = false;     // Only Record; permits opaque members in Strict sources.
 
     ConfigDescriptor() = default;
     explicit ConfigDescriptor(Type type) : type(type) {}
@@ -77,6 +78,15 @@ private:
                                        bool childrenAdmitted,
                                        const ConfigDiagnosticBuilder &diagnostics) const;
 };
+
+struct ConfigClosure {
+    QVariant value;
+    QList<ConfigPath> removed; // Top-most nodes only; diagnostic delivery is capped separately.
+};
+ConfigClosure closeConfigValue(const ConfigDescriptor &descriptor, const QVariant &value,
+                               const ConfigPath &path = {}, bool sourceRoot = false,
+                               bool ignoreOpen = false);
+bool closedEmptyRecord(const ConfigDescriptor &descriptor);
 
 // Sealed result of an owned schema admission. No public unchecked-value constructor.
 class ConfigAdmission {
