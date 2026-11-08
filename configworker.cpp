@@ -110,8 +110,13 @@ void ConfigWorker::initialize() {
                     b.kind != ConfigValueSelector::Kind::Each)
                     overlap = false;
             }
-            if (overlap)
-                error = "list-policy-declaration";
+            if (overlap) {
+                const auto &ancestor =
+                    other.listPath.size() < policy.listPath.size() ? other : policy;
+                if (other.listPath.size() == policy.listPath.size() || ancestor.pruneUnknown ||
+                    ancestor.normalizeFields)
+                    error = "list-policy-declaration";
+            }
         }
         if (!error.isEmpty())
             m_initializationError = error;

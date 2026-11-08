@@ -158,6 +158,20 @@ private slots:
             const auto destination = raw.value("destination").toList();
             QCOMPARE(destination.size(), 1);
             QVERIFY(destination.first().toMap().contains("deprecated"));
+            for (const auto &name : {"identity-before.json", "identity-after.json"}) {
+                const auto screens = codec.decode(compat::bytes(dir.filePath(name)), "user")
+                                         .raw.value("screens")
+                                         .toList();
+                QCOMPARE(screens.size(), 2);
+                QCOMPARE(screens[0].toMap().value("name").toString(), QString("DP-1"));
+                QCOMPARE(screens[1].toMap().value("name").toString(), QString("new"));
+                QCOMPARE(screens[0].toMap().value("position").toString(), QString("left"));
+                const auto widgets = screens[0].toMap().value("widgets").toList();
+                QCOMPARE(widgets.size(), 2);
+                QVERIFY(widgets[0].toMap().value("opaque").toBool());
+                QVERIFY(widgets[1].toMap().value("deprecated").toBool());
+                QVERIFY(!widgets[1].toMap().contains("compact"));
+            }
         }
         if (retained) {
             ConfigJsonCodec codec;

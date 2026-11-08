@@ -16,13 +16,21 @@ bool qmlIndex(const QVariant &value, qsizetype &out) {
     out = qsizetype(n);
     return true;
 }
-bool qmlSelectors(const QVariant &value, QList<ConfigValueSelector> &out, bool each) {
+bool qmlSelectors(const QVariant &value, QList<ConfigValueSelector> &out, bool each, bool match) {
     if (value.metaType().id() != QMetaType::QVariantList)
         return false;
     for (const auto &raw : value.toList()) {
         if (raw.metaType().id() != QMetaType::QVariantMap)
             return false;
         const auto segment = raw.toMap();
+        if (match && segment.size() == 2 && segment.contains("field") &&
+            segment.contains("equals") &&
+            segment.value("field").metaType().id() == QMetaType::QString &&
+            segment.value("equals").metaType().id() == QMetaType::QString) {
+            out.append({ConfigValueSelector::Kind::Match, segment.value("field").toString(), 0,
+                        segment.value("equals").toString()});
+            continue;
+        }
         if (segment.size() != 1)
             return false;
         if (segment.contains("key") && segment.value("key").metaType().id() == QMetaType::QString)

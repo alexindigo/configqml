@@ -94,7 +94,8 @@ QVariant project(const ConfigRecordListPolicySpec &policy, const ConfigRecordLis
 ConfigValueResult transformList(const ConfigRecordListPolicySpec &policy,
                                 const QList<ConfigValueSelector> &address, const QVariant &value,
                                 const std::function<ConfigValueResult(QVariantList)> &transform,
-                                qsizetype depth = 0) {
+                                qsizetype depth = 0, std::optional<ConfigDescriptor> node = {},
+                                bool ensure = false, bool absentOnly = false) {
     const auto fail = [] {
         return ConfigValueResult{{}, {ConfigDiagnosticBuilder().make({}, "list-edit-operation")}};
     };
@@ -104,41 +105,96 @@ ConfigValueResult transformList(const ConfigRecordListPolicySpec &policy,
         const auto selected = address[depth];
         const auto expected = policy.listPath[depth];
         if (selected.kind == Selector::Kind::Each ||
+            (selected.kind == Selector::Kind::Match && expected.kind != Selector::Kind::Each) ||
             (expected.kind != Selector::Kind::Each && !(selected == expected)))
             return fail();
         if (selected.kind == Selector::Kind::Key && mapValue(value)) {
             auto map = value.toMap();
-            if (!map.contains(selected.key))
-                return fail();
-            auto result =
-                transformList(policy, address, map.value(selected.key), transform, depth + 1);
+            std::optional<ConfigDescriptor> child;
+            if (node && node->type == ConfigDescriptor::Type::Record &&
+                node->fields.contains(selected.key))
+                child = node->fields.value(selected.key);
+            else if (node && node->type == ConfigDescriptor::Type::Map)
+                child = node->element.first();
+            QVariant next = map.value(selected.key);
+            if (!map.contains(selected.key)) {
+                // copy creates its final list even without ensure; ancestors need ensure.
+                if (absentOnly && depth + 1 == address.size()) {
+                    if (!child || child->type != ConfigDescriptor::Type::List)
+                        return fail();
+                } else {
+                    if (!ensure || !child)
+                        return fail();
+                    if (child->type == ConfigDescriptor::Type::Record ||
+                        child->type == ConfigDescriptor::Type::Map)
+                        next = QVariantMap{};
+                    else if (child->type == ConfigDescriptor::Type::List)
+                        next = QVariantList{};
+                    else
+                        return fail();
+                }
+            }
+            auto result = transformList(policy, address, next, transform, depth + 1, child, ensure,
+                                        absentOnly);
             if (!result.ok())
                 return result;
             map[selected.key] = result.value;
             return {map, {}};
         }
-        if (selected.kind == Selector::Kind::Index && listValue(value)) {
+        if ((selected.kind == Selector::Kind::Index || selected.kind == Selector::Kind::Match) &&
+            listValue(value)) {
             auto list = value.toList();
-            if (selected.index < 0 || selected.index >= list.size())
+            auto index = selected.index;
+            const auto child = node && node->type == ConfigDescriptor::Type::List
+                                   ? std::optional<ConfigDescriptor>(node->element.first())
+                                   : std::nullopt;
+            if (selected.kind == Selector::Kind::Match) {
+                if (!child || child->type != ConfigDescriptor::Type::Record)
+                    return fail();
+                const auto field = child->fields.constFind(selected.key);
+                if (field == child->fields.cend() ||
+                    field->type != ConfigDescriptor::Type::String || field->optional ||
+                    field->nullable)
+                    return fail();
+                index = -1;
+                for (qsizetype i = 0; i < list.size(); ++i) {
+                    if (!mapValue(list[i]))
+                        return fail();
+                    const auto candidate = list[i].toMap().value(selected.key);
+                    if (index < 0 && candidate.metaType().id() == QMetaType::QString &&
+                        candidate.toString() == selected.value)
+                        index = i;
+                }
+                if (index < 0 && ensure) {
+                    index = list.size();
+                    list.append(QVariantMap{{selected.key, selected.value}});
+                }
+            }
+            if (index < 0 || index >= list.size())
                 return fail();
-            auto result =
-                transformList(policy, address, list[selected.index], transform, depth + 1);
+            auto result = transformList(policy, address, list[index], transform, depth + 1, child,
+                                        ensure, absentOnly);
             if (!result.ok())
                 return result;
-            list[selected.index] = result.value;
+            list[index] = result.value;
             return {list, {}};
         }
         return fail();
     }
-    if (depth != policy.listPath.size() || !listValue(value))
+    if (depth != policy.listPath.size())
+        return fail();
+    if (absentOnly)
+        return value.isValid() ? fail() : transform({});
+    if (!listValue(value))
         return fail();
     return transform(value.toList());
 }
 ConfigValueResult edit(const ConfigRecordListPolicySpec &policy,
                        const ConfigRecordListMetadata &metadata, const QVariant &value,
-                       const ConfigRecordListEditOptions &options) {
+                       const ConfigRecordListEditOptions &options, const ConfigSchema *schema) {
     return transformList(
-        policy, options.listAddress, value, [&](QVariantList raw) -> ConfigValueResult {
+        policy, options.listAddress, value,
+        [&](QVariantList raw) -> ConfigValueResult {
             const auto fail = [] {
                 return ConfigValueResult{
                     {}, {ConfigDiagnosticBuilder().make({}, "list-edit-operation")}};
@@ -198,7 +254,8 @@ ConfigValueResult edit(const ConfigRecordListPolicySpec &policy,
                 }
             }
             return {raw, {}};
-        });
+        },
+        0, schema ? schema->descriptor(policy.path) : std::nullopt, options.ensure);
 }
 } // namespace
 QString validateRecordListPolicy(const ConfigSchema &schema,
@@ -242,29 +299,36 @@ ConfigRecordListProjection projectRecordLists(const ConfigRecordListPolicySpec &
 ConfigValueResult editRecordListValue(const ConfigRecordListPolicySpec &policy,
                                       const ConfigRecordListMetadata &metadata,
                                       const QVariant &value,
-                                      const ConfigRecordListEditOptions &options) {
-    return edit(policy, metadata, value, options);
+                                      const ConfigRecordListEditOptions &options,
+                                      const ConfigSchema *schema) {
+    if (options.ensure && options.edits.isEmpty())
+        return {{}, {ConfigDiagnosticBuilder().make({}, "list-edit-operation")}};
+    return edit(policy, metadata, value, options, schema);
 }
 QString transferRecordListValue(const ConfigRecordListPolicySpec &fromPolicy,
                                 const ConfigRecordListMetadata &fromMetadata, QVariant &fromValue,
                                 const ConfigRecordListPolicySpec &toPolicy,
                                 const ConfigRecordListMetadata &toMetadata, QVariant &toValue,
-                                const ConfigRecordListEdit &operation) {
+                                const ConfigRecordListEdit &operation, const ConfigSchema *schema) {
     const auto fail = [] {
         return ConfigValueResult{{}, {ConfigDiagnosticBuilder().make({}, "list-edit-operation")}};
     };
     QVariant row;
-    const auto removed = transformList(fromPolicy, operation.from.listAddress, fromValue,
-                                       [&](QVariantList raw) -> ConfigValueResult {
-                                           QList<qsizetype> mapping;
-                                           QString error;
-                                           normalize(fromPolicy, fromMetadata, raw, mapping, error);
-                                           if (!error.isEmpty() || operation.from.index < 0 ||
-                                               operation.from.index >= mapping.size())
-                                               return fail();
-                                           row = raw.takeAt(mapping[operation.from.index]);
-                                           return {raw, {}};
-                                       });
+    if (operation.from.ensure)
+        return "list-edit-operation";
+    const auto removed = transformList(
+        fromPolicy, operation.from.listAddress, fromValue,
+        [&](QVariantList raw) -> ConfigValueResult {
+            QList<qsizetype> mapping;
+            QString error;
+            normalize(fromPolicy, fromMetadata, raw, mapping, error);
+            if (!error.isEmpty() || operation.from.index < 0 ||
+                operation.from.index >= mapping.size())
+                return fail();
+            row = raw.takeAt(mapping[operation.from.index]);
+            return {raw, {}};
+        },
+        0, schema ? schema->descriptor(fromPolicy.path) : std::nullopt);
     if (!removed.ok())
         return "list-edit-operation";
     const bool sameLeaf = &fromValue == &toValue;
@@ -282,12 +346,47 @@ QString transferRecordListValue(const ConfigRecordListPolicySpec &fromPolicy,
                                                        : mapping.last() + 1;
             raw.insert(target, row);
             return {raw, {}};
-        });
+        },
+        0, schema ? schema->descriptor(toPolicy.path) : std::nullopt, operation.destination.ensure);
     if (!inserted.ok())
         return "list-edit-operation";
     fromValue = sameLeaf ? inserted.value : removed.value;
     if (!sameLeaf)
         toValue = inserted.value;
+    return {};
+}
+QString copyRecordListValue(const ConfigRecordListPolicySpec &fromPolicy,
+                            const ConfigRecordListMetadata &fromMetadata, const QVariant &fromValue,
+                            const ConfigRecordListPolicySpec &toPolicy,
+                            const ConfigRecordListMetadata &toMetadata, QVariant &toValue,
+                            const ConfigRecordListEdit &operation, const ConfigSchema &schema) {
+    if (operation.from.ensure || (!mapValue(toValue) && !listValue(toValue)))
+        return "list-edit-operation";
+    QVariantList source;
+    const auto read = transformList(
+        fromPolicy, operation.from.listAddress, fromValue,
+        [&](QVariantList raw) -> ConfigValueResult {
+            source = raw;
+            return {raw, {}};
+        },
+        0, schema.descriptor(fromPolicy.path));
+    if (!read.ok())
+        return "list-edit-operation";
+    QList<qsizetype> a, b;
+    QString error;
+    const auto from = normalize(fromPolicy, fromMetadata, source, a, error);
+    const auto to = normalize(toPolicy, toMetadata, source, b, error);
+    if (!error.isEmpty())
+        return "list-edit-operation";
+    if (from != to)
+        return "list-edit-conflict";
+    const auto copied = transformList(
+        toPolicy, operation.destination.listAddress, toValue,
+        [&](QVariantList) -> ConfigValueResult { return {source, {}}; }, 0,
+        schema.descriptor(toPolicy.path), operation.destination.ensure, true);
+    if (!copied.ok())
+        return "list-edit-operation";
+    toValue = copied.value;
     return {};
 }
 } // namespace configqml

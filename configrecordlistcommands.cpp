@@ -36,16 +36,25 @@ quint64 ConfigStore::editRecordList(const QString &id, const ConfigRecordListEdi
     ConfigCommand command{requestId, m_sequence + 1, "editRecordList", {}};
     command.policyId = ownString(id);
     command.listEdits = options;
-    for (auto &selector : command.listEdits->listAddress)
-        selector.key = ownString(selector.key);
+    const auto ownSelectors = [](QList<ConfigValueSelector> &selectors) {
+        for (auto &selector : selectors) {
+            selector.key = ownString(selector.key);
+            selector.value = ownString(selector.value);
+        }
+    };
+    ownSelectors(command.listEdits->listAddress);
     for (auto &edit : command.listEdits->edits) {
         edit.field = ownString(edit.field);
-        if (edit.op == ConfigRecordListEdit::Op::Transfer)
-            for (auto *endpoint : {&edit.from, &edit.destination}) {
-                endpoint->policyId = ownString(endpoint->policyId);
-                for (auto &selector : endpoint->listAddress)
-                    selector.key = ownString(selector.key);
-            }
+        QList<ConfigRecordListEndpoint *> endpoints;
+        if (edit.op == ConfigRecordListEdit::Op::Transfer ||
+            edit.op == ConfigRecordListEdit::Op::Copy)
+            endpoints = {&edit.from, &edit.destination};
+        if (edit.at)
+            endpoints.append(&*edit.at);
+        for (auto *endpoint : endpoints) {
+            endpoint->policyId = ownString(endpoint->policyId);
+            ownSelectors(endpoint->listAddress);
+        }
         if (edit.op == ConfigRecordListEdit::Op::Set ||
             edit.op == ConfigRecordListEdit::Op::Insert) {
             const auto captured = ownValue(edit.value);
@@ -57,17 +66,33 @@ quint64 ConfigStore::editRecordList(const QString &id, const ConfigRecordListEdi
     ConfigInput input;
     input.kind = ConfigInput::Kind::Group;
     input.sequence = command.prefix;
-    QStringList policies{command.policyId};
-    for (const auto &edit : command.listEdits->edits)
-        if (edit.op == ConfigRecordListEdit::Op::Transfer)
+    QStringList policies{command.policyId}, written;
+    for (const auto &edit : command.listEdits->edits) {
+        if (edit.op == ConfigRecordListEdit::Op::Transfer ||
+            edit.op == ConfigRecordListEdit::Op::Copy) {
             policies.append({edit.from.policyId, edit.destination.policyId});
+            written.append(edit.destination.policyId);
+            if (edit.op == ConfigRecordListEdit::Op::Transfer)
+                written.append(edit.from.policyId);
+        } else {
+            const auto target = edit.at ? edit.at->policyId : command.policyId;
+            policies.append(target);
+            written.append(target);
+        }
+    }
+    if (command.listEdits->edits.isEmpty())
+        written.append(command.policyId);
     for (const auto &policyId : policies) {
         if (!m_policyPaths.contains(policyId))
             continue;
         const auto path = m_policyPaths.value(policyId);
-        input.pathGenerations[path] = info(path).pathGeneration + 1;
         input.fences[path] = info(path);
     }
+    for (const auto &policyId : written)
+        if (m_policyPaths.contains(policyId)) {
+            const auto path = m_policyPaths.value(policyId);
+            input.pathGenerations[path] = info(path).pathGeneration + 1;
+        }
     command.input = input;
     if (!m_accepting || !m_owner->dispatch(command)) {
         ConfigResult result;
@@ -139,16 +164,35 @@ void ConfigWorker::recordListCommand(const ConfigCommand &command) {
         m_acceptOrigin = "projection";
         m_acceptCause = "metadata";
     } else {
-        QList<ConfigRecordListEndpoint> endpoints{
-            {command.policyId, command.listEdits->listAddress, command.listEdits->generation, 0}};
+        QList<ConfigRecordListEndpoint> endpoints{{command.policyId, command.listEdits->listAddress,
+                                                   command.listEdits->generation, 0,
+                                                   command.listEdits->ensure}};
         QSet<ConfigPath> transferPaths;
-        for (const auto &edit : command.listEdits->edits)
-            if (edit.op == ConfigRecordListEdit::Op::Transfer)
+        QSet<ConfigPath> copySources;
+        if (command.listEdits->ensure && command.listEdits->edits.isEmpty()) {
+            fail("list-edit-operation");
+            return;
+        }
+        for (const auto &edit : command.listEdits->edits) {
+            if (edit.op == ConfigRecordListEdit::Op::Transfer ||
+                edit.op == ConfigRecordListEdit::Op::Copy) {
+                if (edit.from.ensure || edit.at) {
+                    fail("list-edit-operation");
+                    return;
+                }
                 for (const auto &endpoint : {edit.from, edit.destination}) {
                     endpoints.append(endpoint);
-                    if (m_listPolicies.contains(endpoint.policyId))
+                    if (m_listPolicies.contains(endpoint.policyId) &&
+                        (edit.op == ConfigRecordListEdit::Op::Transfer ||
+                         endpoint.policyId == edit.destination.policyId))
                         transferPaths.insert(m_listPolicies.value(endpoint.policyId).path);
                 }
+                if (edit.op == ConfigRecordListEdit::Op::Copy &&
+                    m_listPolicies.contains(edit.from.policyId))
+                    copySources.insert(m_listPolicies.value(edit.from.policyId).path);
+            } else if (edit.at)
+                endpoints.append(*edit.at);
+        }
         QMap<ConfigPath, QVariant> values;
         for (const auto &endpoint : endpoints) {
             if (!m_listPolicies.contains(endpoint.policyId)) {
@@ -177,36 +221,53 @@ void ConfigWorker::recordListCommand(const ConfigCommand &command) {
                     return;
                 }
             }
+            if (copySources.contains(path) && !m_layers->info(path).maskedBy.isEmpty()) {
+                fail("list-edit-masked");
+                return;
+            }
             values[path] = m_layers->unmaskedValue(path).value_or(QVariant());
         }
         QSet<ConfigPath> editedPaths;
         if (command.listEdits->edits.isEmpty())
             editedPaths.insert(policy.path);
         for (const auto &edit : command.listEdits->edits) {
-            if (edit.op == ConfigRecordListEdit::Op::Transfer) {
+            if (edit.op == ConfigRecordListEdit::Op::Transfer ||
+                edit.op == ConfigRecordListEdit::Op::Copy) {
                 const auto from = m_listPolicies.value(edit.from.policyId);
                 const auto to = m_listPolicies.value(edit.destination.policyId);
-                editedPaths.insert(from.path);
+                if (edit.op == ConfigRecordListEdit::Op::Transfer)
+                    editedPaths.insert(from.path);
                 editedPaths.insert(to.path);
-                const auto error = transferRecordListValue(
-                    from, m_listMetadata.value(from.policyId), values[from.path], to,
-                    m_listMetadata.value(to.policyId), values[to.path], edit);
+                const auto error =
+                    edit.op == ConfigRecordListEdit::Op::Transfer
+                        ? transferRecordListValue(from, m_listMetadata.value(from.policyId),
+                                                  values[from.path], to,
+                                                  m_listMetadata.value(to.policyId),
+                                                  values[to.path], edit, &m_options.schema)
+                        : copyRecordListValue(from, m_listMetadata.value(from.policyId),
+                                              values[from.path], to,
+                                              m_listMetadata.value(to.policyId), values[to.path],
+                                              edit, m_options.schema);
                 if (!error.isEmpty()) {
                     fail(error);
                     return;
                 }
             } else {
-                editedPaths.insert(policy.path);
+                const auto target = edit.at.value_or(endpoints.first());
+                const auto targetPolicy = m_listPolicies.value(target.policyId);
+                editedPaths.insert(targetPolicy.path);
                 auto options = *command.listEdits;
                 options.edits = {edit};
-                const auto edited =
-                    editRecordListValue(policy, m_listMetadata.value(command.policyId),
-                                        values.value(policy.path), options);
+                options.listAddress = target.listAddress;
+                options.ensure = target.ensure;
+                const auto edited = editRecordListValue(
+                    targetPolicy, m_listMetadata.value(target.policyId),
+                    values.value(targetPolicy.path), options, &m_options.schema);
                 if (!edited.ok()) {
                     fail("list-edit-operation");
                     return;
                 }
-                values[policy.path] = edited.value;
+                values[targetPolicy.path] = edited.value;
             }
         }
         auto input = *command.input;
