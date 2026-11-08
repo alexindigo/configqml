@@ -813,6 +813,14 @@ private slots:
             QVERIFY(first.value("map").toMap().value("opaque").toMap().contains("extra"));
             QVERIFY(compat::bytes(path).contains("1.0000000000000001"));
             QVERIFY(compat::bytes(path).contains("18446744073709551615"));
+        }
+        {
+            ConfigStore store(o);
+            QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+            const auto carried = store.value({"record"}).toMap().value("extra");
+            QCOMPARE(carried.value<ConfigNumber>().token(), QString("18446744073709551615"));
+            const auto map = store.value({"map"}).toMap().value("opaque").toMap();
+            QCOMPARE(map.value("extra").value<ConfigNumber>().token(), QString("7"));
             QCOMPARE(edit(store, {{E::Op::Insert, 1, {}, row("new")}}).status, QString("admitted"));
             QCOMPARE(edit(store, {{E::Op::Set, 0, "authored", true}}).status, QString("admitted"));
             QVERIFY(store.setUser({"record"}, QVariantMap{{"id", "new"}, {"newWholeLeaf", true}})
@@ -824,9 +832,14 @@ private slots:
         const auto rows = restarted.value({"rows"}).toList();
         QCOMPARE(rows.size(), 2);
         QVERIFY(rows[0].toMap().value("authored").toBool());
+        QCOMPARE(rows[0].toMap().value("extra").value<ConfigNumber>().token(),
+                 QString("1.0000000000000001"));
         QCOMPARE(rows[1].toMap().value("extra").value<ConfigNumber>().token(), QString("7"));
         QVERIFY(restarted.value({"record"}).toMap().value("newWholeLeaf").toBool());
-        QVERIFY(decodeJsonValue(compat::bytes(path)).value.toMap().contains("rogue"));
+        const auto raw = decodeJsonValue(compat::bytes(path)).value.toMap();
+        QVERIFY(raw.contains("rogue"));
+        QVERIFY(raw.value("group").toMap().contains("rogue"));
+        QVERIFY(raw.value("map").toMap().value("opaque").toMap().contains("extra"));
     }
 };
 QTEST_GUILESS_MAIN(UnknownDataTest)
