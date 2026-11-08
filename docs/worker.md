@@ -37,8 +37,13 @@ callbacks guard their independently supplied living context.
 `save`, `flush`, `close` capture the reported input prefix, never a facade graph.
 Save results are exactly `saved`, `nothing_to_save`, or `failed`, asynchronously.
 They name request/store/prefix, confirmed revisions, per-route publication facts,
-known/uncertain/partial state and value-free error codes. Failure propagation
-preserves original outcome evidence without silent retry or recapture. Memory
+known/uncertain/partial state and value-free error codes. Ordinary publication
+failures remain attached to pending source work, not every future save: unrelated
+routes still publish, and later saves, including autosave, can settle a resolved source
+against its original preimage. Old receipts remain in `failures()` as evidence.
+Rejected inputs have their own failed receipt and remain in `failures()`, but
+cannot make a later publishing save fail. Terminal worker loss still stops
+persistence and propagates its uncertainty to queued requests. Memory
 publication confirms readback bytes; it is not disk durability.
 
 Flush requests publication and waits for earlier work. Close seals ingress,

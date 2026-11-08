@@ -742,7 +742,6 @@ void ConfigWorker::process(const ConfigCommand &command) {
                                     ? m_options.schema.diagnostics().make(input.path, "admission")
                                     : write.errors.first();
         result.error = m_options.schema.diagnostics().error(diagnostic, {}, "write");
-        m_failures.append(result);
     } else if (input.kind == ConfigInput::Kind::User || input.kind == ConfigInput::Kind::Reset ||
                input.kind == ConfigInput::Kind::Initialize) {
         recordPersistent(input, before);
@@ -782,11 +781,6 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
         if (masks.size() == 1)
             m_saveResult.maskedBy = *masks.cbegin();
     }
-    m_saveRetainedFailure = command.groupToken.isEmpty() && inheritFailures(m_saveResult);
-    if (m_saveRetainedFailure) {
-        finishSave();
-        return; // Preserve the original outcome; never silently retry or recapture.
-    }
     for (const auto &id : m_dirty.keys()) {
         const auto intents = eligibleIntents(id, command);
         if (intents.isEmpty())
@@ -813,7 +807,8 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
             }
     }
     if (m_saveIntents.isEmpty() || m_routes.isEmpty()) {
-        m_saveResult.status = "nothing_to_save";
+        if (m_saveResult.status.isEmpty())
+            m_saveResult.status = "nothing_to_save";
         finishSave();
         return;
     }
@@ -982,8 +977,10 @@ void ConfigWorker::finishSave() {
     }
     if (m_saveResult.status == "failed") {
         finalizePublicationState(m_saveResult);
-        if (!m_saveRetainedFailure && !refusal && m_save.groupToken.isEmpty())
-            m_failures.append(m_saveResult);
+        // Publication failures stay with the pending source intent/preimage.
+        // They are not input rejections and must not poison later prefixes.
+        if (m_failed && m_save.groupToken.isEmpty())
+            m_failures.append(m_saveResult); // Terminal loss retains uncertain effects too.
     }
     if (!m_save.groupToken.isEmpty()) {
         auto &info = m_groups[m_save.groupToken].info;

@@ -115,7 +115,12 @@ private slots:
         QTRY_COMPARE(complete.size(), 3);
         const auto result = qvariant_cast<ConfigResult>(complete.last().first());
         QCOMPARE(result.requestId, save);
-        QCOMPARE(result.status, QString("failed"));
+        QCOMPARE(result.status, QString("saved"));
+        store.flush();
+        QTRY_COMPARE(complete.size(), 4);
+        QCOMPARE(qvariant_cast<ConfigResult>(complete.last().first()).status,
+                 QString("nothing_to_save"));
+        QCOMPARE(store.failures().first().error.code, QString("injected-rejection"));
     }
     void singleRejectionRollsBack() {
         auto o = options();
@@ -251,9 +256,11 @@ private slots:
         QCOMPARE(saved.inputPrefix, quint64(1));
         QCOMPARE(flushed.inputPrefix, quint64(2));
         QCOMPARE(saved.status, fault ? QString("failed") : QString("saved"));
-        QCOMPARE(flushed.status, fault ? QString("failed") : QString("saved"));
+        QCOMPARE(flushed.status, fault > 1 ? QString("failed") : QString("saved"));
         QCOMPARE(saved.publicationState, fault > 1 ? QString("uncertain") : QString("known"));
-        QCOMPARE(flushed.publicationState, saved.publicationState);
+        QCOMPARE(flushed.publicationState, QString("known"));
+        if (fault > 1)
+            QCOMPARE(flushed.error.code, QString("revision-conflict"));
         if (fault)
             QVERIFY(!store.failures().isEmpty());
     }
@@ -434,8 +441,10 @@ private slots:
         QTRY_COMPARE(complete.size(), 5);
         for (int i : {3, 4}) {
             const auto retained = qvariant_cast<ConfigResult>(complete[i][0]);
-            QCOMPARE(retained.publicationState, QString("partial"));
-            QCOMPARE(retained.publications.size(), 2);
+            QCOMPARE(retained.status, i == 3 ? QString("saved") : QString("nothing_to_save"));
+            QCOMPARE(retained.publicationState, QString("known"));
+            QCOMPARE(retained.publications.size(), i == 3 ? 1 : 0);
+            QVERIFY(retained.coveredRevisions.contains("b"));
         }
         auto *temporary = new ConfigStore(options());
         QTRY_COMPARE(temporary->status(), ConfigStore::Status::Ready);

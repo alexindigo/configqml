@@ -245,10 +245,9 @@ private:
     QMap<QString, ConfigRoute> m_routes;
     QMap<QString, ConfigRevision> m_revisions;
     QMap<QString, quint64> m_dirty;
-    QList<ConfigResult> m_failures;
+    QList<ConfigResult> m_failures; // Terminal loss only; request failures live in facade history.
     ConfigCommand m_save;
     ConfigResult m_saveResult;
-    bool m_saveRetainedFailure = false;
     QStringList m_saveSources;
     QString m_activeSource;
     QByteArray m_activeBytes;

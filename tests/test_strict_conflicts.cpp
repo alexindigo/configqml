@@ -31,6 +31,92 @@ ConfigRetainedGroupOptions group() { return {"strict-head", {{"b"}}, {{{"b"}, tr
 class StrictConflictsTest : public QObject {
     Q_OBJECT
 private slots:
+    void pathIntentAutosaveRetriesResolvedWork() {
+        QTemporaryDir dir;
+        const auto path = dir.filePath("user.json");
+        compat::put(path, "{\"a\":1,\"b\":1}");
+        auto o = strictOptions(dir.path());
+        o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy::PathIntent;
+        o.autoSave = true;
+        o.autoSaveInterval = 0;
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        ConfigStoreTestAccess::run(store, [](auto &worker) { worker.holdInputs(true); });
+        QVERIFY(store.setUser({"b"}, 9).accepted);
+        replace(path, "{\"a\":1,\"b\":4}");
+        const auto failed = compat::request(store, [&] {
+            const auto id = store.save();
+            ConfigStoreTestAccess::run(store, [](auto &worker) { worker.holdInputs(false); });
+            return id;
+        });
+        QCOMPARE(failed.error.code, QString("path-conflict"));
+        QSignalSpy autosaved(&store, &ConfigStore::autoSaved);
+        replace(path, "{\"a\":7,\"b\":1}");
+        QVERIFY(store.setUser({"b"}, 9).accepted);
+        QTRY_COMPARE(autosaved.size(), 1);
+        QCOMPARE(qvariant_cast<ConfigResult>(autosaved[0][0]).status, QString("saved"));
+        ConfigStore restart(o);
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value({"a"}).toInt(), 7);
+        QCOMPARE(restart.value({"b"}).toInt(), 9);
+    }
+    void ordinaryFailureDoesNotPoisonOtherSources() {
+        QTemporaryDir dir;
+        const auto a = dir.filePath("a.json"), b = dir.filePath("b.json");
+        const QByteArray original = "{\"a\":1}";
+        compat::put(a, original);
+        compat::put(b, "{\"b\":1}");
+        auto o = strictOptions(dir.path(), a);
+        o.layers[0].sources = {{"a", {}, {}}, {"b", {}, {}}};
+        o.jsonFiles[0].sourceId = "a";
+        auto second = o.jsonFiles[0];
+        second.sourceId = "b";
+        second.path = b;
+        o.jsonFiles.append(second);
+        // Explicit routes keep these root-sharing shards disjoint.
+        o.layers[0].sources[0].prefix = {"left"};
+        o.layers[0].sources[1].prefix = {"right"};
+        using D = ConfigDescriptor;
+        o.schema = ConfigSchema(
+            D::group({{"left", D::group({{"a", D::leaf(D::Type::SafeInteger, 0)}})},
+                      {"right", D::group({{"b", D::leaf(D::Type::SafeInteger, 0)}})}}));
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QVERIFY(store.setUser({"left", "a"}, 9).accepted);
+        // In-place modification: restoring below keeps the inode, but changes time.
+        compat::put(a, "{\"a\":7}");
+        const auto first = compat::request(store, [&] { return store.save(); });
+        QCOMPARE(first.error.code, QString("source-preimage-conflict"));
+        QVERIFY(store.setUser({"right", "b"}, 8).accepted);
+        const auto partial = compat::request(store, [&] { return store.flush(); });
+        QCOMPARE(partial.status, QString("failed"));
+        QCOMPARE(partial.publicationState, QString("partial"));
+        QVERIFY(partial.coveredRevisions.contains("b"));
+        QVERIFY(compat::bytes(b).contains("\"b\":8"));
+        QCOMPARE(compat::bytes(a), QByteArray("{\"a\":7}"));
+        QVERIFY(!first.evidence.isEmpty());
+    }
+    void ordinaryFailureCanResolve() {
+        QTemporaryDir dir;
+        compat::put(dir.filePath("user.json"), "{\"a\":1}");
+        auto o = strictOptions(dir.path());
+        auto once = std::make_shared<std::atomic<bool>>(true);
+        o.fileFault = [once](const QString &phase, const QString &) {
+            return phase == "write" && once->exchange(false) ? QString("once") : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QVERIFY(store.setUser({"a"}, 9).accepted);
+        QCOMPARE(compat::request(store, [&] { return store.save(); }).error.code, QString("once"));
+        const auto resolved = compat::request(store, [&] { return store.save(); });
+        QCOMPARE(resolved.status, QString("saved"));
+        QVERIFY(compat::bytes(dir.filePath("user.json")).contains("\"a\":9"));
+        QCOMPARE(compat::request(store, [&] { return store.flush(); }).status,
+                 QString("nothing_to_save"));
+        ConfigStore restart(o);
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value({"a"}).toInt(), 9);
+    }
     void declaration() {
         QTemporaryDir dir;
         auto o = strictOptions(dir.path());

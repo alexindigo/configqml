@@ -621,7 +621,6 @@ void ConfigWorker::retainedGroupCommand(const ConfigCommand &command) {
             describeGroup(m_saveResult, capture.info);
             m_saveResult.status = "failed";
             m_saveResult.error = {"group-dependency-stopped", {}, command.operation};
-            m_saveRetainedFailure = false;
             m_unresolvedSave = false;
             finishSave();
             return;
