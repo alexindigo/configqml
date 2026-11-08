@@ -46,6 +46,9 @@ struct ConfigSourcePreimage {
     QByteArray bytes;
 };
 bool applyFileEdit(QVariantMap &raw, const ConfigFileEdit &edit);
+// Same content/presence and resolved name/link/parent chain; ignores final-file
+// inode/timestamps. Publication's late-race fence still compares full revisions.
+bool sameSourcePreimage(const ConfigSourcePreimage &a, const ConfigSourcePreimage &b);
 class ConfigJsonBackend : public ConfigBackend {
 public:
     using FaultHook = std::function<QString(const QString &phase, const QString &file)>;

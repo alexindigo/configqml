@@ -194,6 +194,21 @@ private slots:
         QCOMPARE(restarted.value({"a"}).toInt(), 7);
         QCOMPARE(restarted.value({"b"}).toInt(), 1);
     }
+    void pureContentEqualABA() {
+        QTemporaryDir dir;
+        const auto path = dir.filePath("user.json");
+        const QByteArray original = "{ \"a\":1,\"b\":1 }\n";
+        compat::put(path, original);
+        ConfigStore store(strictOptions(dir.path()));
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QVERIFY(store.setUser({"b"}, 8).accepted);
+        replace(path, original);
+        QCOMPARE(compat::request(store, [&] { return store.save(); }).status, QString("saved"));
+        ConfigStore restart(strictOptions(dir.path()));
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value({"a"}).toInt(), 1);
+        QCOMPARE(restart.value({"b"}).toInt(), 8);
+    }
     void inodeAndABA() {
         QTemporaryDir dir;
         const auto path = dir.filePath("user.json");
@@ -203,11 +218,41 @@ private slots:
         QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
         QVERIFY(store.setUser({"b"}, 8).accepted);
         replace(path, "{\"a\":2,\"b\":1}");
+        const auto failed = compat::request(store, [&] { return store.save(); });
+        QCOMPARE(failed.error.code, QString("source-preimage-conflict"));
+        QVERIFY(!failed.evidence.isEmpty());
         replace(path, bytes);
         const auto result = compat::request(store, [&] { return store.save(); });
-        QCOMPARE(result.error.code, QString("source-preimage-conflict"));
-        QCOMPARE(compat::bytes(path), bytes);
+        QCOMPARE(result.status, QString("saved"));
+        QVERIFY(compat::bytes(path).contains("\"b\":8"));
         QCOMPARE(store.value({"b"}).toInt(), 8);
+        ConfigStore restart(strictOptions(dir.path()));
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value({"b"}).toInt(), 8);
+    }
+    void retainedContentEqualResolution() {
+        QTemporaryDir dir;
+        const auto path = dir.filePath("user.json");
+        const QByteArray original = "{ \"a\":1,\"b\":1 }\n";
+        compat::put(path, original);
+        ConfigStore store(strictOptions(dir.path()));
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto capture = compat::request(store, [&] { return store.retainGroup(group()); });
+        replace(path, "{\"a\":1,\"b\":1}"); // Same JSON is not the same bytes.
+        const auto failed =
+            compat::request(store, [&] { return store.saveGroup(capture.groupToken); });
+        QCOMPARE(failed.error.code, QString("source-preimage-conflict"));
+        replace(path, original);
+        const auto retry =
+            compat::request(store, [&] { return store.retryGroup(capture.groupToken); });
+        QCOMPARE(retry.status, QString("saved"));
+        QCOMPARE(retry.attemptNumber, quint64(2));
+        QVERIFY(!failed.evidence.isEmpty());
+        for (const auto &ref : failed.evidence)
+            QVERIFY(QFileInfo::exists(ref.directory + "/metadata.json"));
+        ConfigStore restart(strictOptions(dir.path()));
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value({"b"}).toInt(), 9);
     }
     void configuredLinkAndParentIdentity_data() {
         QTest::addColumn<bool>("parent");

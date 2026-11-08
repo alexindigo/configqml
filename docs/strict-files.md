@@ -9,8 +9,12 @@ None implies either of the others. Unknown-data removals retain role
 `ConfigJsonFile::conflictPolicy` / `JsonFileSource.conflictPolicy` defaults to
 `PathIntent`: the existing cooperative writer protocol merges disjoint foreign
 path edits. Select `StrictSourcePreimage` when a save must refuse *any* foreign
-change to the original source, including unknown keys, formatting, inode, configured
-file/parent links or directory identity. Declaration metadata compiles once.
+content change to the original source, including unknown keys and formatting,
+or changes to configured file/parent links or directory identity. Declaration
+metadata compiles once. A final file's inode/timestamps alone do not conflict:
+exact original bytes and presence under the lock resolve frozen ordinary work
+and retained-group retries. Semantically equal JSON with different bytes still
+conflicts. Evidence keeps both observations and their distinct revisions.
 
 Strict stores require an absolute clean `evidenceDirectory`. Pending intent and
 retained groups capture original presence, exact bytes and the resolved revision.

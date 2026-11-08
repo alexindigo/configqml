@@ -55,6 +55,11 @@ bool applyFileEdit(QVariantMap &raw, const ConfigFileEdit &edit) {
         removeValue(raw, edit.path);
     return true;
 }
+bool sameSourcePreimage(const ConfigSourcePreimage &a, const ConfigSourcePreimage &b) {
+    const auto left = a.revision.token.split('|'), right = b.revision.token.split('|');
+    return left.size() == 4 && right.size() == 4 && left[0] == right[0] && left[3] == right[3] &&
+           a.revision.exists == b.revision.exists && a.bytes == b.bytes;
+}
 ConfigJsonBackend::ConfigJsonBackend(const QList<ConfigJsonFile> &files, FaultHook hook,
                                      const QMap<QString, ConfigDiagnosticBuilder> &diagnostics)
     : m_files(files), m_hook(std::move(hook)) {
@@ -493,8 +498,17 @@ ConfigJsonTransaction ConfigJsonBackend::reconcile(
         expected.token = fields.value(0) + '|' + fields.value(1) + '|' + fields.value(2) + '|' +
                          resolve(id).identity;
     }
-    if (strict && (r.revision != expected || r.bytes != preimage->bytes))
-        return fail({"source-preimage-conflict", id, "preflight", name});
+    if (strict) {
+        // A capture fences content and the resolved route, not a final file's
+        // inode/timestamps. Exact restoration by an editor can resolve frozen
+        // work without relaxing link/parent identity or late-race validation.
+        const auto captured = expected.token.split('|');
+        const auto fresh = r.revision.token.split('|');
+        if (captured.size() != 4 || fresh.size() != 4 || captured[0] != fresh[0] ||
+            captured[3] != fresh[3] || r.revision.exists != expected.exists ||
+            r.bytes != preimage->bytes)
+            return fail({"source-preimage-conflict", id, "preflight", name});
+    }
     ConfigJsonCodec codec(m_diagnostics.value(id));
     if (r.revision.exists) {
         auto parsed = codec.decode(r.bytes, id);
