@@ -140,6 +140,27 @@ error remains in its route entry while the overall error is `evidence-retention`
 Only confirmed readback contributes covered revisions; uncertain routes stay
 uncertain even when earlier shards succeeded and the aggregate result is partial.
 
+Failed evidence writes leave complete observations in a worker-owned FIFO for
+that source, including exact bytes/revision and original role, phase, request,
+group/attempt and observation order. A later attempt drains old observations
+through the same synced artifact writer before or with its own publication;
+recovered references appear in source state and that attempt's receipt, but the
+artifact metadata keeps its original correlation. Restoring a preference file
+cannot erase a foreign witness acquired before the restoration. Read/parse
+failures, pending preflight, published output, readback and late observations
+share this ownership path, including retained groups and migrations.
+
+Each source's FIFO is bounded to 64 complete observations, not payload bytes;
+there is no new settings-file size limit. Reads reserve one slot and publication
+transactions reserve eight before acquisition. If that reservation cannot fit,
+`evidence-backlog` blocks further reads/reload admission and publication for the
+affected source until its FIFO fully drains. No acquired entry is evicted.
+Other sources still admit/publish; a mixed save reports the blocked source's
+failure and the other sources' actual route outcomes. Successful saves cannot
+hide unretained evidence obligations of that save, even if no dirty setting
+intent remains after a confirmed publication. The pending FIFO is in memory;
+it is not crash-durable before the evidence write succeeds.
+
 ## Opt-in deletion
 
 `ConfigJsonFile::deleteWhenEmpty` / `JsonFileSource.deleteWhenEmpty` defaults false

@@ -6,6 +6,14 @@
 namespace configqml {
 class ConfigStoreTestAccess {
 public:
+    static qsizetype evidenceBacklogLimit() { return ConfigWorker::EvidenceBacklogLimit; }
+    static QList<ConfigEvidenceObservation> pendingEvidence(const ConfigWorker &worker,
+                                                            const QString &source) {
+        QList<ConfigEvidenceObservation> result;
+        for (const auto &pending : worker.m_pendingEvidence.value(source))
+            result.append(pending.observation);
+        return result;
+    }
     static quint64 endpointRevision(const ConfigStore &store, const ConfigPath &path) {
         return store.m_owner->overlayEndpoint()->revision(path);
     }

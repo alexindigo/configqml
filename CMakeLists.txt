@@ -23,7 +23,7 @@ add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp
     configconsumer_p.h configresult.h configstore.h configstore.cpp configworker_p.h configworker.cpp
     configshutdown_p.h configshutdown.cpp)
 target_sources(configqml_core PRIVATE configprojection_p.h configprojection.cpp
-    configprojection.h configsourceprojection_p.h configevidence_p.h configevidence.cpp
+    configprojection.h configsourceprojection_p.h configevidence_p.h configevidence.cpp configworkerevidence.cpp
     configrecordlistpolicy.h configrecordlistpolicy.cpp configrecordlistcommands.cpp configretainedgroup.cpp
     configlistmodel.h configlistmodel.cpp configdraft.h configdraft.cpp configgroup.cpp
     configstorehandle.h configstorehandle.cpp configmigration.cpp configjsonbackup.cpp
@@ -123,7 +123,7 @@ option(BUILD_TESTING "Build the configqml tests" OFF)
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 6.12 REQUIRED COMPONENTS Test Gui)
-    foreach(suite projections fallback_layers startup_policy record_list_policy record_list_containers unknown_data source_events retained_groups strict_conflicts pending_rebase empty_shards overlay_editor string_pattern)
+    foreach(suite projections fallback_layers startup_policy record_list_policy record_list_containers unknown_data source_events retained_groups strict_conflicts pending_rebase evidence_backlog empty_shards overlay_editor string_pattern)
         add_executable(test_${suite} tests/test_${suite}.cpp)
         target_link_libraries(test_${suite} PRIVATE configqml::core Qt6::Test)
         add_test(NAME ${suite} COMMAND test_${suite})

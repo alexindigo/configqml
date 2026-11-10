@@ -6,6 +6,7 @@
 #include "configprojection_p.h"
 #include "configoverlay_p.h"
 #include "configdraft_p.h"
+#include "configevidence_p.h"
 #include <QQueue>
 #include <QTimer>
 #include <QFileSystemWatcher>
@@ -126,6 +127,20 @@ signals:
     void packetReady(const configqml::ConfigWorkerPacket &packet);
 
 private:
+    friend class ConfigStoreTestAccess;
+    static constexpr qsizetype EvidenceBacklogLimit = 64;
+    static constexpr qsizetype EvidencePublicationReserve = 8;
+    struct PendingEvidence {
+        ConfigEvidenceObservation observation;
+        QByteArray attemptKey;
+    };
+    QMap<QString, QQueue<PendingEvidence>> m_pendingEvidence;
+    QSet<QString> m_evidenceBlocked;
+    QString drainEvidence(const QString &source, ConfigResult *result);
+    QString prepareEvidence(const QString &source, qsizetype required,
+                            ConfigResult *result = nullptr);
+    void attachEvidence(const PendingEvidence &pending, const ConfigEvidenceReference &reference,
+                        ConfigResult *result);
     void drain();
     void process(const ConfigCommand &command);
     void coverInput(const ConfigCommand &command);
@@ -145,7 +160,8 @@ private:
     ConfigError acceptFileObservations(const QMap<QString, ConfigBackendResult> &reads,
                                        const std::optional<ConfigCommand> &command,
                                        ConfigResult *result, const QString &phase,
-                                       const QString &cause);
+                                       const QString &cause,
+                                       const QList<ConfigError> &acquisitionErrors = {});
     void freezeOrdinary(const QString &id, const ConfigJsonTransaction &transaction);
     void armWatches();
     void scheduleAutoSave();

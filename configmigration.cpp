@@ -96,6 +96,9 @@ bool ConfigWorker::migrateSources() {
         updated.raw = migration.transformed;
         QString retentionError;
         if (m_files.contains(updated.id)) {
+            const auto capacity = prepareEvidence(updated.id, EvidencePublicationReserve, &result);
+            if (!capacity.isEmpty())
+                return finish(capacity, updated.id);
             const auto transaction = m_json->reconcile(
                 updated.id, migration.original.raw, {{{}, migration.transformed, false}},
                 ConfigSourcePreimage{

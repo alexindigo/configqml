@@ -372,6 +372,8 @@ ConfigJsonBackend::publish(const ConfigBackendRequest &request, int directory, c
             conflictCode = "source-preimage-conflict";
     auto r = read(id, name); // Fresh authority inside the resolved target's lock.
     r.operation = ConfigBackendRequest::Operation::Publish;
+    if (observations)
+        observations->append({r, "preflight", "foreign"});
     if (!r.success)
         return r;
     const auto identityError = checkTarget(id, name, true);
