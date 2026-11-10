@@ -55,7 +55,8 @@ quint64 ConfigStore::openOverlay(const ConfigOverlayOptions &options, QObject *c
     s.identityValue = identity.value;
     if (s.identityPath.isEmpty() || s.overrideKey.isEmpty())
         t->error = "overlay-options";
-    if ((options.mode != ConfigOverlayMode::Editor && options.mode != ConfigOverlayMode::View) ||
+    if ((options.mode != ConfigOverlayMode::Editor && options.mode != ConfigOverlayMode::View &&
+         options.mode != ConfigOverlayMode::Live) ||
         options.mergePolicy != ConfigOverlayMergePolicy::RecursiveObjectsReplaceLists ||
         options.differencePolicy != ConfigOverlayDifferencePolicy::TopLevelOmitEqual)
         t->error = "overlay-options";
@@ -96,11 +97,25 @@ ConfigOverlayEditor::ConfigOverlayEditor(ConfigStore *store, const ConfigOverlay
     : QObject(store), m_store(store), m_id(p.editorId), m_schema(p.schema), m_mode(p.mode) {
     m_ownerPath = p.ownerPath;
     install(p);
+    if (m_mode == ConfigOverlayMode::Live)
+        connect(store, &ConfigStore::statusChanged, this, [this] {
+            if (m_store && m_store->status() != ConfigStore::Status::Ready) {
+                ConfigOverlayPresentation state;
+                state.error = "overlay-owner";
+                install(state);
+            }
+        });
 }
 ConfigOverlayEditor::~ConfigOverlayEditor() { detach(); }
+bool ConfigOverlayEditor::dirty() const {
+    return !m_edits.isEmpty() || m_pendingReset || m_liveDirty;
+}
 QVariant ConfigOverlayEditor::value(const ConfigPath &path) const {
     const auto edit = m_edits.constFind(path);
-    return edit == m_edits.cend() ? m_values.value(path) : edit.value().value_or(QVariant());
+    return edit == m_edits.cend()              ? m_values.value(path)
+           : edit.value()                      ? *edit.value()
+           : m_mode == ConfigOverlayMode::Live ? m_baseValues.value(path)
+                                               : QVariant();
 }
 QVariant ConfigOverlayEditor::presentation(const ConfigPath &path) const {
     if (!m_presentations.contains(path)) {
@@ -120,6 +135,8 @@ ConfigRequestHandle ConfigOverlayEditor::setValue(const ConfigPath &path, const 
                                                                        : "overlay-owner")};
     if (!result.errors.isEmpty())
         return result;
+    if (m_mode == ConfigOverlayMode::Live)
+        return writeLive(ownPath(path), checked.value);
     m_edits[ownPath(path)] = checked.value;
     m_presentations.remove(path);
     result.accepted = true;
@@ -140,6 +157,8 @@ bool ConfigOverlayEditor::unset(const ConfigPath &query) {
     if (!writable() || !ready() || m_busy || !descriptor ||
         descriptor->type == ConfigDescriptor::Type::Group)
         return false;
+    if (m_mode == ConfigOverlayMode::Live)
+        return writeLive(path, std::nullopt).accepted;
     m_edits[path] = std::nullopt;
     m_presentations.remove(path);
     ConfigConsumerGuard boundary(this);
@@ -147,17 +166,50 @@ bool ConfigOverlayEditor::unset(const ConfigPath &query) {
         boundary.invoke([&] { emit stateChanged(); });
     return true;
 }
+ConfigRequestHandle ConfigOverlayEditor::writeLive(const ConfigPath &path,
+                                                   const std::optional<QVariant> &value) {
+    if (!m_store || !m_store->m_accepting)
+        return {0, 0, false, {m_schema.diagnostics().make(path, "overlay-owner")}};
+    QPointer<ConfigOverlayEditor> guard(this);
+    const auto id = m_store->overlayRequest(this, "overlayWrite", this,
+                                            [guard](const ConfigResult &result) {
+                                                if (guard && guard->status() != Status::Closed)
+                                                    ConfigConsumerGuard(guard).invoke(
+                                                        [&] { emit guard->completed(result); });
+                                            },
+                                            {{path, value}});
+    const auto sequence = m_store->m_sequence;
+    m_edits[path] = value;
+    m_editSequences[path] = sequence;
+    m_presentations.remove(path);
+    ConfigConsumerGuard boundary(this);
+    if (boundary.invoke([&] { emit valuesChanged({path}); }))
+        boundary.invoke([&] { emit stateChanged(); });
+    return {id, sequence, true, {}};
+}
 void ConfigOverlayEditor::install(const ConfigOverlayPresentation &p) {
     if (m_status == Status::Closed)
         return;
+    if (p.dirtyKnown)
+        m_liveDirty = p.dirty;
     m_conflicted |= p.conflicted;
     if (!p.error.isEmpty()) {
         m_error = p.error;
         m_status = Status::Error;
-    } else if (p.refreshed) {
+    } else if (p.refreshed && !(m_mode == ConfigOverlayMode::Live && m_status == Status::Error)) {
         m_values = p.values;
+        m_baseValues = p.baseValues;
         m_presentations.clear();
-        m_edits.clear();
+        if (m_mode == ConfigOverlayMode::Live) {
+            for (auto it = m_editSequences.begin(); it != m_editSequences.end();) {
+                if (it.value() <= p.coveredSequence) {
+                    m_edits.remove(it.key());
+                    it = m_editSequences.erase(it);
+                } else
+                    ++it;
+            }
+        } else
+            m_edits.clear();
         m_pendingReset = false;
         m_conflicted = false;
         m_error.clear();
@@ -173,16 +225,24 @@ void ConfigStore::receiveOverlay(const ConfigOverlayPresentation &p) {
         editor->install(p);
 }
 quint64 ConfigStore::overlayRequest(ConfigOverlayEditor *editor, const QString &operation,
-                                    QObject *context, Callback callback) {
+                                    QObject *context, Callback callback,
+                                    const QMap<ConfigPath, std::optional<QVariant>> &edits) {
     const auto id = registerRequest(context, std::move(callback));
     ConfigCommand command{id, m_sequence, operation, {}};
     command.editorId = editor->m_id;
-    command.overlayEdits = editor->m_edits;
+    command.overlayEdits = operation == "overlayWrite" ? edits : editor->m_edits;
     if (!editor->writable() || editor->busy() || !editor->ready())
         command.conversionError = !editor->writable() ? "overlay-readonly"
                                   : editor->busy()    ? "overlay-busy"
                                                       : "overlay-owner";
-    const bool changes = command.conversionError.isEmpty() && operation != "overlayDiscard";
+    const bool liveOperation =
+        operation == "overlayWrite" || operation == "save" || operation == "flush";
+    if (command.conversionError.isEmpty() &&
+        ((editor->m_mode == ConfigOverlayMode::Live) != liveOperation))
+        command.conversionError = "overlay-readonly";
+    const bool changes =
+        command.conversionError.isEmpty() &&
+        (operation == "overlayWrite" || operation == "overlayApply" || operation == "overlayReset");
     if (changes) {
         ConfigInput input;
         input.kind = ConfigInput::Kind::Group;
@@ -194,7 +254,8 @@ quint64 ConfigStore::overlayRequest(ConfigOverlayEditor *editor, const QString &
         command.input = input;
         command.prefix = input.sequence;
     }
-    if (!m_accepting || !m_owner->dispatch(command)) {
+    if (!m_accepting || (liveOperation && !command.conversionError.isEmpty()) ||
+        !m_owner->dispatch(command)) {
         ConfigResult result;
         result.requestId = id;
         result.storeId = m_storeId;
@@ -202,7 +263,10 @@ quint64 ConfigStore::overlayRequest(ConfigOverlayEditor *editor, const QString &
         result.editorId = command.editorId;
         result.status = "failed";
         result.refreshState = "not_refreshed";
-        result.error = {"overlay-owner", {}, operation};
+        result.error = {command.conversionError.isEmpty() ? QString("overlay-owner")
+                                                          : command.conversionError,
+                        {},
+                        operation};
         QMetaObject::invokeMethod(
             this, [this, result] { receiveResult(result); }, Qt::QueuedConnection);
     } else if (changes) {
@@ -219,7 +283,7 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
                                      ConfigStore::Callback callback) {
     if (!m_store)
         return 0;
-    const bool active = writable() && !busy() && ready();
+    const bool active = m_mode == ConfigOverlayMode::Editor && writable() && !busy() && ready();
     QPointer<ConfigOverlayEditor> guard(this);
     QPointer<QObject> target(context ? context : this);
     const auto id = m_store->overlayRequest(
@@ -232,7 +296,7 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
             if (result.error.code == "overlay-conflict")
                 guard->m_conflicted = true;
             ConfigConsumerGuard boundary(guard);
-            if (!boundary.invoke([&] { emit guard->stateChanged(); }) ||
+            if ((active && !boundary.invoke([&] { emit guard->stateChanged(); })) ||
                 !boundary.invoke([&] { emit guard->completed(result); }))
                 return;
             if (target && callback) {
@@ -251,7 +315,8 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
         m_busy = true;
     if (active && operation == "overlayReset")
         m_pendingReset = true;
-    ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
+    if (active)
+        ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
     return id;
 }
 quint64 ConfigOverlayEditor::apply(QObject *context, ConfigStore::Callback callback) {
@@ -262,6 +327,12 @@ quint64 ConfigOverlayEditor::resetOverrides(QObject *context, ConfigStore::Callb
 }
 quint64 ConfigOverlayEditor::discard(QObject *context, ConfigStore::Callback callback) {
     return request("overlayDiscard", context, std::move(callback));
+}
+quint64 ConfigOverlayEditor::save(QObject *context, ConfigStore::Callback callback) {
+    return request("save", context, std::move(callback));
+}
+quint64 ConfigOverlayEditor::flush(QObject *context, ConfigStore::Callback callback) {
+    return request("flush", context, std::move(callback));
 }
 void ConfigOverlayEditor::detach() {
     if (m_status == Status::Closed)

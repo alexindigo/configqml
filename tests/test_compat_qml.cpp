@@ -60,6 +60,13 @@ private slots:
         const bool retained = QString(COMPAT_FIXTURE).endsWith("tst_retained_groups.qml");
         const bool strictEmpty = QString(COMPAT_FIXTURE).endsWith("tst_strict_empty.qml");
         const bool overlay = QString(COMPAT_FIXTURE).endsWith("tst_overlay_editor.qml");
+        const bool liveOverlay = QString(COMPAT_FIXTURE).endsWith("tst_live_overlay.qml");
+        if (liveOverlay) {
+            compat::put(dir.filePath("base.json"), "{\"volume\":1}");
+            compat::put(dir.filePath("main.json"),
+                        "{\"rows\":[{\"id\":\"x\",\"sibling\":false,\"instanceSettings\":{"
+                        "\"opaque\":{\"keep\":false}}}]}");
+        }
         const bool pattern = QString(COMPAT_FIXTURE).endsWith("tst_string_pattern.qml");
         const bool sourceEvents = QString(COMPAT_FIXTURE).endsWith("tst_source_events.qml");
         const bool recordList = QString(COMPAT_FIXTURE).endsWith("tst_record_list_policy.qml");
@@ -93,6 +100,16 @@ private slots:
         if (retained)
             QVERIFY(obstruction.block()); // After Ready; startup remains a real successful load.
         QVERIFY(QMetaObject::invokeMethod(root.get(), "run"));
+        if (liveOverlay) {
+            QTRY_VERIFY(root->property("action").toString() == "foreign" ||
+                        !root->property("failure").toString().isEmpty());
+            QCOMPARE(root->property("failure").toString(), QString());
+            QSaveFile foreign(dir.filePath("base.json"));
+            QVERIFY(foreign.open(QIODevice::WriteOnly));
+            QVERIFY(foreign.write("{\"volume\":8}") > 0);
+            QVERIFY(foreign.commit());
+            QVERIFY(QMetaObject::invokeMethod(root.get(), "foreignWritten"));
+        }
         if (pendingRebase) {
             // The local edit is queued before this nonparticipating writer, and
             // StartupSnapshot deliberately leaves discovery to locked preflight.
@@ -154,7 +171,21 @@ private slots:
         QCOMPARE(root->property("failure").toString(), QString());
         QVERIFY(root->property("finished").toBool());
         if (strictEmpty || overlay || pattern || recordList || unknownData || pendingRebase ||
-            sharedParents) {
+            sharedParents || liveOverlay) {
+            if (liveOverlay) {
+                const auto row = ConfigJsonCodec()
+                                     .decode(compat::bytes(dir.filePath("main.json")), "main")
+                                     .raw.value("rows")
+                                     .toList()[0]
+                                     .toMap();
+                QCOMPARE(row.value("sibling"), QVariant(false));
+                const auto overrides = row.value("instanceSettings").toMap();
+                QVERIFY(!overrides.contains("volume"));
+                QCOMPARE(overrides.value("opaque").toMap().value("keep"), QVariant(false));
+                QCOMPARE(
+                    overrides.value("lastResult").toMap().value("n").value<ConfigNumber>().token(),
+                    QString("39"));
+            }
             if (sharedParents) {
                 for (const auto &file : {"general", "bar", "wallpaper"})
                     QVERIFY(QFileInfo::exists(dir.filePath(QString("settings/%1.json").arg(file))));

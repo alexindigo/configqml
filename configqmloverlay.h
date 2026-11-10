@@ -27,6 +27,8 @@ public:
     Q_INVOKABLE QString apply(const QJSValue &callback = {});
     Q_INVOKABLE QString resetOverrides(const QJSValue &callback = {});
     Q_INVOKABLE QString discard(const QJSValue &callback = {});
+    Q_INVOKABLE QString save(const QJSValue &callback = {});
+    Q_INVOKABLE QString flush(const QJSValue &callback = {});
     Q_INVOKABLE bool unset(const QStringList &path);
     Q_INVOKABLE void detach();
 signals:

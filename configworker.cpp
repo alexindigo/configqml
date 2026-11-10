@@ -327,6 +327,23 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
         packet.groupGenerations[info.groupToken] = capture.generation;
     }
     packet.initial = initial;
+    for (auto it = m_overlayCaptures.cbegin(); it != m_overlayCaptures.cend(); ++it) {
+        if (it->selection.mode != ConfigOverlayMode::Live)
+            continue;
+        ConfigOverlayPresentation state;
+        state.editorId = it.key();
+        state.dirtyKnown = true;
+        state.dirty = m_dirty.contains(m_layers->info(it->selection.ownerPath).route.sourceId);
+        bool found = false;
+        for (auto &presentation : m_overlayPackets)
+            if (presentation.editorId == it.key()) {
+                presentation.dirtyKnown = state.dirtyKnown;
+                presentation.dirty = state.dirty;
+                found = true;
+            }
+        if (!found)
+            m_overlayPackets.append(state);
+    }
     packet.overlays = std::move(m_overlayPackets);
     m_overlayPackets.clear();
     packet.result = result;

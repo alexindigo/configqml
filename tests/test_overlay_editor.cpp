@@ -3,6 +3,7 @@
 #include "configstorehandle.h"
 #include "compatfixture.h"
 #include "storeprobe.h"
+#include "confignumber.h"
 #include <QTemporaryDir>
 #include <QSignalSpy>
 #include <QSaveFile>
@@ -117,10 +118,227 @@ int persistedVolume(ConfigStore &store) {
     loop.exec();
     return value;
 }
+bool pendingBackend(ConfigStore &store) {
+    bool pending = false;
+    QEventLoop loop;
+    ConfigStoreTestAccess::run(
+        store, [&](auto &w) { pending = !w.backend()->pending().isEmpty(); }, &loop,
+        [&] { loop.quit(); });
+    QTimer::singleShot(1000, &loop, &QEventLoop::quit);
+    loop.exec();
+    return pending;
+}
 } // namespace
 class OverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void liveOrderedRuntimeWriter() {
+        QTemporaryDir dir;
+        const auto file = dir.filePath("main.json");
+        compat::put(file, "{\"rows\":[{\"id\":\"x\",\"sibling\":false,\"instanceSettings\":{"
+                          "\"volume\":2,\"opaque\":{\"keep\":false}}}]}");
+        ConfigStore base(baseOptions()), main(mainOptions(file));
+        QTRY_VERIFY(base.status() == ConfigStore::Status::Ready &&
+                    main.status() == ConfigStore::Status::Ready);
+        auto *live = open(main, selection(main, base.scope({"settings"}), ConfigOverlayMode::Live));
+        QSignalSpy completed(live, &ConfigOverlayEditor::completed);
+        ConfigStoreTestAccess::run(base, [](auto &w) { w.holdOverlayLeases(true); });
+        const auto first = live->setValue({"volume"}, 3);
+        QVERIFY(first.accepted);
+        QTRY_COMPARE(held(base), 1);
+        for (int i = 4; i <= 25; ++i) {
+            const auto write = live->setValue({"volume"}, i);
+            QVERIFY(write.accepted);
+            QVERIFY(write.inputSequence > first.inputSequence);
+            QCOMPARE(live->value({"volume"}).toInt(), i);
+            QVERIFY(!live->busy());
+        }
+        // A save submitted before any admission finishes must cover all of them.
+        bool stale = false;
+        connect(live, &ConfigOverlayEditor::valuesChanged, this,
+                [&] { stale |= live->value({"volume"}).toInt() != 25; });
+        ConfigStoreTestAccess::run(base, [](auto &w) { w.holdOverlayLeases(false); });
+        const auto saved = compat::request(main, [&] { return live->save(); });
+        QCOMPARE(saved.status, QString("saved"));
+        QVERIFY(!stale);
+        QVERIFY(!live->dirty());
+        QCOMPARE(saved.publications.size(), 1);
+        QVERIFY(saved.publications[0].success);
+        QCOMPARE(saved.publications[0].sourceId, QString("main"));
+        int accepted = 0;
+        for (const auto &args : completed)
+            accepted += qvariant_cast<ConfigResult>(args[0]).status == "accepted";
+        QCOMPARE(accepted, 23);
+        const auto row = ConfigJsonCodec()
+                             .decode(compat::bytes(file), "main")
+                             .raw.value("rows")
+                             .toList()[0]
+                             .toMap();
+        QCOMPARE(row.value("sibling"), QVariant(false));
+        QCOMPARE(row.value("instanceSettings").toMap().value("opaque").toMap().value("keep"),
+                 QVariant(false));
+        QCOMPARE(
+            row.value("instanceSettings").toMap().value("volume").value<ConfigNumber>().token(),
+            QString("25"));
+        ConfigStore restarted(mainOptions(file));
+        QTRY_COMPARE(restarted.status(), ConfigStore::Status::Ready);
+        auto *again = open(restarted,
+                           selection(restarted, base.scope({"settings"}), ConfigOverlayMode::Live));
+        QCOMPARE(again->value({"volume"}).toInt(), 25);
+        QCOMPARE(compat::request(main, [&] { return live->flush(); }).status,
+                 QString("nothing_to_save"));
+    }
+    void liveSparseUnsetRefreshAndAdmission() {
+        QTemporaryDir dir;
+        const auto baseFile = dir.filePath("base.json");
+        compat::put(baseFile, "{\"volume\":1}");
+        auto options = mainOptions();
+        options.admission = [](const ConfigInput &input) {
+            return input.path == ConfigPath{"rows"} && input.value.toList()[0]
+                                                               .toMap()
+                                                               .value("instanceSettings")
+                                                               .toMap()
+                                                               .value("volume")
+                                                               .toInt() == 13
+                       ? QString("fixture-admission")
+                       : QString();
+        };
+        ConfigStore base(baseOptions(baseFile)), main(options);
+        QTRY_VERIFY(base.status() == ConfigStore::Status::Ready &&
+                    main.status() == ConfigStore::Status::Ready);
+        auto *scope = base.scope({"settings"});
+        auto *live = open(main, selection(main, scope, ConfigOverlayMode::Live));
+        QVERIFY(!live->setValue({"volume"}, QString("bad")).accepted);
+        QVERIFY(!live->setValue({}, QVariantMap{}).accepted);
+        QVERIFY(live->setValue({"volume"}, 1).accepted);
+        QCOMPARE(live->value({"volume"}).toInt(), 1);
+        QCOMPARE(compat::request(main, [&] { return live->save(); }).status, QString("saved"));
+        auto overrides = [&] {
+            return main.value({"rows"}).toList()[0].toMap().value("instanceSettings").toMap();
+        };
+        QVERIFY(!overrides().contains("volume"));
+        QVERIFY(overrides().contains("opaque"));
+        QSaveFile foreign(baseFile);
+        QVERIFY(foreign.open(QIODevice::WriteOnly));
+        QVERIFY(foreign.write("{\"volume\":6}") > 0);
+        QVERIFY(foreign.commit());
+        compat::request(base, [&] { return base.reload(); });
+        QTRY_COMPARE(live->value({"volume"}).toInt(), 6);
+        QVERIFY(live->setValue({"volume"}, 9).accepted);
+        QCOMPARE(compat::request(main, [&] { return live->flush(); }).status, QString("saved"));
+        QVERIFY(live->unset({"volume"}));
+        QCOMPARE(live->value({"volume"}).toInt(), 6);
+        compat::request(main, [&] { return live->flush(); });
+        QVERIFY(!overrides().contains("volume"));
+        const auto rejected =
+            compat::request(main, [&] { return live->setValue({"volume"}, 13).requestId; });
+        QCOMPARE(rejected.error.code, QString("fixture-admission"));
+        QCOMPARE(live->value({"volume"}).toInt(), 6);
+        QVERIFY(live->ready());
+        scope->detach();
+        QTRY_COMPARE(live->status(), ConfigOverlayEditor::Status::Error);
+        QCOMPARE(live->error(), QString("overlay-owner"));
+        QVERIFY(!live->setValue({"volume"}, 4).accepted);
+        QCOMPARE(compat::request(main, [&] { return live->save(); }).error.code,
+                 QString("overlay-owner"));
+    }
+    void livePlacementLifecycle() {
+        for (bool removed : {false, true}) {
+            ConfigStore base(baseOptions()), main(mainOptions());
+            QTRY_VERIFY(base.status() == ConfigStore::Status::Ready &&
+                        main.status() == ConfigStore::Status::Ready);
+            auto *live =
+                open(main, selection(main, base.scope({"settings"}), ConfigOverlayMode::Live));
+            compat::request(main, [&] {
+                return main
+                    .setUser({"rows"}, removed ? QVariantList{}
+                                               : QVariantList{QVariantMap{{"id", "replacement"}}})
+                    .requestId;
+            });
+            QTRY_COMPARE(live->status(), ConfigOverlayEditor::Status::Error);
+            QCOMPARE(live->error(), QString("overlay-identity"));
+            QVERIFY(!live->setValue({"volume"}, 4).accepted);
+            live->detach();
+            QCOMPARE(live->status(), ConfigOverlayEditor::Status::Closed);
+        }
+    }
+    void liveWritesDuringSaveAndMultipleHandles() {
+        // Exercise the opposite endpoint acquisition order as well.
+        ConfigStore main(mainOptions()), base(baseOptions());
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        auto *first =
+            open(main, selection(main, base.scope({"settings"}), ConfigOverlayMode::Live));
+        auto *second =
+            open(main, selection(main, base.scope({"settings"}), ConfigOverlayMode::Live));
+        QCOMPARE(
+            compat::request(main, [&] { return first->setValue({"volume"}, 7).requestId; }).status,
+            QString("accepted"));
+        ConfigStoreTestAccess::run(
+            main, [](auto &w) { w.scheduleBackend({true, ConfigMemoryBackend::Fault::None}); });
+        QSignalSpy results(&main, &ConfigStore::completed);
+        const auto saveId = first->save();
+        QTRY_VERIFY(pendingBackend(main));
+        const auto later = first->setValue({"volume"}, 8);
+        QVERIFY(later.accepted);
+        QVERIFY(second->setValue({"optional"}, QString("second")).accepted);
+        const auto latest = first->setValue({"volume"}, 9);
+        QVERIFY(latest.accepted);
+        QCOMPARE(first->value({"volume"}).toInt(), 9);
+        ConfigStoreTestAccess::run(main, [](auto &w) { w.releaseBackend(); });
+        QTRY_VERIFY(results.size() >= 4);
+        const auto saved = results[0][0].value<ConfigResult>();
+        QCOMPARE(saved.requestId, saveId);
+        QCOMPARE(saved.status, QString("saved"));
+        QVERIFY(saved.inputPrefix < later.inputSequence);
+        QCOMPARE(persistedVolume(main), 7);
+        QTRY_COMPARE(first->value({"optional"}).toString(), QString("second"));
+        QTRY_COMPARE(second->value({"volume"}).toInt(), 9);
+        QCOMPARE(first->value({"volume"}).toInt(), 9);
+        QCOMPARE(compat::request(main, [&] { return second->flush(); }).status, QString("saved"));
+        QCOMPARE(persistedVolume(main), 9);
+        QVERIFY(!first->dirty());
+        QVERIFY(!second->dirty());
+    }
+    void liveWritableStrictAndAutoSave() {
+        QTemporaryDir evidence;
+        ConfigStore base(baseOptions());
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        for (bool readOnly : {false, true}) {
+            auto options = mainOptions();
+            if (readOnly)
+                options.layers[0].writable = false;
+            else {
+                options.layers[0].sources[0].unknownData = ConfigUnknownData::Strict;
+                options.evidenceDirectory = evidence.path();
+            }
+            ConfigStore main(options);
+            QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+            const auto result = compat::request(main, [&] {
+                return main.openOverlay(
+                    selection(main, base.scope({"settings"}), ConfigOverlayMode::Live));
+            });
+            QCOMPARE(result.error.code,
+                     readOnly ? QString("overlay-selection") : QString("undeclared-member"));
+        }
+        auto options = mainOptions();
+        auto row = D::leaf(T::Record, QVariantMap{{"id", QString()}});
+        row.fields = {{"id", D::leaf(T::String, QString())}};
+        row.open = true;
+        options.schema = ConfigSchema(D::group({{"rows", D::list(row, {})}}));
+        options.layers[0].sources[0].unknownData = ConfigUnknownData::Strict;
+        options.evidenceDirectory = evidence.path();
+        options.autoSave = true;
+        options.autoSaveInterval = 1;
+        ConfigStore main(options);
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        auto *live = open(main, selection(main, base.scope({"settings"}), ConfigOverlayMode::Live));
+        QSignalSpy saved(&main, &ConfigStore::autoSaved);
+        QVERIFY(live->setValue({"volume"}, 8).accepted);
+        QTRY_VERIFY(!saved.isEmpty());
+        QCOMPARE(persistedVolume(main), 8);
+        QVERIFY(!live->dirty());
+    }
     void requestLookupsAndReservationsPreserveEndpointFences() {
         ConfigStore base(baseOptions()), main(mainOptions());
         QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);

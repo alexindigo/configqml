@@ -32,6 +32,9 @@ struct ConfigOverlayPresentation {
     ConfigOverlayMode mode = ConfigOverlayMode::Editor;
     ConfigSchema schema{ConfigDescriptor::group({})};
     QMap<ConfigPath, QVariant> values;
+    QMap<ConfigPath, QVariant> baseValues;
+    quint64 coveredSequence = 0;
+    bool dirtyKnown = false, dirty = false;
     ConfigPath ownerPath;
     bool conflicted = false, refreshed = false;
 };

@@ -130,7 +130,8 @@ private:
     friend class ConfigStoreHandle;
     friend class ConfigOverlayEditor;
     quint64 overlayRequest(ConfigOverlayEditor *editor, const QString &operation, QObject *context,
-                           Callback callback);
+                           Callback callback,
+                           const QMap<ConfigPath, std::optional<QVariant>> &edits = {});
     void receiveOverlay(const ConfigOverlayPresentation &presentation);
     quint64 applyGroup(const QMap<ConfigPath, std::optional<QVariant>> &edits,
                        const QMap<ConfigPath, ConfigPathState> &fences, QObject *context,

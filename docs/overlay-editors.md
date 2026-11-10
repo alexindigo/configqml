@@ -32,9 +32,9 @@ main.openOverlay({
 ```
 
 The options are exactly the ten shown members; only `mode` is optional, default
-`"editor"`. Mode may also be `"view"`. The base must be a living scoped handle
+`"editor"`. Mode may also be `"view"` or `"live"`. The base must be a living scoped handle
 over a declared group. `ownerPath` selects an atomic List/Record/Map leaf and
-must be writable in editor mode. `entryPath` selects a record inside that leaf;
+must be writable in editor and live modes. `entryPath` selects a record inside that leaf;
 `identityPath` is nonempty and relative to the record, selecting a typed scalar.
 `overrideKey` is one nonempty opaque field name, including a permitted unknown
 record member. Unknown options or policies fail `overlay-options`; invalid
@@ -76,12 +76,45 @@ data property explicitly, e.g. `Object.getOwnPropertyDescriptor(values.keyMap,
 "__proto__").value`. Qt's attached QVariantMap reference preserves that own key
 but ordinary `.__proto__` lookup accesses the wrapper's JavaScript prototype.
 
-## Live view versus frozen editor
+## Live namespaces versus frozen editor
 
 | # | Surface | Behavior |
 |---|---|---|
 | 1 | `mode: "view"` | Read-only live namespace. Worker subscriptions refresh the current checked displayed address after base/owner changes. Missing/replaced placement gives Error/`overlay-identity`; base scope/owner closure gives Error/`overlay-owner`. Writes/unset/apply/reset/discard refuse `overlay-readonly`. |
 | 2 | `mode: "editor"` | Frozen base and unnormalized owning-leaf capture. Equal intent, ABA, raw invalid/masked input, inode/provenance change, reorder or list-policy remapping invalidates its fences. Dirty preview is retained on conflict. |
+| 3 | `mode: "live"` | Writable live namespace. Declared-leaf assignments and `unset` queue through owning-leaf admission without `overlay-busy`. Base/owner changes refresh like view mode. Missing/replaced placement gives Error/`overlay-identity`; scope/owner closure gives Error/`overlay-owner`. An errored live handle cannot retarget or resume. |
+
+### Runtime live writers (0.5.0)
+
+Open with the same ten options, choosing `mode: "live"`. The existing namespace
+supports runtime writers without a GUI proxy or a second merge/diff owner:
+
+```qml
+const runtime = opened.editor;
+runtime.values.lastResult = result;
+runtime.save(function(receipt) {
+    // saved | nothing_to_save | failed, with normal route/evidence fields
+});
+```
+
+Setters run synchronous schema checks and read back the accepted local value
+immediately. Each write has its own input sequence; older worker refreshes cannot
+erase newer local values. Admission rejection restores the effective value and
+completes that write with `failed`. Repeated writes, including writes while a save
+is in flight, stay in worker order and never use the editor's busy fence.
+
+The worker merges the current base/override and applies `top_level_omit_equal`
+on admission. Equal-to-base top-level values remain omitted; unknown existing
+top-level overrides and opaque owner siblings survive. `unset(relativeLeafPath)`
+removes that leaf's override and reads the inherited base value (or absence).
+It returns a Boolean ingress result. Groups cannot be assigned or unset.
+
+`save()` and `flush()` use the owner's normal persistence path, cover earlier
+queued inputs, and return the normal save receipt. They never save the base.
+Autosave follows the owning store's policy. `dirty` includes pending local
+inputs and pending work on the selected owner source; `busy` stays false.
+Apply/reset/discard remain editor operations and refuse on a live handle.
+Detach closes delivery as before; admitted writes are ordinary store intent.
 
 Open settles/preflights selected owner/base paths on their workers. The displayed
 generation and normalization maps resolve placement back to the unnormalized
@@ -105,7 +138,7 @@ Handles expose read-only `editorId`, `values`, `ready`, `dirty`, `conflicted`,
 `busy`, `status` (`Loading | Ready | Error | Closed`), `error`, `stateChanged` and
 `completed(result)`. Operations return request IDs immediately and complete in the
 main store's existing order, after eligible cache installation, signal before
-detached callback. While busy, edits/apply/reset/discard refuse `overlay-busy`.
+detached callback. In editor mode, busy edits/apply/reset/discard refuse `overlay-busy`.
 
 `apply` and `resetOverrides` return exactly `saved | nothing_to_save | failed`,
 the normal route/mask/coverage/evidence fields, `editorId`, and `refreshState`:
@@ -130,11 +163,12 @@ with the same field names and typed mode/merge/difference enums, and call
 through `overlayOpened(requestId, ConfigOverlayEditor*)`, emitted after handle
 installation and before the normal `completed(opened)` result; native results
 contain `editorId`, not a QObject payload. `value`, `setValue` and `unset` use
-relative ConfigPaths, and Apply/reset/discard use normal native callbacks.
+relative ConfigPaths. `ConfigOverlayMode::Live` adds `save`/`flush` with normal
+native callbacks; live `setValue` returns its request ID and input sequence.
 
 ## Strict owner records (0.4.0)
 
-Editor-mode open rejects an undeclared `overrideKey` in a closed Record owned by
+Editor- and live-mode open reject an undeclared `overrideKey` in a closed Record owned by
 a Strict source with `undeclared-member`. Declare the member or mark the Record
 `open` to permit it. Apply still uses the common owner write check; view mode
 does not create overrides. Preserve behavior is unchanged.

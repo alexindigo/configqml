@@ -35,8 +35,11 @@ ConfigOverlayPresentation presentation(const QString &id, const ConfigOverlayCap
     p.mode = capture.selection.mode;
     p.schema = capture.schema;
     p.ownerPath = capture.selection.ownerPath;
+    p.coveredSequence = capture.ownerFence.workerCovered;
     const auto merged = overlayMerge(capture.baseValues, capture.overrides).toMap();
     for (const auto &path : p.schema.leaves()) {
+        if (p.mode == ConfigOverlayMode::Live)
+            p.baseValues[path] = valueAt(capture.baseValues, path).value_or(QVariant());
         const auto value = valueAt(merged, path);
         if (value) {
             const auto checked = p.schema.validate(path, *value);
@@ -83,6 +86,14 @@ bool ConfigWorker::overlayBlocked(const ConfigCommand &command) const {
         !m_overlayTransactions.isEmpty())
         return true;
     const auto paths = commandPaths(command);
+    const bool leaseCommand = command.operation == "overlayLease";
+    // Reserve admission's queue position while cross-worker leases arrive.
+    // Leases keep global endpoint order, never blocked by this reservation.
+    if (!leaseCommand)
+        for (const auto &transaction : m_overlayTransactions)
+            for (const auto &path : paths)
+                if (overlaps(path, transaction->selection.ownerPath))
+                    return true;
     for (const auto &lease : m_overlayLeases)
         for (const auto &selected : lease)
             for (const auto &path : paths)
@@ -93,6 +104,13 @@ bool ConfigWorker::overlayBlocked(const ConfigCommand &command) const {
         if (&earlier == &command)
             break;
         const auto selected = commandPaths(earlier);
+        bool reserved = false;
+        if (leaseCommand)
+            for (const auto &transaction : m_overlayTransactions)
+                for (const auto &path : selected)
+                    reserved |= overlaps(path, transaction->selection.ownerPath);
+        if (reserved)
+            continue; // Earlier work is itself awaiting an asynchronous admission.
         for (const auto &a : selected)
             for (const auto &b : paths)
                 if (overlaps(a, b))
@@ -186,7 +204,7 @@ void ConfigWorker::overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransac
             (descriptor->type != ConfigDescriptor::Type::List &&
              descriptor->type != ConfigDescriptor::Type::Record &&
              descriptor->type != ConfigDescriptor::Type::Map) ||
-            (s.mode == ConfigOverlayMode::Editor && !m_layers->info(s.ownerPath).route.valid()))
+            (s.mode != ConfigOverlayMode::View && !m_layers->info(s.ownerPath).route.valid()))
             t->error = "overlay-selection";
         else if (!t->original && s.ownerGeneration != state.publicationGeneration)
             t->error = "overlay-conflict";
@@ -216,7 +234,7 @@ void ConfigWorker::overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransac
             else {
                 const auto route = m_layers->info(s.ownerPath).route;
                 const auto source = m_layers->source(route.layerId, route.sourceId);
-                if (s.mode == ConfigOverlayMode::Editor && source &&
+                if (s.mode != ConfigOverlayMode::View && source &&
                     source->unknownData == ConfigUnknownData::Strict && !recordDescriptor->open &&
                     !recordDescriptor->fields.contains(s.overrideKey))
                     t->error = "undeclared-member";
@@ -338,9 +356,10 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         !t->selection.base->live || !t->selection.baseLifetime || !*t->selection.baseLifetime)
         t->error = "overlay-owner";
     const bool apply = t->operation == "overlayApply" || t->operation == "overlayReset";
+    const bool liveWrite = t->operation == "overlayWrite";
     const bool refresh = t->operation == "overlayRefresh";
     const bool discard = t->operation == "overlayDiscard";
-    if (t->original && !discard && t->selection.mode != ConfigOverlayMode::View &&
+    if (t->original && !discard && t->selection.mode == ConfigOverlayMode::Editor &&
         (t->error.isEmpty() || t->error == "overlay-selection" || t->error == "overlay-identity")) {
         const auto &old = *t->original;
         for (auto it = old.baseFences.cbegin(); it != old.baseFences.cend(); ++it)
@@ -353,7 +372,7 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
             (!refresh && !sameFence(old.ownerFence, t->captured.ownerFence)))
             t->error = "overlay-conflict";
     }
-    if (t->original && t->selection.mode == ConfigOverlayMode::View &&
+    if (t->original && t->selection.mode != ConfigOverlayMode::Editor &&
         t->error == "overlay-selection")
         t->error = "overlay-identity";
     auto p = presentation(t->editorId, t->captured);
@@ -383,7 +402,7 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
             p = {};
             p.editorId = t->editorId;
             p.conflicted = true;
-            if (t->selection.mode == ConfigOverlayMode::View)
+            if (t->selection.mode != ConfigOverlayMode::Editor)
                 p.error = t->error;
             m_overlayPackets.append(p);
         }
@@ -391,7 +410,7 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         post(publish(result));
         return;
     }
-    if (!apply) {
+    if (!apply && !liveWrite) {
         p.refreshed = true;
         m_overlayCaptures[t->editorId] = t->captured;
         m_overlayPackets.append(p);
@@ -420,16 +439,22 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         post(publish(command.requestId ? std::optional<ConfigResult>(result) : std::nullopt));
         return;
     }
-    auto edited = overlayMerge(t->original->baseValues, t->original->overrides).toMap();
+    const auto &source = liveWrite ? t->captured : *t->original;
+    auto edited = overlayMerge(source.baseValues, source.overrides).toMap();
     for (auto it = t->edits.cbegin(); it != t->edits.cend(); ++it)
         if (it.value())
             putValue(edited, it.key(), *it.value());
-        else
-            removeValue(edited, it.key());
-    const auto difference = t->operation == "overlayReset"
-                                ? QVariantMap{}
-                                : overlayDifference(t->original->schema, t->original->baseValues,
-                                                    edited, t->original->overrides);
+        else {
+            const auto inherited = liveWrite ? valueAt(source.baseValues, it.key()) : std::nullopt;
+            if (inherited)
+                putValue(edited, it.key(), *inherited);
+            else
+                removeValue(edited, it.key());
+        }
+    const auto difference =
+        t->operation == "overlayReset"
+            ? QVariantMap{}
+            : overlayDifference(source.schema, source.baseValues, edited, source.overrides);
     auto record = overlayAt(t->captured.ownerValue, t->captured.rawEntryPath)->toMap();
     if (difference.isEmpty())
         record.remove(t->selection.overrideKey);
@@ -463,6 +488,11 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
     if (!error.isEmpty()) {
         result.status = "failed";
         result.error = {error, {}, command.operation};
+        if (liveWrite) {
+            p.refreshed = true;
+            p.coveredSequence = input.sequence;
+            m_overlayPackets.append(p);
+        }
         post(publish(result));
         return;
     }
@@ -470,6 +500,23 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
     recordPersistent(input, before);
     command.input = input;
     command.editorId = t->editorId;
+    if (liveWrite) {
+        t->captured.ownerValue =
+            m_layers->unmaskedValue(t->selection.ownerPath).value_or(QVariant());
+        t->captured.overrides = overlayAt(t->captured.ownerValue, t->captured.rawEntryPath)
+                                    ->toMap()
+                                    .value(t->selection.overrideKey)
+                                    .toMap();
+        p = presentation(t->editorId, t->captured);
+        p.refreshed = true;
+        p.coveredSequence = input.sequence;
+        m_overlayPackets.append(p);
+        m_overlayCaptures[t->editorId] = t->captured;
+        result.status = "accepted";
+        scheduleAutoSave();
+        post(publish(result));
+        return;
+    }
     // Advance only the own causal owner base; the frozen plugin base is unchanged.
     t->captured.ownerIngress = m_endpoint->revision(t->selection.ownerPath);
     post(publish());
@@ -524,11 +571,11 @@ void ConfigWorker::overlayChanged(const QString &id) {
     if (!m_overlayCaptures.contains(id))
         return;
     const auto capture = m_overlayCaptures.value(id);
-    if (capture.selection.mode == ConfigOverlayMode::View) {
+    if (capture.selection.mode != ConfigOverlayMode::Editor) {
         ConfigCommand command;
         command.operation = "overlayView";
         command.editorId = id;
-        overlayCommand(command);
+        enqueue(command);
     } else {
         ConfigOverlayPresentation p;
         p.editorId = id;

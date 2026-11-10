@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Writable overlay `mode: "live"` for runtime instance settings. Checked setters
+  read back immediately, queue owning-leaf admission without editor busy fences,
+  keep sparse overrides and refresh on base/owner changes. `save()`/`flush()` and
+  autosave use normal owner persistence, receipts and evidence.
+
+### Changed
+
+- Rebuild native dependents for the pre-1.0 `ConfigOverlayEditor` ABI change.
+
 ## [0.4.0] - 2026-11-08
 
 ### Added

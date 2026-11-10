@@ -54,6 +54,16 @@ QString ConfigQmlOverlay::discard(const QJSValue &callback) {
                                       m_adapter, m_adapter->callback(callback)))
                                 : QString();
 }
+QString ConfigQmlOverlay::save(const QJSValue &callback) {
+    return m_adapter->m_overlay ? QString::number(m_adapter->m_overlay->save(
+                                      m_adapter, m_adapter->callback(callback)))
+                                : QString();
+}
+QString ConfigQmlOverlay::flush(const QJSValue &callback) {
+    return m_adapter->m_overlay ? QString::number(m_adapter->m_overlay->flush(
+                                      m_adapter, m_adapter->callback(callback)))
+                                : QString();
+}
 bool ConfigQmlOverlay::unset(const QStringList &path) { return m_adapter->unset(path); }
 void ConfigQmlOverlay::detach() { m_adapter->detach(); }
 QString ConfigQmlStore::openOverlay(const QJSValue &options, const QJSValue &function) {
@@ -103,9 +113,11 @@ QString ConfigQmlStore::openOverlay(const QJSValue &options, const QJSValue &fun
     const auto mode = captured.value("mode", "editor");
     if (mode.metaType().id() != QMetaType::QString)
         error = "overlay-options";
-    else if (mode != "editor" && mode != "view")
+    else if (mode != "editor" && mode != "view" && mode != "live")
         semanticError = true;
-    native.mode = mode == "view" ? ConfigOverlayMode::View : ConfigOverlayMode::Editor;
+    native.mode = mode == "view"   ? ConfigOverlayMode::View
+                  : mode == "live" ? ConfigOverlayMode::Live
+                                   : ConfigOverlayMode::Editor;
     if (captured.value("mergePolicy") != "recursive_objects_replace_lists" ||
         captured.value("differencePolicy") != "top_level_omit_equal")
         semanticError = true;

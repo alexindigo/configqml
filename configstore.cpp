@@ -443,7 +443,8 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
     ConfigConsumerGuard boundary(this);
     for (const auto &p : packet.overlays) {
         if (packet.result && packet.result->operation == "openOverlay" &&
-            packet.result->status == "opened")
+            packet.result->status == "opened" && p.editorId == packet.result->editorId &&
+            p.refreshed)
             m_overlayPresentations[packet.result->requestId] =
                 std::make_shared<ConfigOverlayPresentation>(p);
         else if (!boundary.invoke([&] { receiveOverlay(p); }))
