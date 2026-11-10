@@ -52,7 +52,17 @@ private:
 class CompatibilityQmlTest : public QObject {
     Q_OBJECT
 private slots:
+    void boundConsumer_data() {
+        QTest::addColumn<int>("crossSchedule");
+        if (QString(COMPAT_FIXTURE).endsWith("tst_source_events.qml")) {
+            QTest::newRow("back-to-back") << 0;
+            QTest::newRow("80ms-gap") << 80;
+            QTest::newRow("watch-separated") << -1;
+        } else
+            QTest::newRow("default") << 0;
+    }
     void boundConsumer() {
+        QFETCH(int, crossSchedule);
         QTemporaryDir dir;
         compat::put(dir.filePath("legacy.json"),
                     "{\"oldCount\":7,\"a\":1,\"b\":2,\"wide\":18446744073709551615}");
@@ -103,8 +113,10 @@ private slots:
         QQmlEngine engine;
         engine.addImportPath(QML_IMPORT_ROOT);
         QQmlComponent component(&engine, QUrl::fromLocalFile(COMPAT_FIXTURE));
-        std::unique_ptr<QObject> root(
-            component.createWithInitialProperties({{"directory", dir.path()}}));
+        QVariantMap initial{{"directory", dir.path()}};
+        if (sourceEvents)
+            initial["crossSchedule"] = crossSchedule;
+        std::unique_ptr<QObject> root(component.createWithInitialProperties(initial));
         QVERIFY2(root, qPrintable(component.errorString()));
         QTRY_VERIFY_WITH_TIMEOUT(root->property("ready").toBool() ||
                                      !root->property("failure").toString().isEmpty(),
@@ -173,6 +185,18 @@ private slots:
                     replace("live/user.json", compat::bytes(dir.filePath("live/user.json")));
                 else if (action == "cross") {
                     replace("live/user.json", "{\"n\":5}");
+                    if (crossSchedule > 0)
+                        QTest::qSleep(crossSchedule); // Worker watches run on their own thread.
+                    else if (crossSchedule < 0) {
+                        // A real accepted watch generation, not a timed coalescing assumption.
+                        QTRY_VERIFY_WITH_TIMEOUT(
+                            root->property("crossAccepted").toInt() == 1 ||
+                                !root->property("failure").toString().isEmpty(),
+                            5000);
+                        QCOMPARE(root->property("failure").toString(), QString());
+                        QCOMPARE(root->property("observed").toInt(), 5);
+                        QCOMPARE(root->property("observedOther").toInt(), 0);
+                    }
                     replace("section.json", "{\"n\":6}");
                 } else if (action == "malformed")
                     replace("live/user.json", "stale malformed observation");
