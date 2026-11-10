@@ -28,4 +28,5 @@ ConfigModelPlan reconcileProjection(const ConfigDescriptor &descriptor,
                                     const QList<ConfigModelRow> &after);
 QHash<int, QByteArray> projectionRoles(const ConfigDescriptor &descriptor);
 QVariant collectionPresentation(const ConfigDescriptor &descriptor, const QVariant &value);
+QVariant unknownPresentation(const QVariant &value);
 } // namespace configqml

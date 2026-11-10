@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configqmlvalue.h"
 #include "configprojection_p.h"
+#include "confignumber.h"
+#include <QJSEngine>
 #include <QJSValue>
 #include <QJSValueIterator>
 #include <cmath>
@@ -162,6 +164,49 @@ ConfigValueResult admitQmlValue(const ConfigDescriptor &d, const QVariant &input
 }
 QVariant qmlValue(const ConfigDescriptor &d, const QVariant &v) {
     return collectionPresentation(d, v);
+}
+QVariant qmlPresentation(QJSEngine *engine, const QVariant &value) {
+    if (value.metaType() == QMetaType::fromType<ConfigNumber>()) {
+        const auto exact = value.value<ConfigNumber>().exactPresentation();
+        if (exact)
+            return *exact;
+        if (!engine)
+            return value;
+        const auto atom = engine->toScriptValue(value);
+        engine->globalObject().property("Object").property("freeze").call({atom});
+        return QVariant::fromValue(atom);
+    }
+    if (value.metaType().id() == QMetaType::QVariantMap) {
+        auto map = value.toMap();
+        for (auto &item : map)
+            item = qmlPresentation(engine, item);
+        return map;
+    }
+    if (value.metaType().id() == QMetaType::QVariantList) {
+        auto list = value.toList();
+        for (auto &item : list)
+            item = qmlPresentation(engine, item);
+        return list;
+    }
+    return value;
+}
+QJSValue detachedQmlValue(QJSEngine *engine, const QVariant &value) {
+    if (value.metaType().id() == QMetaType::QVariantMap) {
+        auto object = engine->newObject();
+        object.setPrototype(QJSValue(QJSValue::NullValue));
+        const auto map = value.toMap();
+        for (auto it = map.cbegin(); it != map.cend(); ++it)
+            object.setProperty(it.key(), detachedQmlValue(engine, it.value()));
+        return object;
+    }
+    if (value.metaType().id() == QMetaType::QVariantList) {
+        const auto list = value.toList();
+        auto array = engine->newArray(list.size());
+        for (qsizetype i = 0; i < list.size(); ++i)
+            array.setProperty(i, detachedQmlValue(engine, list[i]));
+        return array;
+    }
+    return engine->toScriptValue(qmlPresentation(engine, value));
 }
 QVariantMap qmlResult(const ConfigResult &input, const ConfigDiagnosticBuilder &diagnostics) {
     const auto r = diagnostics.sanitize(input);

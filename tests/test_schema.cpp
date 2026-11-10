@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configschema.h"
 #include "confignumber.h"
+#include "configprojection_p.h"
 #include "numericfixtures.h"
 #include <QTest>
 #include <QUrl>
@@ -13,6 +14,34 @@ using T = D::Type;
 class SchemaTest : public QObject {
     Q_OBJECT
 private slots:
+    void unknownNumericPresentationIsLossless() {
+        for (const auto &text : {"123", "1.25", "-0", "123.00", "1.25e2", "9007199254740992"}) {
+            const auto number = *ConfigNumber::fromJson(text);
+            QVERIFY2(number.exactPresentation(), text);
+            QCOMPARE(unknownPresentation(QVariant::fromValue(number)).metaType().id(),
+                     QMetaType::Double);
+        }
+        for (const auto &text : {"18446744073709551615", "1e400", "1e-400",
+                                 "1.2345678901234567890123456789", "9007199254740993"}) {
+            const auto number = *ConfigNumber::fromJson(text);
+            QVERIFY2(!number.exactPresentation(), text);
+            const auto presented = unknownPresentation(QVariant::fromValue(number));
+            QCOMPARE(presented.metaType(), QMetaType::fromType<ConfigNumber>());
+            QCOMPARE(encodeJsonValue(presented).bytes, QByteArray(text));
+        }
+        auto descriptor = D::leaf(T::Record, QVariantMap{});
+        descriptor.open = true;
+        const auto raw =
+            decodeJsonValue(
+                "{\"safe\":123,\"nested\":[{\"wide\":18446744073709551615,\"fraction\":1.25}]}")
+                .value;
+        const auto result = collectionPresentation(descriptor, raw).toMap();
+        QCOMPARE(result.value("safe").toDouble(), 123.0);
+        const auto nested = result.value("nested").toList()[0].toMap();
+        QCOMPARE(nested.value("fraction").toDouble(), 1.25);
+        QCOMPARE(nested.value("wide").value<ConfigNumber>().token(),
+                 QString("18446744073709551615"));
+    }
     void exactNumericAdmission() {
         for (const auto &row : numericFixtures()) {
             auto number = D::leaf(row.unsignedType ? T::UnsignedInteger : T::Integer,

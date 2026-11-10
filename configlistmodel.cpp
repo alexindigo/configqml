@@ -13,18 +13,18 @@ ConfigNode ConfigNode::fromValue(const ConfigSchema &schema, const ConfigPath &p
     return descriptor && captured.ok() ? ConfigNode(*descriptor, captured.value, qmlNumbers)
                                        : ConfigNode();
 }
-ConfigNode::ConfigNode(ConfigDescriptor d, QVariant v, bool qml)
-    : m_descriptor(std::move(d)), m_value(std::move(v)), m_qmlNumbers(qml) {}
+ConfigNode::ConfigNode(ConfigDescriptor d, QVariant v, bool qml,
+                       std::function<QVariant(const QVariant &)> presenter, bool unknown)
+    : m_descriptor(std::move(d)), m_value(std::move(v)), m_qmlNumbers(qml),
+      m_presenter(std::move(presenter)), m_unknown(unknown) {}
 QVariant ConfigNode::value() const {
     if (m_value.metaType().id() == QMetaType::QVariantList ||
         m_value.metaType().id() == QMetaType::QVariantMap)
         return {};
-    if (m_qmlNumbers &&
-        (m_descriptor.type == ConfigDescriptor::Type::Integer ||
-         m_descriptor.type == ConfigDescriptor::Type::UnsignedInteger) &&
-        m_value.isValid() && !isNull(m_value))
-        return m_value.toString();
-    return m_value;
+    const auto value = !m_qmlNumbers ? m_value
+                       : m_unknown   ? unknownPresentation(m_value)
+                                     : collectionPresentation(m_descriptor, m_value);
+    return m_presenter ? m_presenter(value) : value;
 }
 int ConfigNode::count() const {
     return m_value.metaType().id() == QMetaType::QVariantMap ? m_value.toMap().size()
@@ -37,13 +37,16 @@ ConfigNode ConfigNode::get(const QString &key) const {
     auto d = m_descriptor.type == ConfigDescriptor::Type::Map && !m_descriptor.element.isEmpty()
                  ? m_descriptor.element.first()
                  : m_descriptor.fields.value(key);
-    return ConfigNode(d, map.value(key), m_qmlNumbers);
+    const bool unknown = m_unknown || (m_descriptor.type != ConfigDescriptor::Type::Map &&
+                                       !m_descriptor.fields.contains(key));
+    return ConfigNode(d, map.value(key), m_qmlNumbers, m_presenter, unknown);
 }
 ConfigNode ConfigNode::at(int index) const {
     const auto list = m_value.toList();
     if (index < 0 || index >= list.size())
         return {};
-    return ConfigNode(m_descriptor.element.value(0), list[index], m_qmlNumbers);
+    return ConfigNode(m_descriptor.element.value(0), list[index], m_qmlNumbers, m_presenter,
+                      m_unknown);
 }
 struct ConfigListModel::Rows {
     QList<ConfigModelRow> values;
@@ -62,11 +65,9 @@ QVariant ConfigListModel::data(const QModelIndex &index, int role) const {
         return {};
     const auto &row = m_rows->values[index.row()];
     auto scalar = [&](const ConfigDescriptor &d, const QVariant &value) -> QVariant {
-        if (m_numbers == Numbers::DecimalStrings && value.isValid() && !isNull(value) &&
-            (d.type == ConfigDescriptor::Type::Integer ||
-             d.type == ConfigDescriptor::Type::UnsignedInteger))
-            return value.toString();
-        return value;
+        const auto result =
+            m_numbers == Numbers::DecimalStrings ? collectionPresentation(d, value) : value;
+        return m_presenter ? m_presenter(result) : result;
     };
     if (role == Qt::UserRole + 1)
         return m_descriptor.idField.isEmpty()
@@ -78,7 +79,7 @@ QVariant ConfigListModel::data(const QModelIndex &index, int role) const {
             row.value.metaType().id() != QMetaType::QVariantList)
             return scalar(m_descriptor.element.first(), row.value);
         return QVariant::fromValue(ConfigNode(m_descriptor.element.first(), row.value,
-                                              m_numbers == Numbers::DecimalStrings));
+                                              m_numbers == Numbers::DecimalStrings, m_presenter));
     }
     if (!m_roles.contains(role))
         return {};
@@ -87,7 +88,7 @@ QVariant ConfigListModel::data(const QModelIndex &index, int role) const {
     if (value.metaType().id() == QMetaType::QVariantMap ||
         value.metaType().id() == QMetaType::QVariantList) {
         return QVariant::fromValue(ConfigNode(m_descriptor.element.first().fields.value(key), value,
-                                              m_numbers == Numbers::DecimalStrings));
+                                              m_numbers == Numbers::DecimalStrings, m_presenter));
     }
     return scalar(m_descriptor.element.first().fields.value(key), value);
 }

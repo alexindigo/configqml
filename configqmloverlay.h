@@ -6,6 +6,7 @@ namespace configqml {
 class ConfigQmlOverlay : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString editorId READ editorId CONSTANT)
+    Q_PROPERTY(QString placementToken READ placementToken NOTIFY stateChanged)
     Q_PROPERTY(QObject *values READ values CONSTANT)
     Q_PROPERTY(bool ready READ ready NOTIFY stateChanged)
     Q_PROPERTY(bool dirty READ dirty NOTIFY stateChanged)
@@ -17,6 +18,9 @@ public:
     ConfigQmlOverlay(ConfigStore *store, ConfigOverlayEditor *editor, QObject *parent);
     ~ConfigQmlOverlay() override;
     QString editorId() const { return m_adapter->editorId(); }
+    QString placementToken() const {
+        return m_adapter->m_overlay ? m_adapter->m_overlay->placementToken() : QString();
+    }
     QObject *values() const { return m_adapter->values(); }
     bool ready() const { return m_adapter->ready(); }
     bool dirty() const { return m_adapter->dirty(); }

@@ -65,6 +65,31 @@ static QStringList ids(ConfigListModel *model) {
 class ModelsTest : public QObject {
     Q_OBJECT
 private slots:
+    void detachedNativeCopyAndUnknownNodes() {
+        ConfigStore store(options());
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto raw = decodeJsonValue("{\"__proto__\":{\"wide\":18446744073709551615,\"label\":"
+                                         "\"original\"},\"constructor\":1.25,\"prototype\":1e400}")
+                             .value;
+        const auto copy = store.copyValue(raw);
+        QVERIFY(copy.ok());
+        auto changed = copy.value.toMap();
+        auto row = changed.value("__proto__").toMap();
+        row["label"] = "edited";
+        changed["__proto__"] = row;
+        QCOMPARE(raw.toMap().value("__proto__").toMap().value("label").toString(),
+                 QString("original"));
+        QCOMPARE(changed.value("__proto__").toMap().value("wide").value<ConfigNumber>().token(),
+                 QString("18446744073709551615"));
+        QCOMPARE(encodeJsonValue(copy.value).bytes, encodeJsonValue(raw).bytes);
+        auto record = D::leaf(T::Record, QVariantMap{});
+        record.open = true;
+        const ConfigSchema schema(D::group({{"row", record}}));
+        const auto node = ConfigNode::fromValue(schema, {"row"}, raw, true);
+        QCOMPARE(node.get("constructor").value().toDouble(), 1.25);
+        QCOMPARE(node.get("__proto__").get("wide").value().value<ConfigNumber>().token(),
+                 QString("18446744073709551615"));
+    }
     void sealedAdmission() {
         auto o = options();
         o.schema = ConfigSchema(D::group({{"word", D::leaf(T::String, QString("initial"))},

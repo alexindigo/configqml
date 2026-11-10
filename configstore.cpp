@@ -10,6 +10,9 @@
 #include <QCoreApplication>
 
 namespace configqml {
+ConfigValueResult ConfigStore::copyValue(const QVariant &value) const {
+    return ownValue(value, {}, m_schema.diagnostics());
+}
 ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
     : QObject(parent), m_schema(options.schema),
       m_storeId(options.storeId.isEmpty() ? QUuid::createUuid().toString() : options.storeId) {

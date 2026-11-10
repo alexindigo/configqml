@@ -51,6 +51,7 @@ public:
     QString error() const { return m_error; }
     QVariant value(const ConfigPath &path) const;
     QVariant presentation(const ConfigPath &path) const;
+    ConfigValueResult copyValue(const QVariant &value) const;
     ConfigPathState info(const ConfigPath &path) const;
     ConfigSnapshot snapshot() const {
         return m_admittedSnapshot ? *m_admittedSnapshot : ConfigSnapshot{};

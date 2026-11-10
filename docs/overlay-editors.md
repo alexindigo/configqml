@@ -147,6 +147,22 @@ Handles expose read-only `editorId`, `values`, `ready`, `dirty`, `conflicted`,
 main store's existing order, after eligible cache installation, signal before
 detached callback. In editor mode, busy edits/apply/reset/discard refuse `overlay-busy`.
 
+`editorId` identifies the handle and stays constant. Read-only `placementToken`
+is a worker-owned, handle-local observation token for the selected raw row mapping
+in every mode, including a frozen/conflicted editor. It changes on observable
+replacement, identity-value change, move/reorder (including same-ID reorder),
+removal and insertion that shifts the selected row. Override edits and edits of
+the row's other members keep the token. Normalization is resolved back to the raw
+address before tracking it. Compare a saved token with the same handle's current
+token before projecting retained preview state; do not persist it or compare it
+across handles/processes. Token updates use `stateChanged` and do not thaw editors.
+
+There are no persistent row IDs. A same-ID whole-row replacement whose raw
+before/after transition is indistinguishable from a member edit keeps the token:
+`{id:"x", label:"a"}` becoming `{id:"x", label:"b"}` carries no evidence of which
+operation produced it. Likewise, byte-identical rows supply no observable reorder
+identity. The token fences observable mapping changes, not hidden object creation.
+
 `apply` and `resetOverrides` return exactly `saved | nothing_to_save | failed`,
 the normal route/mask/coverage/evidence fields, `editorId`, and `refreshState`:
 

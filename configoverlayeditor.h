@@ -26,6 +26,7 @@ public:
     Q_ENUM(Status)
     ~ConfigOverlayEditor() override;
     QString editorId() const { return m_id; }
+    QString placementToken() const { return m_placementToken; }
     ConfigSchema schema() const { return m_schema; }
     QVariant value(const ConfigPath &path) const;
     QVariant presentation(const ConfigPath &path) const;
@@ -58,6 +59,7 @@ private:
     ConfigRequestHandle writeLive(const ConfigPath &path, const std::optional<QVariant> &value);
     QPointer<ConfigStore> m_store;
     QString m_id, m_error;
+    QString m_placementToken;
     ConfigPath m_ownerPath;
     ConfigSchema m_schema{ConfigDescriptor::group({})};
     ConfigOverlayMode m_mode = ConfigOverlayMode::Editor;

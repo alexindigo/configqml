@@ -37,7 +37,7 @@ class ConfigQmlStore : public QObject, public QQmlParserStatus {
 public:
     enum Status { Loading, Ready, Error, Closing, Closed };
     Q_ENUM(Status)
-    using QObject::QObject;
+    explicit ConfigQmlStore(QObject *parent = nullptr);
     void classBegin() override {}
     void componentComplete() override;
     ConfigQmlSchema *schema() const { return m_schema; }
@@ -83,6 +83,7 @@ public:
     Q_INVOKABLE QString close(const QJSValue &callback = {});
     Q_INVOKABLE ConfigQmlStore *scope(const QStringList &key, bool writable = true);
     Q_INVOKABLE ConfigQmlStore *draft(const QVariantList &paths = {});
+    Q_INVOKABLE QJSValue copyValue(const QJSValue &value);
     QObject *preview();
     Q_INVOKABLE ConfigQmlStore *previewScope(const QStringList &path);
     Q_INVOKABLE QString apply(const QJSValue &callback = {});
@@ -161,6 +162,7 @@ private:
     bool m_writable = true;
     bool m_isHandle = false;
     ConfigDiagnosticBuilder m_diagnostics;
+    mutable QMap<ConfigPath, QVariant> m_scriptPresentations;
 };
 QObject *createConfigNamespace(ConfigQmlStore *store, const ConfigDescriptor &descriptor,
                                const ConfigPath &path, QObject *parent);

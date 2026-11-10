@@ -3,6 +3,8 @@
 #include "configschema.h"
 #include "configresult.h"
 #include "configrecordlistpolicy.h"
+#include <QJSValue>
+class QJSEngine;
 namespace configqml {
 bool qmlIndex(const QVariant &value, qsizetype &out);
 bool qmlSelectors(const QVariant &value, QList<ConfigValueSelector> &out, bool each = false,
@@ -14,6 +16,8 @@ ConfigAdmission admitQmlInput(const ConfigSchema &schema, const ConfigPath &path
 ConfigValueResult admitQmlValue(const ConfigDescriptor &descriptor, const QVariant &value,
                                 const ConfigPath &path = {});
 QVariant qmlValue(const ConfigDescriptor &descriptor, const QVariant &value);
+QVariant qmlPresentation(QJSEngine *engine, const QVariant &value);
+QJSValue detachedQmlValue(QJSEngine *engine, const QVariant &value);
 QVariantMap qmlResult(const ConfigResult &result, const ConfigDiagnosticBuilder &diagnostics = {});
 QVariantMap qmlGroupInfo(const ConfigGroupInfo &info,
                          const ConfigDiagnosticBuilder &diagnostics = {});

@@ -166,6 +166,8 @@ private:
     QMap<QString, std::shared_ptr<ConfigOverlayTransaction>> m_overlayTransactions;
     QMap<QString, ConfigCommand> m_overlayCommands;
     QMap<QString, ConfigOverlayCapture> m_overlayCaptures;
+    QMap<QString, ConfigOverlayPlacement> m_overlayPlacements;
+    QString overlayPlacementToken(const QString &id, const ConfigOverlaySelection &selection);
     QMap<QString, std::shared_ptr<const ConfigDraftPreview>> m_draftPreviews;
     QMap<QString, ConfigOverlaySubscription> m_overlaySubscriptions;
     QMap<QString, ConfigResult> m_overlayReceipts;

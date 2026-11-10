@@ -62,6 +62,18 @@ private slots:
         const bool overlay = QString(COMPAT_FIXTURE).endsWith("tst_overlay_editor.qml");
         const bool liveOverlay = QString(COMPAT_FIXTURE).endsWith("tst_live_overlay.qml");
         const bool draftPreview = QString(COMPAT_FIXTURE).endsWith("tst_draft_preview.qml");
+        const bool valueCopy = QString(COMPAT_FIXTURE).endsWith("tst_value_copy.qml");
+        if (valueCopy) {
+            const QByteArray record =
+                "{\"id\":\"x\",\"label\":\"original\",\"knownNumber\":123,\"customField\":123,"
+                "\"fraction\":1.25,\"wide\":18446744073709551615,\"overflow\":1e400,"
+                "\"longDecimal\":1.2345678901234567890123456789,\"nested\":{\"__proto__\":{"
+                "\"keep\":false}},\"items\":[{\"label\":\"child\",\"wide\":18446744073709551615}],"
+                "\"constructor\":1e400,\"prototype\":\"kept\"}";
+            compat::put(dir.filePath("user.json"),
+                        "{\"rows\":[" + record + "],\"monitors\":{\"__proto__\":" + record +
+                            ",\"other\":" + record + "},\"settings\":{\"object\":" + record + "}}");
+        }
         if (liveOverlay) {
             compat::put(dir.filePath("base.json"), "{\"volume\":1}");
             compat::put(dir.filePath("main.json"),
@@ -193,7 +205,42 @@ private slots:
         QCOMPARE(root->property("failure").toString(), QString());
         QVERIFY(root->property("finished").toBool());
         if (strictEmpty || overlay || pattern || recordList || unknownData || pendingRebase ||
-            sharedParents || liveOverlay || draftPreview) {
+            sharedParents || liveOverlay || draftPreview || valueCopy) {
+            if (valueCopy) {
+                const auto raw =
+                    ConfigJsonCodec().decode(compat::bytes(dir.filePath("user.json")), "user").raw;
+                const auto monitors = raw.value("monitors").toMap();
+                const auto changed = monitors.value("__proto__").toMap();
+                QCOMPARE(changed.value("wide").value<ConfigNumber>().token(),
+                         QString("18446744073709551615"));
+                QCOMPARE(changed.value("overflow").value<ConfigNumber>().token(), QString("1e400"));
+                QCOMPARE(changed.value("longDecimal").value<ConfigNumber>().token(),
+                         QString("1.2345678901234567890123456789"));
+                QCOMPARE(changed.value("constructor").value<ConfigNumber>().token(),
+                         QString("1e400"));
+                QCOMPARE(changed.value("prototype").toString(), QString("kept"));
+                const auto items = changed.value("items").toList();
+                QCOMPARE(items.size(), 2);
+                QCOMPARE(items[0].toMap().value("label").toString(), QString("changed child"));
+                QCOMPARE(items[0].toMap().value("wide").value<ConfigNumber>().token(),
+                         QString("18446744073709551615"));
+                QCOMPARE(monitors.value("other").toMap().value("label").toString(),
+                         QString("original"));
+                const auto owner = ConfigJsonCodec()
+                                       .decode(compat::bytes(dir.filePath("owner.json")), "owner")
+                                       .raw;
+                const auto instance = owner.value("rows")
+                                          .toList()[1]
+                                          .toMap()
+                                          .value("instanceSettings")
+                                          .toMap()
+                                          .value("object")
+                                          .toMap();
+                QCOMPARE(instance.value("wide").value<ConfigNumber>().token(),
+                         QString("18446744073709551615"));
+                QCOMPARE(instance.value("overflow").value<ConfigNumber>().token(),
+                         QString("1e400"));
+            }
             if (draftPreview) {
                 const auto row = ConfigJsonCodec()
                                      .decode(compat::bytes(dir.filePath("owner.json")), "owner")

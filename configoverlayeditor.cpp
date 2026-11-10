@@ -197,6 +197,8 @@ ConfigRequestHandle ConfigOverlayEditor::writeLive(const ConfigPath &path,
 void ConfigOverlayEditor::install(const ConfigOverlayPresentation &p) {
     if (m_status == Status::Closed)
         return;
+    if (!p.placementToken.isEmpty())
+        m_placementToken = p.placementToken;
     if (p.dirtyKnown)
         m_liveDirty = p.dirty;
     m_conflicted |= p.conflicted;

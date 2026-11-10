@@ -73,6 +73,7 @@ QObject *ConfigQmlStore::preview() {
         return nullptr;
     if (!m_previewAdapter) {
         auto *view = new ConfigQmlStore(this);
+        view->m_callbackContext = this; // The hidden adapter itself has no JS wrapper.
         view->initializeHandle(m_core, m_prefix, false, m_draft, true);
         m_previewAdapter = view;
     }

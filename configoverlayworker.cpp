@@ -618,7 +618,37 @@ void ConfigWorker::overlayChanged(const QString &id) {
         post(publish());
     }
 }
+QString ConfigWorker::overlayPlacementToken(const QString &id, const ConfigOverlaySelection &s) {
+    auto &previous = m_overlayPlacements[id];
+    const auto owner = m_layers->unmaskedValue(s.ownerPath).value_or(QVariant());
+    QList<ConfigRecordListPolicySpec> policies;
+    for (const auto &policy : m_listPolicies)
+        if (policy.path == s.ownerPath)
+            policies.append(policy);
+    QString error;
+    const auto address = overlayRawAddress(owner, s.entryPath, policies, m_listMetadata, error);
+    const auto row = error.isEmpty() ? overlayAt(owner, address) : std::nullopt;
+    const auto identity = row ? overlayAt(*row, s.identityPath) : std::nullopt;
+    QVariant typedIdentity;
+    const auto leaf = m_options.schema.descriptor(s.ownerPath);
+    const auto descriptor = leaf ? overlayDescriptor(*leaf, address) : std::nullopt;
+    const auto identityDescriptor =
+        descriptor ? overlayDescriptor(*descriptor, s.identityPath) : std::nullopt;
+    if (identity && identityDescriptor)
+        typedIdentity = identityDescriptor->validate(*identity).value;
+    const bool present = bool(row) && row->metaType().id() == QMetaType::QVariantMap;
+    if (!previous.revision || previous.present != present || previous.rawEntryPath != address ||
+        previous.identity != typedIdentity ||
+        overlayPlacementMoved(previous.ownerValue, owner, address, s.overrideKey))
+        ++previous.revision;
+    previous.ownerValue = owner;
+    previous.rawEntryPath = address;
+    previous.identity = typedIdentity;
+    previous.present = present;
+    return id + ':' + QString::number(previous.revision);
+}
 void ConfigWorker::overlayDetach(const QString &id) {
+    m_overlayPlacements.remove(id);
     auto capture = m_overlayCaptures.take(id);
     m_overlaySubscriptions.remove(id + ":owner");
     if (capture.selection.base)

@@ -12,11 +12,23 @@
   Edited leaves show draft values; unedited leaves follow current effective
   store values without changing frozen Apply/conflict fences. Preview scopes
   close on successful Apply/discard or draft destruction.
+- Overlay `placementToken` fences observable raw-row mapping changes without
+  persistent row IDs. Member edits and indistinguishable same-ID replacements
+  keep the token; observable moves/reorders and identity changes update it.
+- `copyValue` makes detached JS-mutable deep copies with exact native numeric
+  atoms and own prototype-like keys preserved.
+
+### Fixed
+
+- Unknown numeric members present as exact JS numbers or frozen native
+  `.decimal` atoms through namespaces, models, drafts, previews and overlays,
+  preserving unsafe numeric tokens on write-back.
 
 ### Changed
 
 - Rebuild native dependents for the pre-1.0 `ConfigOverlayEditor`, `ConfigDraft`
-  and `ConfigStoreHandle` ABI changes.
+  and `ConfigStoreHandle` ABI changes, plus `ConfigNumber`, `ConfigNode` and
+  `ConfigListModel`.
 
 ## [0.4.0] - 2026-11-08
 

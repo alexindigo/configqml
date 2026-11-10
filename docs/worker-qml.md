@@ -146,6 +146,25 @@ M1 native `Integer` remains exact signed 64-bit; native callers select
 `SafeInteger` for the safe-number domain. JSON numeric tokens retain exact syntax
 until schema admission. Memory transport is separate from the JSON/file codec.
 
+### Unknown numeric members (0.5.0)
+
+Unknown members of preserved/open records and nested maps/lists use one recursive
+presentation contract across namespaces, models, drafts, previews, overlays and
+record-list publications. A decimal that round-trips numerically through the
+normal lossless JSON double encoder is a JS number (`123`, `1.25`). Otherwise it
+is an immutable, frozen native numeric atom with a read-only `.decimal` string
+(`18446744073709551615`, `1e400`, or an over-precision fraction). Overflow and
+underflow are not silently rounded. Declared Int64/UInt64 fields remain decimal
+strings, unchanged.
+
+Assign the actual atom back to retain its exact original numeric token. Reading
+`.decimal` is inspection, not a conversion request; an authored `{decimal:...}`
+object is an ordinary record and cannot forge a numeric atom. Presentation never
+changes raw/native storage. Numeric atoms stay native metatype values beneath
+their frozen QML wrappers; no engine value enters the worker. Namespace
+presentations are cached per changed leaf, and model nodes use the same scalar
+presentation at their QML boundary. Core-only clients retain native values.
+
 Persistent write capability is compiled from immutable source prefixes. A leaf
 without a writable user route is a nonwritable dynamic meta-property. Direct QML
 assignment fails visibly, and explicit path writes reject synchronously without
@@ -203,6 +222,30 @@ Unknown dynamic JS properties are not admitted settings; explicit path APIs
 reject undeclared keys. Runtime schema leaves cannot all appear in static
 qmltypes, so dynamic consumers use a var handle; native facades supply static
 metadata. The test fixture's eval is intentional driver code, not production.
+
+### Explicit detached copies (0.5.0)
+
+`store.copyValue(value)` (also available on scoped/draft facades) returns a
+detached, JS-mutable deep copy. Maps/records become null-prototype dictionaries;
+lists become independent JS arrays. Own `__proto__`, `constructor` and `prototype`
+keys survive, including nested keys. Exact numeric atoms stay frozen and retain
+their native numeric domain. Mutating the copy does not call a namespace setter,
+advance input sequence or alter the original; assign the completed atomic value
+back once to admit it. Normal cycle/depth/engine-bound-value refusals are visible.
+
+```qml
+const map = store.copyValue(store.values.monitors);
+const record = store.copyValue(map["__proto__"]);
+record.label = "edited";
+map["__proto__"] = record;
+store.values.monitors = map;
+store.save(callback);
+```
+
+Native `ConfigStore::copyValue(value)` returns an owned `ConfigValueResult` with
+the same native atoms/keys. The QML operation captures once through the owning
+value traversal, then creates detached JS containers; it does not serialize via
+JSON, recursively coerce opaque numbers or copy attached setter references.
 
 ## Verification lanes
 

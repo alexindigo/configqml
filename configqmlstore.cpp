@@ -8,6 +8,13 @@
 #include <QTimer>
 
 namespace configqml {
+ConfigQmlStore::ConfigQmlStore(QObject *parent) : QObject(parent) {
+    // Invalidate before namespace/binding observers receive this same signal.
+    connect(this, &ConfigQmlStore::settingValuesChanged, this, [this](const auto &paths) {
+        for (const auto &path : paths)
+            m_scriptPresentations.remove(path);
+    });
+}
 void ConfigQmlStore::setSchema(ConfigQmlSchema *schema) {
     if (m_complete) {
         reject({}, "schema-is-construction-only");
@@ -231,13 +238,41 @@ ConfigStore::Callback ConfigQmlStore::callback(const QJSValue &function) {
     };
 }
 QVariant ConfigQmlStore::read(const ConfigPath &path) const {
-    if (m_isPreview)
-        return ready() ? m_previewDraft->previewPresentation(path) : QVariant();
-    if (m_overlay)
-        return m_overlay->presentation(path);
-    if (!m_core)
+    if (m_isPreview && !ready())
         return {};
-    return m_draft ? m_draft->presentation(path) : m_core->presentation(path);
+    if (!m_core && !m_overlay)
+        return {};
+    const auto cached = m_scriptPresentations.constFind(path);
+    if (cached != m_scriptPresentations.cend())
+        return cached.value();
+    QVariant value;
+    if (m_isPreview)
+        value = m_previewDraft->previewPresentation(path);
+    else if (m_overlay)
+        value = m_overlay->presentation(path);
+    else if (m_core)
+        value = m_draft ? m_draft->presentation(path) : m_core->presentation(path);
+    auto *engine = scriptEngine();
+    if (!engine)
+        return value;
+    const auto presented = qmlPresentation(engine, value);
+    m_scriptPresentations.insert(ownPath(path), presented);
+    return presented;
+}
+QJSValue ConfigQmlStore::copyValue(const QJSValue &value) {
+    QPointer<QJSEngine> engine(scriptEngine());
+    if (!engine)
+        return {};
+    ConfigValueResult captured;
+    ConfigConsumerGuard boundary(this, engine);
+    if (!boundary.invoke(
+            [&] { captured = captureQmlValue(QVariant::fromValue(value), {}, m_diagnostics); }))
+        return {};
+    if (!captured.ok()) {
+        reject({}, captured.errors.first().code);
+        return {};
+    }
+    return detachedQmlValue(engine, captured.value);
 }
 ConfigRequestHandle ConfigQmlStore::write(const ConfigPath &path, const QVariant &value,
                                           const QJSValue &function) {
@@ -378,6 +413,10 @@ ConfigListModel *ConfigQmlStore::listModel(const QStringList &queryPath) {
     if (m_models.value(path))
         return m_models.value(path);
     QQmlEngine::setObjectOwnership(source, QQmlEngine::CppOwnership);
+    const QPointer<QJSEngine> engine(scriptEngine());
+    source->m_presenter = [engine](const QVariant &value) {
+        return engine ? qmlPresentation(engine, value) : QVariant();
+    };
     m_models[path] = source;
     connect(source, &ConfigListModel::writeRejected, this,
             [this, path] { reject(path, "read-only-model"); });
@@ -391,6 +430,10 @@ ConfigListModel *ConfigQmlStore::keyedModel(const QStringList &queryPath) {
         return nullptr;
     }
     if (!m_models.value(path)) {
+        const QPointer<QJSEngine> engine(scriptEngine());
+        source->m_presenter = [engine](const QVariant &value) {
+            return engine ? qmlPresentation(engine, value) : QVariant();
+        };
         QQmlEngine::setObjectOwnership(source, QQmlEngine::CppOwnership);
         m_models[path] = source;
         connect(source, &ConfigListModel::writeRejected, this,

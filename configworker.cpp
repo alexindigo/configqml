@@ -328,15 +328,15 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
     }
     packet.initial = initial;
     for (auto it = m_overlayCaptures.cbegin(); it != m_overlayCaptures.cend(); ++it) {
-        if (it->selection.mode != ConfigOverlayMode::Live)
-            continue;
         ConfigOverlayPresentation state;
         state.editorId = it.key();
-        state.dirtyKnown = true;
+        state.placementToken = overlayPlacementToken(it.key(), it->selection);
+        state.dirtyKnown = it->selection.mode == ConfigOverlayMode::Live;
         state.dirty = m_dirty.contains(m_layers->info(it->selection.ownerPath).route.sourceId);
         bool found = false;
         for (auto &presentation : m_overlayPackets)
             if (presentation.editorId == it.key()) {
+                presentation.placementToken = state.placementToken;
                 presentation.dirtyKnown = state.dirtyKnown;
                 presentation.dirty = state.dirty;
                 found = true;

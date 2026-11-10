@@ -132,6 +132,84 @@ bool pendingBackend(ConfigStore &store) {
 class OverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void placementTokensTrackObservableRawMapping() {
+        ConfigStore base(baseOptions()), main(mainOptions());
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        QVariantList rows{QVariantMap{{"id", "x"}, {"label", "a"}},
+                          QVariantMap{{"id", "x"}, {"label", "b"}}};
+        compat::request(main, [&] { return main.setUser({"rows"}, rows).requestId; });
+        QList<ConfigOverlayEditor *> overlays;
+        for (auto mode :
+             {ConfigOverlayMode::View, ConfigOverlayMode::Live, ConfigOverlayMode::Editor})
+            overlays.append(open(main, selection(main, base.scope({"settings"}), mode)));
+        auto tokens = [&] {
+            QStringList result;
+            for (auto *handle : overlays)
+                result.append(handle->placementToken());
+            return result;
+        };
+        auto previous = tokens();
+        for (const auto &token : previous)
+            QVERIFY(!token.isEmpty());
+        auto publish = [&] {
+            QCOMPARE(compat::request(main, [&] { return main.setUser({"rows"}, rows).requestId; })
+                         .status,
+                     QString("accepted"));
+        };
+        auto record = rows[0].toMap();
+        record["instanceSettings"] = QVariantMap{{"volume", 9}};
+        rows[0] = record;
+        publish();
+        QCOMPARE(tokens(), previous); // Same row, override edit.
+        record["label"] = "member-edited";
+        rows[0] = record;
+        publish();
+        QCOMPARE(tokens(), previous); // Other members are not identity.
+        rows[0] = QVariantMap{{"id", "x"}, {"label", "indistinguishable-replacement"}};
+        publish();
+        QCOMPARE(tokens(), previous); // Whole-row assignment is indistinguishable from an edit.
+        rows[1] = rows[0];
+        publish();
+        QCOMPARE(tokens(), previous);
+        rows.swapItemsAt(0, 1);
+        publish();
+        QCOMPARE(tokens(), previous); // Byte-identical rows have no observable reorder identity.
+        rows[1] = QVariantMap{{"id", "x"}, {"label", "b"}};
+        publish();
+        QCOMPARE(tokens(), previous);
+        rows.swapItemsAt(0, 1);
+        publish();
+        auto changed = tokens();
+        for (qsizetype i = 0; i < changed.size(); ++i)
+            QVERIFY(changed[i] != previous[i]);
+        previous = changed;
+        rows.prepend(QVariantMap{{"id", "x"}, {"label", "newly-inserted"}});
+        publish();
+        changed = tokens();
+        for (qsizetype i = 0; i < changed.size(); ++i)
+            QVERIFY(changed[i] != previous[i]);
+        previous = changed;
+        rows.removeFirst();
+        publish();
+        changed = tokens();
+        for (qsizetype i = 0; i < changed.size(); ++i)
+            QVERIFY(changed[i] != previous[i]);
+        previous = changed;
+        record = rows[0].toMap();
+        record["id"] = "replacement";
+        rows[0] = record;
+        publish();
+        changed = tokens();
+        for (qsizetype i = 0; i < changed.size(); ++i)
+            QVERIFY(changed[i] != previous[i]);
+        previous = changed;
+        rows.clear();
+        publish();
+        changed = tokens();
+        for (qsizetype i = 0; i < changed.size(); ++i)
+            QVERIFY(changed[i] != previous[i]);
+    }
     void draftPreviewInheritsWithoutChangingFrozenFences() {
         QTemporaryDir dir;
         const auto baseFile = dir.filePath("base.json"), mainFile = dir.filePath("main.json");
