@@ -132,6 +132,137 @@ bool pendingBackend(ConfigStore &store) {
 class OverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void draftPreviewInheritsWithoutChangingFrozenFences() {
+        QTemporaryDir dir;
+        const auto baseFile = dir.filePath("base.json"), mainFile = dir.filePath("main.json");
+        compat::put(baseFile, "{\"volume\":7,\"optional\":\"old\"}");
+        compat::put(mainFile, "{\"rows\":[{\"id\":\"x\",\"sibling\":false}]}");
+        ConfigStore base(baseOptions(baseFile)), main(mainOptions(mainFile));
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        auto *draft = base.draft({{"settings"}});
+        QVERIFY(draft->setValue({"settings", "volume"}, 9).accepted);
+        auto *scope = draft->previewScope({"settings"});
+        QVERIFY(scope && scope->attached());
+        QCOMPARE(draft->previewValue({"settings", "volume"}).toInt(), 9);
+        QCOMPARE(base.value({"settings", "volume"}).toInt(), 7);
+        QVERIFY(!scope->setUser({"volume"}, 99).accepted);
+        QCOMPARE(compat::request(main, [&] { return main.openOverlay(selection(main, scope)); })
+                     .error.code,
+                 QString("overlay-selection"));
+        auto *view = open(main, selection(main, scope, ConfigOverlayMode::View));
+        auto *live = open(main, selection(main, scope, ConfigOverlayMode::Live));
+        QCOMPARE(view->value({"volume"}).toInt(), 9);
+        QCOMPARE(live->value({"volume"}).toInt(), 9);
+        QVERIFY(draft->setValue({"settings", "volume"}, 10).accepted);
+        QTRY_COMPARE(view->value({"volume"}).toInt(), 10);
+        QTRY_COMPARE(live->value({"volume"}).toInt(), 10);
+        QVERIFY(draft->setValue({"settings", "volume"}, 9).accepted);
+        QTRY_COMPARE(view->value({"volume"}).toInt(), 9);
+        QTRY_COMPARE(live->value({"volume"}).toInt(), 9);
+        QSaveFile foreign(baseFile);
+        QVERIFY(foreign.open(QIODevice::WriteOnly));
+        QVERIFY(foreign.write("{\"volume\":7,\"optional\":\"foreign\"}") > 0);
+        QVERIFY(foreign.commit());
+        compat::request(base, [&] { return base.reload(); });
+        QCOMPARE(draft->value({"settings", "optional"}).toString(), QString("old"));
+        QCOMPARE(draft->previewValue({"settings", "optional"}).toString(), QString("foreign"));
+        QCOMPARE(draft->previewValue({"settings", "volume"}).toInt(), 9);
+        QTRY_COMPARE(view->value({"optional"}).toString(), QString("foreign"));
+        QTRY_COMPARE(live->value({"optional"}).toString(), QString("foreign"));
+        QCOMPARE(compat::request(base, [&] { return draft->apply(); }).error.code,
+                 QString("draft-conflict"));
+        QVERIFY(scope->attached());
+        QVERIFY(live->setValue({"volume"}, 11).accepted);
+        QCOMPARE(compat::request(main, [&] { return live->save(); }).status, QString("saved"));
+        QCOMPARE(base.value({"settings", "volume"}).toInt(), 7);
+        QCOMPARE(draft->previewValue({"settings", "volume"}).toInt(), 9);
+        const auto persisted = ConfigJsonCodec().decode(compat::bytes(mainFile), "main").raw;
+        QCOMPARE(persisted.value("rows")
+                     .toList()[0]
+                     .toMap()
+                     .value("instanceSettings")
+                     .toMap()
+                     .value("volume")
+                     .value<ConfigNumber>()
+                     .token(),
+                 QString("11"));
+        QVERIFY(live->unset({"volume"}));
+        compat::request(main, [&] { return live->flush(); });
+        QTRY_COMPARE(view->value({"volume"}).toInt(), 9);
+        QVERIFY(draft->discard());
+        QVERIFY(!scope->attached());
+        for (auto *overlay : {view, live}) {
+            QTRY_COMPARE(overlay->status(), ConfigOverlayEditor::Status::Error);
+            QCOMPARE(overlay->error(), QString("overlay-owner"));
+        }
+        QVERIFY(draft->setValue({"settings", "volume"}, 9).accepted);
+        auto *next = draft->previewScope({"settings"});
+        QVERIFY(next && next->attached());
+        auto *applied = open(main, selection(main, next, ConfigOverlayMode::View));
+        QCOMPARE(compat::request(base, [&] { return draft->apply(); }).status, QString("saved"));
+        QCOMPARE(base.value({"settings", "volume"}).toInt(), 9);
+        QVERIFY(!next->attached());
+        QTRY_COMPARE(applied->error(), QString("overlay-owner"));
+        auto *last = draft->previewScope({"settings"}, &main);
+        auto *destroyed = open(main, selection(main, last, ConfigOverlayMode::Live));
+        delete draft;
+        QVERIFY(!last->attached());
+        QTRY_COMPARE(destroyed->error(), QString("overlay-owner"));
+        ConfigStore restarted(baseOptions(baseFile));
+        QTRY_COMPARE(restarted.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restarted.value({"settings", "volume"}).toInt(), 9);
+    }
+    void draftPreviewSelectedAtomicValuesAndNotifications() {
+        ConfigStore store(baseOptions());
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *draft = store.draft({{"settings", "object"}});
+        QSignalSpy preview(draft, &ConfigDraft::previewValuesChanged);
+        QVERIFY(draft->setValue({"settings", "object"}, QVariantMap{{"a", 9}, {"b", 4}}).accepted);
+        QCOMPARE(draft->previewValue({"settings", "object"}).toMap().value("a").toInt(), 9);
+        QVERIFY(!draft->previewValue({"settings", "volume"}).isValid());
+        QVERIFY(!draft->previewSchema().descriptor({"settings", "volume"}));
+        auto *scope = draft->previewScope({"settings"});
+        QVERIFY(scope);
+        QVERIFY(!scope->info({"volume"}).provenance.declared);
+        QVERIFY(!scope->scope({"missing"}));
+        QVERIFY(!scope->listModel({"object"}));
+        compat::request(store, [&] {
+            return store.setUser({"settings", "object"}, QVariantMap{{"a", 1}, {"b", 8}}).requestId;
+        });
+        QCOMPARE(draft->previewValue({"settings", "object"}).toMap().value("b").toInt(), 4);
+        QVERIFY(preview.size() >= 2);
+        QVERIFY(draft->conflicted());
+    }
+    void draftPreviewClosureCancelsEitherLease() {
+        for (bool ownerFirst : {false, true})
+            for (bool destroy : {false, true}) {
+                std::unique_ptr<ConfigStore> main, base;
+                if (ownerFirst)
+                    main = std::make_unique<ConfigStore>(mainOptions());
+                base = std::make_unique<ConfigStore>(baseOptions());
+                if (!main)
+                    main = std::make_unique<ConfigStore>(mainOptions());
+                QTRY_COMPARE(base->status(), ConfigStore::Status::Ready);
+                QTRY_COMPARE(main->status(), ConfigStore::Status::Ready);
+                auto *draft = base->draft({{"settings"}});
+                auto *scope = draft->previewScope({"settings"}, main.get());
+                auto &paused = ownerFirst ? *main : *base;
+                ConfigStoreTestAccess::run(paused, [](auto &w) { w.holdOverlayLeases(true); });
+                QSignalSpy results(main.get(), &ConfigStore::completed);
+                main->openOverlay(selection(*main, scope, ConfigOverlayMode::Live));
+                QTRY_COMPARE(held(paused), 1);
+                if (destroy)
+                    delete draft;
+                else
+                    QVERIFY(draft->discard());
+                QTRY_COMPARE(results.size(), 1);
+                QCOMPARE(results[0][0].value<ConfigResult>().error.code, QString("overlay-owner"));
+                QTRY_COMPARE(held(paused), 0);
+                QVERIFY(!scope->attached());
+                ConfigStoreTestAccess::run(paused, [](auto &w) { w.holdOverlayLeases(false); });
+            }
+    }
     void liveOrderedRuntimeWriter() {
         QTemporaryDir dir;
         const auto file = dir.filePath("main.json");

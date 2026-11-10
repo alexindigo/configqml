@@ -70,6 +70,47 @@ Successful apply refreshes the preview from the settled effective store. Apply's
 normal save covers the already-reported store prefix, including earlier accepted
 user writes. Autosave never sees un-applied draft edits.
 
+### Live preview views (0.5.0)
+
+`draft.values` retains its frozen baseline. `draft.preview` is a separate,
+read-only namespace over the same selected leaves: an edited leaf shows the
+draft edit, while an unedited leaf follows the store's current effective value.
+Edits to an atomic Record/List/Map replace that whole leaf in the preview.
+Unselected leaves are absent; assigning to preview properties fails visibly.
+Preview changes never write the store, advance its input/intent fences or trigger
+autosave. Foreign changes still conflict with Apply exactly as before.
+
+```qml
+const draft = shared.draft([["settings"]]);
+draft.values.settings.volume = 9;
+// draft.preview.settings.volume === 9; shared.values.settings.volume === 7
+const base = draft.previewScope(["settings"]);
+// Use base in the usual ten-option openOverlay call, mode "view" or "live".
+```
+
+`previewScope(path)` returns a read-only scoped handle usable as an overlay base
+in view and live modes; editor mode rejects it with `overlay-selection`. Overlays
+inherit checked preview edits merged with the placement override on the worker.
+Live instance writes still enter only the placement's owning leaf, never the
+preview or shared store. Unedited preview leaves and inherited overlays refresh
+after store publications, including foreign changes. Preview scopes can be
+nested with `scope(path)` but cannot upgrade to writable handles. They expose
+namespace values, not store list/keyed models.
+
+Successful Apply, successful discard and draft destruction close all existing
+preview scopes. Their overlays report Error/`overlay-owner`; they never silently
+retarget to the store. A failed Apply retains edits and leaves these scopes open.
+The reusable draft's `preview` namespace continues after Apply/discard; call
+`previewScope` again for a new lifetime, or reopen overlays on an ordinary store
+scope when shared preview is no longer wanted. Explicit scope detach closes only
+that scope. Destroying an editor still cannot cancel admitted persistence.
+
+Native `ConfigDraft` adds `previewValue(path)`, `previewPresentation(path)`,
+`previewSchema()`, `previewValuesChanged(paths)` and `previewScope(path, parent)`.
+Paths remain absolute, while the returned `ConfigStoreHandle` reads relative
+paths. Its `attached()` becomes false at the lifetime boundaries above. Preview
+schema/presentations are selected declared data; no store/raw mirror is created.
+
 ## Scoped handles
 
 ```qml

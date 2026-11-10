@@ -3,6 +3,7 @@
 #include "configqmlvalue.h"
 #include "configconsumer_p.h"
 #include "configqmlmodel.h"
+#include "configstorehandle.h"
 #include <QQmlEngine>
 #include <QTimer>
 
@@ -16,6 +17,8 @@ void ConfigQmlStore::setSchema(ConfigQmlSchema *schema) {
     ConfigConsumerGuard(this).invoke([&] { emit schemaChanged(); });
 }
 ConfigQmlStore::Status ConfigQmlStore::status() const {
+    if (m_isPreview && (!m_previewDraft || (m_nativeScope && !m_nativeScope->attached())))
+        return Closed;
     if (m_overlay) {
         switch (m_overlay->status()) {
         case ConfigOverlayEditor::Status::Loading:
@@ -228,6 +231,8 @@ ConfigStore::Callback ConfigQmlStore::callback(const QJSValue &function) {
     };
 }
 QVariant ConfigQmlStore::read(const ConfigPath &path) const {
+    if (m_isPreview)
+        return ready() ? m_previewDraft->previewPresentation(path) : QVariant();
     if (m_overlay)
         return m_overlay->presentation(path);
     if (!m_core)
@@ -342,6 +347,8 @@ QVariantMap ConfigQmlStore::info(const QStringList &relative) const {
     const auto p = m_prefix + relative;
     if (!m_core)
         return {};
+    if (m_isPreview && (!ready() || !m_previewDraft->previewSchema().descriptor(p)))
+        return {};
     const auto info = m_core->info(p);
     return {{"declared", info.provenance.declared},
             {"present", info.provenance.present},
@@ -363,7 +370,7 @@ QVariantMap ConfigQmlStore::info(const QStringList &relative) const {
 }
 ConfigListModel *ConfigQmlStore::listModel(const QStringList &queryPath) {
     const auto path = ownPath(m_prefix + queryPath);
-    auto *source = m_core ? m_core->listModel(path) : nullptr;
+    auto *source = m_core && !m_isPreview ? m_core->listModel(path) : nullptr;
     if (!source) {
         reject(path, "not-a-list-setting");
         return nullptr;
@@ -378,7 +385,7 @@ ConfigListModel *ConfigQmlStore::listModel(const QStringList &queryPath) {
 }
 ConfigListModel *ConfigQmlStore::keyedModel(const QStringList &queryPath) {
     const auto path = ownPath(m_prefix + queryPath);
-    auto *source = m_core ? m_core->keyedModel(path) : nullptr;
+    auto *source = m_core && !m_isPreview ? m_core->keyedModel(path) : nullptr;
     if (!source) {
         reject(path, "not-a-map-setting");
         return nullptr;

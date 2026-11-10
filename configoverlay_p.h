@@ -21,6 +21,8 @@ struct ConfigOverlaySelection {
     ConfigOverlayMode mode = ConfigOverlayMode::Editor;
     std::shared_ptr<ConfigOverlayEndpoint> owner, base;
     std::shared_ptr<std::atomic_bool> baseLifetime;
+    QString previewId;
+    std::shared_ptr<std::atomic_bool> previewLifetime;
     ConfigPath basePath, ownerPath;
     quint64 ownerGeneration = 0;
     QList<ConfigValueSelector> entryPath, identityPath;
@@ -70,6 +72,8 @@ struct ConfigOverlaySubscription {
     QList<ConfigPath> paths;
     QMap<ConfigPath, quint64> revisions;
     std::shared_ptr<std::atomic_bool> lifetime;
+    QString previewId;
+    std::shared_ptr<std::atomic_bool> previewLifetime;
 };
 void overlayRemoveDependency(const std::shared_ptr<ConfigOverlayEndpoint> &endpoint,
                              const QString &id);

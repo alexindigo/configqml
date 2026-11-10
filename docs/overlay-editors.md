@@ -42,6 +42,13 @@ scope/schema selection fails `overlay-selection`, mismatched identity
 `overlay-identity`. Conversion errors throw synchronously with `inputRejected`;
 semantic refusals complete asynchronously with a normal request ID/result.
 
+In view and live modes, `base` may also be `draft.previewScope(path)`. The worker
+combines current effective base values with that draft's checked edits before
+merging placement overrides. Editor mode rejects preview scopes. Successful
+draft Apply/discard or destruction closes existing preview scopes and produces
+Error/`overlay-owner`, never implicit retargeting. See
+[editors-profiles.md](editors-profiles.md#live-preview-views-050).
+
 Value paths are arrays of exactly `{key: string}` or `{index: integer}` segments.
 Indices are nonnegative safe integers; policy-only `{each:true}` is not an edit
 address. Keys are opaque, with no dot/slash interpretation. Nested screen-like

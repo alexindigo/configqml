@@ -60,13 +60,20 @@ quint64 ConfigStore::openOverlay(const ConfigOverlayOptions &options, QObject *c
         options.mergePolicy != ConfigOverlayMergePolicy::RecursiveObjectsReplaceLists ||
         options.differencePolicy != ConfigOverlayDifferencePolicy::TopLevelOmitEqual)
         t->error = "overlay-options";
-    if (options.base && options.base->thread() == thread() && options.base->m_store) {
+    if (options.base && options.base->thread() == thread() && options.base->attached()) {
         s.base = options.base->m_store->m_owner->overlayEndpoint();
         s.basePath = options.base->m_prefix;
         s.baseLifetime = options.base->m_lifetime;
+        s.previewId = options.base->m_previewId;
+        s.previewLifetime = options.base->m_previewLifetime;
+        if (!s.previewId.isEmpty() && s.mode == ConfigOverlayMode::Editor)
+            t->error = "overlay-selection";
         for (const auto &path : options.base->m_store->schema().leaves())
-            if (startsWith(path, s.basePath) && options.base->m_store->info(path).latestInput >
-                                                    options.base->m_store->info(path).workerCovered)
+            if (startsWith(path, s.basePath) &&
+                (!options.base->m_previewDraft ||
+                 options.base->m_previewDraft->previewSchema().descriptor(path)) &&
+                options.base->m_store->info(path).latestInput >
+                    options.base->m_store->info(path).workerCovered)
                 t->error = "unsettled-overlay-base";
     } else
         t->error = "overlay-selection";

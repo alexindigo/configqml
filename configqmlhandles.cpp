@@ -13,16 +13,22 @@ bool ConfigQmlStore::canWrite(const ConfigPath &path) const {
            (!m_draft || m_draft->paths().contains(path));
 }
 void ConfigQmlStore::initializeHandle(ConfigStore *core, const ConfigPath &prefix, bool writable,
-                                      ConfigDraft *draft) {
+                                      ConfigDraft *draft, bool preview) {
     m_complete = true;
     m_isHandle = true;
     m_core = core;
     m_diagnostics = core->schema().diagnostics();
     m_prefix = ownPath(prefix);
-    m_writable = writable;
-    m_draft = draft;
+    m_writable = writable && !preview;
+    m_draft = preview ? nullptr : draft;
+    m_previewDraft = preview ? draft : nullptr;
+    m_isPreview = preview;
     QQmlEngine::setObjectOwnership(this, QQmlEngine::CppOwnership);
-    if (draft) {
+    if (preview && draft) {
+        connect(draft, &ConfigDraft::previewValuesChanged, this,
+                &ConfigQmlStore::settingValuesChanged);
+        connect(draft, &QObject::destroyed, this, &ConfigQmlStore::statusChanged);
+    } else if (draft) {
         connect(draft, &ConfigDraft::valuesChanged, this, &ConfigQmlStore::settingValuesChanged);
         connect(draft, &ConfigDraft::stateChanged, this, &ConfigQmlStore::draftStateChanged);
     } else
@@ -31,7 +37,8 @@ void ConfigQmlStore::initializeHandle(ConfigStore *core, const ConfigPath &prefi
     connect(core, &ConfigStore::completed, this, [this](const ConfigResult &result) {
         ConfigConsumerGuard(this).invoke([&] { emit completed(qmlResult(result, m_diagnostics)); });
     });
-    m_values = createConfigNamespace(this, *core->schema().descriptor(prefix), prefix, this);
+    const auto schema = preview ? draft->previewSchema() : core->schema();
+    m_values = createConfigNamespace(this, *schema.descriptor(prefix), prefix, this);
     initializeOverlaySignals();
 }
 ConfigQmlStore *ConfigQmlStore::scope(const QStringList &key, bool writable) {
@@ -46,8 +53,48 @@ ConfigQmlStore *ConfigQmlStore::scope(const QStringList &key, bool writable) {
         return nullptr;
     }
     auto *handle = new ConfigQmlStore(this);
-    handle->initializeHandle(m_core, path, writable && m_writable);
+    if (m_isPreview) {
+        auto *scope = m_nativeScope ? m_nativeScope->scope(key, false) : nullptr;
+        if (!scope) {
+            delete handle;
+            reject(path, "detached-handle");
+            return nullptr;
+        }
+        handle->initializeHandle(m_core, path, false, m_previewDraft, true);
+        scope->setParent(handle);
+        handle->m_nativeScope = scope;
+        connect(scope, &ConfigStoreHandle::detached, handle, &ConfigQmlStore::statusChanged);
+    } else
+        handle->initializeHandle(m_core, path, writable && m_writable);
     return handle;
+}
+QObject *ConfigQmlStore::preview() {
+    if (!m_core || !m_draft)
+        return nullptr;
+    if (!m_previewAdapter) {
+        auto *view = new ConfigQmlStore(this);
+        view->initializeHandle(m_core, m_prefix, false, m_draft, true);
+        m_previewAdapter = view;
+    }
+    return m_previewAdapter->values();
+}
+ConfigQmlStore *ConfigQmlStore::previewScope(const QStringList &relative) {
+    if (!m_core || !m_draft) {
+        reject(relative, "not-a-draft");
+        return nullptr;
+    }
+    const auto path = m_prefix + relative;
+    auto *scope = m_draft->previewScope(path);
+    if (!scope) {
+        reject(path, "undeclared-scope");
+        return nullptr;
+    }
+    auto *view = new ConfigQmlStore(this);
+    view->initializeHandle(m_core, path, false, m_draft, true);
+    scope->setParent(view);
+    view->m_nativeScope = scope;
+    connect(scope, &ConfigStoreHandle::detached, view, &ConfigQmlStore::statusChanged);
+    return view;
 }
 QList<ConfigPath> ConfigQmlStore::selectedPaths(const QVariantList &paths, bool *ok) {
     const auto prefix = m_prefix;

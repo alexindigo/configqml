@@ -8,10 +8,15 @@
   read back immediately, queue owning-leaf admission without editor busy fences,
   keep sparse overrides and refresh on base/owner changes. `save()`/`flush()` and
   autosave use normal owner persistence, receipts and evidence.
+- Read-only live `draft.preview` and `draft.previewScope(path)` overlay bases.
+  Edited leaves show draft values; unedited leaves follow current effective
+  store values without changing frozen Apply/conflict fences. Preview scopes
+  close on successful Apply/discard or draft destruction.
 
 ### Changed
 
-- Rebuild native dependents for the pre-1.0 `ConfigOverlayEditor` ABI change.
+- Rebuild native dependents for the pre-1.0 `ConfigOverlayEditor`, `ConfigDraft`
+  and `ConfigStoreHandle` ABI changes.
 
 ## [0.4.0] - 2026-11-08
 

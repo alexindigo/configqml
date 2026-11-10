@@ -2,8 +2,35 @@
 #include "configdraft.h"
 #include "configconsumer_p.h"
 #include "configprojection_p.h"
+#include "configdraft_p.h"
+#include "configstorehandle.h"
+#include "configshutdown_p.h"
+#include <QUuid>
 
 namespace configqml {
+namespace {
+ConfigDescriptor previewDescriptor(ConfigDescriptor descriptor, const ConfigPath &prefix,
+                                   const QList<ConfigPath> &paths) {
+    for (auto it = descriptor.fields.begin(); it != descriptor.fields.end();) {
+        const auto path = prefix + ConfigPath{it.key()};
+        if (it->type == ConfigDescriptor::Type::Group) {
+            it.value() = previewDescriptor(it.value(), path, paths);
+            if (!it->fields.isEmpty()) {
+                ++it;
+                continue;
+            }
+        } else if (paths.contains(path)) {
+            ++it;
+            continue;
+        }
+        it = descriptor.fields.erase(it);
+    }
+    return descriptor;
+}
+} // namespace
+ConfigSchema draftPreviewSchema(const ConfigSchema &schema, const QList<ConfigPath> &paths) {
+    return ConfigSchema(previewDescriptor(*schema.descriptor({}), {}, paths));
+}
 ConfigDraft::ConfigDraft(ConfigStore *store, const QList<ConfigPath> &paths, QObject *parent)
     : QObject(parent), m_store(store), m_schema(store->schema()) {
     if (store->status() != ConfigStore::Status::Ready) {
@@ -30,7 +57,55 @@ ConfigDraft::ConfigDraft(ConfigStore *store, const QList<ConfigPath> &paths, QOb
     if (m_base.isEmpty())
         m_error = "empty-draft-scope";
     refresh();
+    m_previewSchema = draftPreviewSchema(m_schema, m_base.keys());
     connect(store, &ConfigStore::published, this, &ConfigDraft::observe);
+}
+ConfigDraft::~ConfigDraft() { closePreviewScopes(); }
+QVariant ConfigDraft::previewValue(const ConfigPath &path) const {
+    if (!m_store || !m_base.contains(path))
+        return {};
+    const auto edit = m_edits.constFind(path);
+    return edit == m_edits.cend() ? m_store->value(path) : edit.value().value_or(QVariant());
+}
+QVariant ConfigDraft::previewPresentation(const ConfigPath &path) const {
+    if (!m_previewPresentations.contains(path)) {
+        const auto descriptor = m_previewSchema.descriptor(path);
+        m_previewPresentations[ownPath(path)] =
+            descriptor ? collectionPresentation(*descriptor, previewValue(path)) : QVariant();
+    }
+    return m_previewPresentations.value(path);
+}
+ConfigStoreHandle *ConfigDraft::previewScope(const ConfigPath &path, QObject *parent) {
+    const auto descriptor = m_previewSchema.descriptor(path);
+    if (!valid() || !descriptor || descriptor->type != ConfigDescriptor::Type::Group)
+        return nullptr;
+    if (!m_previewLifetime || !*m_previewLifetime) {
+        m_previewId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        m_previewLifetime = std::make_shared<std::atomic_bool>(true);
+        publishPreview();
+    }
+    return new ConfigStoreHandle(this, path, parent ? parent : this);
+}
+void ConfigDraft::publishPreview() {
+    m_previewPresentations.clear();
+    if (!m_store || !m_previewLifetime || !*m_previewLifetime)
+        return;
+    auto preview = std::make_shared<ConfigDraftPreview>();
+    preview->id = m_previewId;
+    preview->lifetime = m_previewLifetime;
+    preview->paths = paths();
+    preview->edits = m_edits;
+    ConfigCommand command;
+    command.operation = "draftPreview";
+    command.preview = preview;
+    m_store->m_owner->dispatch(command);
+}
+void ConfigDraft::closePreviewScopes() {
+    if (!m_previewLifetime || !m_previewLifetime->exchange(false))
+        return;
+    if (m_store)
+        m_store->m_owner->overlayEndpoint()->send(
+            [lifetime = m_previewLifetime](ConfigWorker &w) { w.overlayScopeClosed(lifetime); });
 }
 QVariant ConfigDraft::value(const ConfigPath &path) const {
     const auto edit = m_edits.constFind(path);
@@ -56,8 +131,10 @@ ConfigOperation ConfigDraft::setValue(const ConfigPath &path, const QVariant &va
     const auto ownedPath = ownPath(path);
     m_edits[ownedPath] = checked.value;
     m_presentations.remove(ownedPath);
+    publishPreview();
     ConfigConsumerGuard boundary(this);
-    if (boundary.invoke([&] { emit valuesChanged({ownedPath}); }))
+    if (boundary.invoke([&] { emit previewValuesChanged({ownedPath}); }) &&
+        boundary.invoke([&] { emit valuesChanged({ownedPath}); }))
         boundary.invoke([&] { emit stateChanged(); });
     return {true, {}};
 }
@@ -71,8 +148,10 @@ ConfigOperation ConfigDraft::setValue(const ConfigAdmission &value) {
                 {m_schema.diagnostics().make(path, m_busy ? "draft-busy" : "outside-draft")}};
     m_edits[path] = checked.value;
     m_presentations.remove(path);
+    publishPreview();
     ConfigConsumerGuard boundary(this);
-    if (boundary.invoke([&] { emit valuesChanged({path}); }))
+    if (boundary.invoke([&] { emit previewValuesChanged({path}); }) &&
+        boundary.invoke([&] { emit valuesChanged({path}); }))
         boundary.invoke([&] { emit stateChanged(); });
     return {true, {}};
 }
@@ -84,8 +163,12 @@ void ConfigDraft::refresh() {
         m_fences[it.key()] = m_store->info(it.key());
     }
     m_presentations.clear();
+    m_previewPresentations.clear();
 }
 void ConfigDraft::observe() {
+    m_previewPresentations.clear();
+    if (!ConfigConsumerGuard(this).invoke([&] { emit previewValuesChanged(paths()); }))
+        return;
     if (m_busy || m_conflicted || !m_store)
         return;
     for (auto it = m_fences.cbegin(); it != m_fences.cend(); ++it) {
@@ -112,6 +195,7 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
                 return;
             guard->m_busy = false;
             if (result.status != "failed") {
+                guard->closePreviewScopes();
                 guard->m_edits.clear();
                 guard->m_conflicted = false;
                 guard->refresh();
@@ -134,10 +218,15 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
                 if (result.error.code == "draft-conflict" || result.error.code == "path-conflict")
                     guard->m_conflicted = true;
                 guard->observe(); // Publications skipped while busy still count as foreign work.
+                if (!guard)
+                    return;
             }
             ConfigConsumerGuard boundary(guard);
             const auto paths = guard->paths();
-            if (!boundary.invoke([&] { emit guard->valuesChanged(paths); }) ||
+            if ((result.status != "failed" &&
+                 !boundary.invoke([&] { emit guard->previewScopesClosed(); })) ||
+                !boundary.invoke([&] { emit guard->previewValuesChanged(paths); }) ||
+                !boundary.invoke([&] { emit guard->valuesChanged(paths); }) ||
                 !boundary.invoke([&] { emit guard->stateChanged(); }))
                 return;
             if (target && callback) {
@@ -159,12 +248,15 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
 bool ConfigDraft::discard() {
     if (!valid() || m_busy)
         return false;
+    closePreviewScopes();
     m_edits.clear();
     m_conflicted = false;
     refresh();
     const auto changed = paths();
     ConfigConsumerGuard boundary(this);
-    if (boundary.invoke([&] { emit valuesChanged(changed); }))
+    if (boundary.invoke([&] { emit previewScopesClosed(); }) &&
+        boundary.invoke([&] { emit previewValuesChanged(changed); }) &&
+        boundary.invoke([&] { emit valuesChanged(changed); }))
         boundary.invoke([&] { emit stateChanged(); });
     return true;
 }

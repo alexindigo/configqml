@@ -33,6 +33,7 @@ class ConfigQmlStore : public QObject, public QQmlParserStatus {
     Q_PROPERTY(bool conflicted READ conflicted NOTIFY draftStateChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY draftStateChanged)
     Q_PROPERTY(QString editorId READ editorId CONSTANT)
+    Q_PROPERTY(QObject *preview READ preview CONSTANT)
 public:
     enum Status { Loading, Ready, Error, Closing, Closed };
     Q_ENUM(Status)
@@ -82,6 +83,8 @@ public:
     Q_INVOKABLE QString close(const QJSValue &callback = {});
     Q_INVOKABLE ConfigQmlStore *scope(const QStringList &key, bool writable = true);
     Q_INVOKABLE ConfigQmlStore *draft(const QVariantList &paths = {});
+    QObject *preview();
+    Q_INVOKABLE ConfigQmlStore *previewScope(const QStringList &path);
     Q_INVOKABLE QString apply(const QJSValue &callback = {});
     Q_INVOKABLE bool discard();
     Q_INVOKABLE QString openOverlay(const QJSValue &options, const QJSValue &callback = {});
@@ -129,7 +132,7 @@ private:
     QVariantMap resultMap(const ConfigResult &result) const;
     QList<ConfigPath> selectedPaths(const QVariantList &paths, bool *ok);
     void initializeHandle(ConfigStore *core, const ConfigPath &prefix, bool writable,
-                          ConfigDraft *draft = nullptr);
+                          ConfigDraft *draft = nullptr, bool preview = false);
     QPointer<ConfigQmlSchema> m_schema;
     QList<ConfigMemorySource *> m_sources;
     QList<ConfigQmlProjection *> m_projections;
@@ -147,6 +150,9 @@ private:
     qint64 m_profileMaxBytes = 16 * 1024 * 1024;
     ConfigPath m_prefix;
     QPointer<ConfigDraft> m_draft;
+    QPointer<ConfigDraft> m_previewDraft;
+    QPointer<ConfigQmlStore> m_previewAdapter;
+    bool m_isPreview = false;
     QPointer<ConfigOverlayEditor> m_overlay;
     QPointer<QObject> m_callbackContext;
     QPointer<ConfigStoreHandle> m_nativeScope;

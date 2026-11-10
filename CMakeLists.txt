@@ -172,7 +172,7 @@ if(BUILD_TESTING)
         add_executable(test_projection_bridge tests/test_projection_bridge.cpp)
         target_link_libraries(test_projection_bridge PRIVATE configqml::configqml Qt6::Test)
         add_test(NAME projection_bridge COMMAND test_projection_bridge)
-        foreach(suite projections fallback_layers startup_policy record_list_policy unknown_data source_events retained_groups strict_empty pending_rebase shared_parents overlay_editor live_overlay string_pattern)
+        foreach(suite projections fallback_layers startup_policy record_list_policy unknown_data source_events retained_groups strict_empty pending_rebase shared_parents overlay_editor live_overlay draft_preview string_pattern)
             add_executable(test_qml_${suite} tests/test_compat_qml.cpp)
             target_link_libraries(test_qml_${suite} PRIVATE configqml::configqml Qt6::Test Qt6::Quick)
             target_compile_definitions(test_qml_${suite} PRIVATE QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"

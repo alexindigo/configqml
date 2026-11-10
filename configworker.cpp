@@ -701,6 +701,10 @@ void ConfigWorker::process(const ConfigCommand &command) {
         overlayCommand(command);
         return;
     }
+    if (command.operation == "draftPreview") {
+        draftPreview(command.preview);
+        return;
+    }
     if (command.operation == "retainGroup" || command.operation == "saveGroup" ||
         command.operation == "retryGroup" || command.operation == "releaseGroup") {
         retainedGroupCommand(command);

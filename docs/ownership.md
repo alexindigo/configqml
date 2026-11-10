@@ -28,6 +28,7 @@ The following describes production key provenance and the audited boundaries.
 | 14 | Raw migrations | Native callbacks own worker-safe captures; QML compiles explicit owned source strings in a worker-local engine. Only captured plain data leaves that stack frame. Original bytes/backups and confirmed publication revisions remain worker-owned. |
 | 15 | Diagnostic schema context | ConfigDiagnosticBuilder retains immutable descriptor metadata and owned base/source prefixes. One implementation identifies authored versus content-derived segments; capture, codecs, layers and native/QML delivery share it. Detached scopes retain the context, never a raw value/merge owner. |
 | 16 | Accepted intent fences | The worker advances one per-path accepted-intent revision for every successful command/group producer. Object-thread path generations remain ingress fences, and cannot be synthesized by a worker-built profile group. |
+| 17 | Draft preview views | Selected paths come from the owned schema; only checked draft edits, an owned lifetime ID and atomic cancellation token cross to the worker's preview registry. Current base values, overlay merge and placement differences stay worker-owned. Successful Apply/discard or destruction invalidates the token; no preview becomes persistent store intent. |
 
 Environment/descriptor compilation has temporary lookup tables over its inputs;
 only owned output paths/values and the frozen schema cross the compilation

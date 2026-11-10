@@ -55,6 +55,8 @@ ConfigOverlayPresentation presentation(const QString &id, const ConfigOverlayCap
 }
 } // namespace
 QList<ConfigPath> ConfigWorker::commandPaths(const ConfigCommand &command) const {
+    if (command.preview)
+        return command.preview->paths;
     if (command.operation == "overlayLease" && command.overlay) {
         const auto path = m_endpoint == command.overlay->selection.owner
                               ? command.overlay->selection.ownerPath
@@ -156,7 +158,7 @@ void ConfigWorker::overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransac
     const bool main = m_endpoint == s.owner;
     const auto paths = main ? QList<ConfigPath>{s.ownerPath} : QList<ConfigPath>{s.basePath};
     if (t->cancelled || !s.owner->live || !s.base->live || !s.baseLifetime || !*s.baseLifetime ||
-        m_failed || m_closed) {
+        (s.previewLifetime && !*s.previewLifetime) || m_failed || m_closed) {
         t->error = "overlay-owner";
         advance(t);
         return;
@@ -174,7 +176,16 @@ void ConfigWorker::overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransac
     m_overlayIncoming[t->token] = t;
     auto &c = t->captured;
     if (!main) {
-        const auto group = m_options.schema.descriptor(s.basePath);
+        const auto preview = m_draftPreviews.value(s.previewId);
+        if (!s.previewId.isEmpty() &&
+            (!preview || preview->lifetime != s.previewLifetime || !*preview->lifetime)) {
+            t->error = "overlay-owner";
+            advance(t);
+            return;
+        }
+        const auto schema =
+            preview ? draftPreviewSchema(m_options.schema, preview->paths) : m_options.schema;
+        const auto group = schema.descriptor(s.basePath);
         if (!group || group->type != ConfigDescriptor::Type::Group) {
             t->error = "overlay-selection";
         } else {
@@ -190,7 +201,9 @@ void ConfigWorker::overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransac
                 c.baseIngress[path] = m_endpoint->revision(path);
                 if (fence.latestInput > fence.workerCovered)
                     t->error = "unsettled-overlay-base";
-                const auto value = m_previous.values.value(path);
+                const auto value = preview && preview->edits.contains(path)
+                                       ? preview->edits.value(path).value_or(QVariant())
+                                       : m_previous.values.value(path);
                 if (value.isValid())
                     putValue(c.baseValues, relative, value);
             }
@@ -306,7 +319,8 @@ void ConfigWorker::overlayCommand(const ConfigCommand &command) {
     // pause on the owner. The base may close before its acquisition turn.
     if (!t->selection.base->send([t](ConfigWorker &w) {
             w.m_overlayIncoming[t->token] = t;
-            if (!w.m_endpoint->live || !t->selection.baseLifetime || !*t->selection.baseLifetime) {
+            if (!w.m_endpoint->live || !t->selection.baseLifetime || !*t->selection.baseLifetime ||
+                (t->selection.previewLifetime && !*t->selection.previewLifetime)) {
                 t->cancelled = true;
                 release(t);
             }
@@ -353,7 +367,8 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
     result.editorId = t->editorId;
     result.refreshState = "not_refreshed";
     if (t->cancelled || !t->selection.owner || !t->selection.owner->live || !t->selection.base ||
-        !t->selection.base->live || !t->selection.baseLifetime || !*t->selection.baseLifetime)
+        !t->selection.base->live || !t->selection.baseLifetime || !*t->selection.baseLifetime ||
+        (t->selection.previewLifetime && !*t->selection.previewLifetime))
         t->error = "overlay-owner";
     const bool apply = t->operation == "overlayApply" || t->operation == "overlayReset";
     const bool liveWrite = t->operation == "overlayWrite";
@@ -424,11 +439,14 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         m_overlaySubscriptions[t->editorId + ":owner"] = subscription;
         subscription.paths = t->captured.baseFences.keys();
         subscription.lifetime = t->selection.baseLifetime;
+        subscription.previewId = t->selection.previewId;
+        subscription.previewLifetime = t->selection.previewLifetime;
         subscription.revisions.clear();
         for (auto it = t->captured.baseFences.cbegin(); it != t->captured.baseFences.cend(); ++it)
             subscription.revisions[it.key()] = it->contentRevision;
         t->selection.base->send([subscription](ConfigWorker &w) {
-            if (subscription.lifetime && *subscription.lifetime && w.m_endpoint->live)
+            if (subscription.lifetime && *subscription.lifetime && w.m_endpoint->live &&
+                (!subscription.previewLifetime || *subscription.previewLifetime))
                 w.m_overlaySubscriptions[subscription.editorId + ":base"] = subscription;
             else if (auto endpoint = subscription.endpoint.lock())
                 endpoint->send([id = subscription.editorId](ConfigWorker &owner) {
@@ -534,13 +552,19 @@ void ConfigWorker::overlayControl(const std::function<void(ConfigWorker &)> &mes
     }
 }
 void ConfigWorker::overlayScopeClosed(const std::shared_ptr<std::atomic_bool> &lifetime) {
+    for (auto it = m_draftPreviews.begin(); it != m_draftPreviews.end();)
+        if (it.value()->lifetime == lifetime)
+            it = m_draftPreviews.erase(it);
+        else
+            ++it;
     for (const auto &transaction : m_overlayIncoming)
-        if (transaction->selection.baseLifetime == lifetime) {
+        if (transaction->selection.baseLifetime == lifetime ||
+            transaction->selection.previewLifetime == lifetime) {
             transaction->cancelled = true;
             release(transaction);
         }
     for (auto it = m_overlaySubscriptions.begin(); it != m_overlaySubscriptions.end();) {
-        if (it->lifetime != lifetime) {
+        if (it->lifetime != lifetime && it->previewLifetime != lifetime) {
             ++it;
             continue;
         }
@@ -548,6 +572,16 @@ void ConfigWorker::overlayScopeClosed(const std::shared_ptr<std::atomic_bool> &l
             endpoint->send([id = it->editorId](ConfigWorker &w) { w.overlayChanged(id); });
         it = m_overlaySubscriptions.erase(it);
     }
+}
+void ConfigWorker::draftPreview(const std::shared_ptr<const ConfigDraftPreview> &preview) {
+    if (!preview || !preview->lifetime || !*preview->lifetime)
+        return;
+    m_draftPreviews[preview->id] = preview;
+    for (const auto &subscription : m_overlaySubscriptions)
+        if (subscription.previewId == preview->id)
+            if (auto endpoint = subscription.endpoint.lock())
+                endpoint->send(
+                    [id = subscription.editorId](ConfigWorker &w) { w.overlayChanged(id); });
 }
 void ConfigWorker::overlayNotify() {
     for (auto it = m_overlaySubscriptions.begin(); it != m_overlaySubscriptions.end();) {

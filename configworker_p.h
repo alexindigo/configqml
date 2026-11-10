@@ -5,6 +5,7 @@
 #include "configmemorybackend.h"
 #include "configprojection_p.h"
 #include "configoverlay_p.h"
+#include "configdraft_p.h"
 #include <QQueue>
 #include <QTimer>
 #include <QFileSystemWatcher>
@@ -58,6 +59,7 @@ struct ConfigCommand {
     std::shared_ptr<ConfigOverlayTransaction> overlay;
     QString editorId;
     QMap<ConfigPath, std::optional<QVariant>> overlayEdits;
+    std::shared_ptr<const ConfigDraftPreview> preview;
 };
 struct ConfigPendingIntent {
     quint64 id = 0, input = 0;
@@ -113,6 +115,7 @@ public:
     void overlayChanged(const QString &editorId);
     void overlayDetach(const QString &editorId);
     void overlayScopeClosed(const std::shared_ptr<std::atomic_bool> &lifetime);
+    void draftPreview(const std::shared_ptr<const ConfigDraftPreview> &preview);
     void overlayControl(const std::function<void(ConfigWorker &)> &message);
     void holdOverlayLeases(bool hold);
     qsizetype heldOverlayLeases() const { return m_overlayPaused.size(); }
@@ -163,6 +166,7 @@ private:
     QMap<QString, std::shared_ptr<ConfigOverlayTransaction>> m_overlayTransactions;
     QMap<QString, ConfigCommand> m_overlayCommands;
     QMap<QString, ConfigOverlayCapture> m_overlayCaptures;
+    QMap<QString, std::shared_ptr<const ConfigDraftPreview>> m_draftPreviews;
     QMap<QString, ConfigOverlaySubscription> m_overlaySubscriptions;
     QMap<QString, ConfigResult> m_overlayReceipts;
     QList<ConfigOverlayPresentation> m_overlayPackets;

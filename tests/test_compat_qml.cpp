@@ -61,6 +61,7 @@ private slots:
         const bool strictEmpty = QString(COMPAT_FIXTURE).endsWith("tst_strict_empty.qml");
         const bool overlay = QString(COMPAT_FIXTURE).endsWith("tst_overlay_editor.qml");
         const bool liveOverlay = QString(COMPAT_FIXTURE).endsWith("tst_live_overlay.qml");
+        const bool draftPreview = QString(COMPAT_FIXTURE).endsWith("tst_draft_preview.qml");
         if (liveOverlay) {
             compat::put(dir.filePath("base.json"), "{\"volume\":1}");
             compat::put(dir.filePath("main.json"),
@@ -100,6 +101,27 @@ private slots:
         if (retained)
             QVERIFY(obstruction.block()); // After Ready; startup remains a real successful load.
         QVERIFY(QMetaObject::invokeMethod(root.get(), "run"));
+        if (draftPreview) {
+            QTRY_VERIFY(root->property("action").toString() == "foreign" ||
+                        !root->property("failure").toString().isEmpty());
+            QCOMPARE(root->property("failure").toString(), QString());
+            // The preview is not a store layer or pending persistence intent.
+            QVERIFY(!QFileInfo::exists(dir.filePath("shared.json")));
+            QSaveFile foreign(dir.filePath("shared.json"));
+            QVERIFY(foreign.open(QIODevice::WriteOnly));
+            QVERIFY(foreign.write("{\"settings\":{\"volume\":7,\"label\":\"foreign\"}}") > 0);
+            QVERIFY(foreign.commit());
+            QVERIFY(QMetaObject::invokeMethod(root.get(), "foreignWritten"));
+            QTRY_VERIFY(root->property("action").toString() == "destroy" ||
+                        !root->property("failure").toString().isEmpty());
+            QCOMPARE(root->property("failure").toString(), QString());
+            const auto value = root->property("victim");
+            auto *victim = value.value<QObject *>();
+            if (!victim)
+                victim = value.value<QJSValue>().toQObject();
+            QVERIFY(victim);
+            delete victim; // Destroy the QML draft adapter and its owned native draft.
+        }
         if (liveOverlay) {
             QTRY_VERIFY(root->property("action").toString() == "foreign" ||
                         !root->property("failure").toString().isEmpty());
@@ -171,7 +193,15 @@ private slots:
         QCOMPARE(root->property("failure").toString(), QString());
         QVERIFY(root->property("finished").toBool());
         if (strictEmpty || overlay || pattern || recordList || unknownData || pendingRebase ||
-            sharedParents || liveOverlay) {
+            sharedParents || liveOverlay || draftPreview) {
+            if (draftPreview) {
+                const auto row = ConfigJsonCodec()
+                                     .decode(compat::bytes(dir.filePath("owner.json")), "owner")
+                                     .raw.value("rows")
+                                     .toList()[0]
+                                     .toMap();
+                QVERIFY(!row.contains("instanceSettings"));
+            }
             if (liveOverlay) {
                 const auto row = ConfigJsonCodec()
                                      .decode(compat::bytes(dir.filePath("main.json")), "main")

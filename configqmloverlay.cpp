@@ -68,7 +68,7 @@ bool ConfigQmlOverlay::unset(const QStringList &path) { return m_adapter->unset(
 void ConfigQmlOverlay::detach() { m_adapter->detach(); }
 QString ConfigQmlStore::openOverlay(const QJSValue &options, const QJSValue &function) {
     ConfigConsumerGuard boundary(this);
-    if (!m_core || m_draft || m_overlay) {
+    if (!m_core || m_draft || m_overlay || m_isPreview) {
         reject({}, "overlay-selection");
         return {};
     }
