@@ -4,16 +4,46 @@
 #include "configconsumer_p.h"
 #include "configqmlmodel.h"
 #include "configstorehandle.h"
+#include "configchange_p.h"
 #include <QQmlEngine>
 #include <QTimer>
 
 namespace configqml {
-ConfigQmlStore::ConfigQmlStore(QObject *parent) : QObject(parent) {
-    // Invalidate before namespace/binding observers receive this same signal.
-    connect(this, &ConfigQmlStore::settingValuesChanged, this, [this](const auto &paths) {
+ConfigQmlStore::ConfigQmlStore(QObject *parent) : QObject(parent) {}
+void ConfigQmlStore::prepareState() {
+    QScopedPropertyUpdateGroup group;
+    m_publishedStatus = status();
+    m_publishedReady = ready();
+    m_publishedError = error();
+    m_publishedDirty = dirty();
+    m_publishedConflicted = conflicted();
+    m_publishedBusy = busy();
+}
+void ConfigQmlStore::registerNotifications(ConfigChangePublisher *publisher) {
+    const auto invalidate = [this](const QList<ConfigPath> &paths) {
         for (const auto &path : paths)
             m_scriptPresentations.remove(path);
-    });
+    };
+    const auto notify = [this](const QList<ConfigPath> &paths) {
+        notifyConfigNamespace(m_values, paths);
+    };
+    const auto bindings = [this](const QList<ConfigPath> &paths) {
+        prepareState();
+        prepareConfigNamespace(m_values, paths);
+    };
+    publisher->add(this, invalidate, notify, bindings);
+}
+void ConfigQmlStore::initializeNotifications() {
+    prepareState();
+    auto *publisher = m_overlay     ? m_overlay->m_changes.get()
+                      : m_draft     ? m_draft->m_changes.get()
+                      : m_isPreview ? m_previewDraft->m_previewChanges.get()
+                                    : m_core->m_changes.get();
+    registerNotifications(publisher);
+    if (m_isPreview)
+        registerNotifications(m_core->m_changes.get());
+    else if (m_draft)
+        m_core->m_changes->add(this, {}, {}, [this](const auto &) { prepareState(); });
 }
 void ConfigQmlStore::setSchema(ConfigQmlSchema *schema) {
     if (m_complete) {
@@ -154,8 +184,11 @@ void ConfigQmlStore::componentComplete() {
     }
     if (!errors.isEmpty()) {
         m_error = errors.first().code;
-        QTimer::singleShot(
-            0, this, [this] { ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); }); });
+        QTimer::singleShot(0, this, [this] {
+            ConfigConsumerGuard boundary(this);
+            if (boundary.invoke([&] { prepareState(); }))
+                boundary.invoke([&] { emit statusChanged(); });
+        });
         return;
     }
     m_core = new ConfigStore(options, this);
@@ -163,6 +196,7 @@ void ConfigQmlStore::componentComplete() {
     initializeOverlaySignals();
     connect(m_core, &ConfigStore::valuesChanged, this, &ConfigQmlStore::settingValuesChanged);
     m_values = createConfigNamespace(this, *m_core->schema().descriptor({}), {}, this);
+    initializeNotifications();
     connect(m_core, &ConfigStore::statusChanged, this,
             [this] { ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); }); });
     connect(m_core, &ConfigStore::completed, this, [this](const auto &result) {

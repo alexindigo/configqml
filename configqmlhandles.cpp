@@ -3,6 +3,7 @@
 #include "configqmlvalue.h"
 #include "configconsumer_p.h"
 #include "configstorehandle.h"
+#include "configchange_p.h"
 #include <QQmlEngine>
 
 namespace configqml {
@@ -39,6 +40,7 @@ void ConfigQmlStore::initializeHandle(ConfigStore *core, const ConfigPath &prefi
     });
     const auto schema = preview ? draft->previewSchema() : core->schema();
     m_values = createConfigNamespace(this, *schema.descriptor(prefix), prefix, this);
+    initializeNotifications();
     initializeOverlaySignals();
 }
 ConfigQmlStore *ConfigQmlStore::scope(const QStringList &key, bool writable) {
@@ -173,15 +175,35 @@ void ConfigQmlStore::detach() {
         reject({}, "not-a-scoped-handle");
         return;
     }
-    if (m_core)
+    const auto paths = m_overlay ? m_overlay->schema().leaves()
+                       : m_core  ? m_core->schema().leaves()
+                                 : QList<ConfigPath>{};
+    if (m_core) {
+        m_core->m_changes->remove(this);
         disconnect(m_core, nullptr, this, nullptr);
-    if (m_nativeScope)
-        m_nativeScope->detach();
-    if (m_overlay)
-        m_overlay->detach();
+    }
+    if (m_draft) {
+        m_draft->m_changes->remove(this);
+        disconnect(m_draft, nullptr, this, nullptr);
+    }
+    if (m_previewDraft) {
+        m_previewDraft->m_previewChanges->remove(this);
+        disconnect(m_previewDraft, nullptr, this, nullptr);
+    }
     m_core = nullptr;
     m_draft = nullptr;
-    ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); });
+    ConfigConsumerGuard boundary(this);
+    ConfigChangePublisher changes;
+    registerNotifications(&changes);
+    if (!ConfigChangePublisher::prepare(this, {{&changes, paths}}))
+        return;
+    if (m_nativeScope && !boundary.invoke([&] { m_nativeScope->detach(); }))
+        return;
+    if (m_overlay && !boundary.invoke([&] { m_overlay->detach(); }))
+        return;
+    if (m_overlay)
+        m_overlay->m_changes->remove(this);
+    boundary.invoke([&] { emit statusChanged(); });
 }
 QString ConfigQmlStore::exportProfile(const QString &name, const QString &file,
                                       const QVariantList &paths, const QJSValue &function) {

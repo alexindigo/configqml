@@ -7,6 +7,7 @@
 #include <QJSValue>
 #include <QQmlParserStatus>
 #include <QAbstractItemModel>
+#include <QProperty>
 
 namespace configqml {
 class ConfigQmlOverlay;
@@ -17,9 +18,9 @@ class ConfigQmlStore : public QObject, public QQmlParserStatus {
     Q_PROPERTY(configqml::ConfigQmlSchema *schema READ schema WRITE setSchema NOTIFY schemaChanged)
     Q_PROPERTY(QQmlListProperty<configqml::ConfigMemorySource> sources READ sources)
     Q_PROPERTY(QObject *values READ values NOTIFY valuesChanged)
-    Q_PROPERTY(Status status READ status NOTIFY statusChanged)
-    Q_PROPERTY(bool ready READ ready NOTIFY statusChanged)
-    Q_PROPERTY(QString error READ error NOTIFY statusChanged)
+    Q_PROPERTY(Status status READ status NOTIFY statusChanged BINDABLE bindableStatus)
+    Q_PROPERTY(bool ready READ ready NOTIFY statusChanged BINDABLE bindableReady)
+    Q_PROPERTY(QString error READ error NOTIFY statusChanged BINDABLE bindableError)
     Q_PROPERTY(bool autoSave MEMBER m_autoSave)
     Q_PROPERTY(int autoSaveInterval MEMBER m_autoSaveInterval)
     Q_PROPERTY(qint64 profileMaxBytes MEMBER m_profileMaxBytes)
@@ -29,9 +30,9 @@ class ConfigQmlStore : public QObject, public QQmlParserStatus {
     Q_PROPERTY(QString evidenceDirectory MEMBER m_evidenceDirectory)
     Q_PROPERTY(QVariantList observedPaths MEMBER m_observedPaths)
     Q_PROPERTY(QVariantList sourceStates READ sourceStates NOTIFY sourceStatesChanged)
-    Q_PROPERTY(bool dirty READ dirty NOTIFY draftStateChanged)
-    Q_PROPERTY(bool conflicted READ conflicted NOTIFY draftStateChanged)
-    Q_PROPERTY(bool busy READ busy NOTIFY draftStateChanged)
+    Q_PROPERTY(bool dirty READ dirty NOTIFY draftStateChanged BINDABLE bindableDirty)
+    Q_PROPERTY(bool conflicted READ conflicted NOTIFY draftStateChanged BINDABLE bindableConflicted)
+    Q_PROPERTY(bool busy READ busy NOTIFY draftStateChanged BINDABLE bindableBusy)
     Q_PROPERTY(QString editorId READ editorId CONSTANT)
     Q_PROPERTY(QObject *preview READ preview CONSTANT)
 public:
@@ -60,6 +61,12 @@ public:
         return m_overlay ? m_overlay->conflicted() : m_draft && m_draft->conflicted();
     }
     bool busy() const { return m_overlay ? m_overlay->busy() : m_draft && m_draft->busy(); }
+    QBindable<Status> bindableStatus() const { return QBindable<Status>(&m_publishedStatus); }
+    QBindable<bool> bindableReady() const { return QBindable<bool>(&m_publishedReady); }
+    QBindable<QString> bindableError() const { return QBindable<QString>(&m_publishedError); }
+    QBindable<bool> bindableDirty() const { return QBindable<bool>(&m_publishedDirty); }
+    QBindable<bool> bindableConflicted() const { return QBindable<bool>(&m_publishedConflicted); }
+    QBindable<bool> bindableBusy() const { return QBindable<bool>(&m_publishedBusy); }
     QString editorId() const { return m_overlay ? m_overlay->editorId() : QString(); }
     bool canWrite(const ConfigPath &path) const;
     QVariant read(const ConfigPath &path) const;
@@ -130,6 +137,9 @@ private:
     void raise(const QString &code);
     void initializeCompatibilitySignals();
     void initializeOverlaySignals();
+    void initializeNotifications();
+    void registerNotifications(ConfigChangePublisher *publisher);
+    void prepareState();
     QVariantMap resultMap(const ConfigResult &result) const;
     QList<ConfigPath> selectedPaths(const QVariantList &paths, bool *ok);
     void initializeHandle(ConfigStore *core, const ConfigPath &prefix, bool writable,
@@ -163,7 +173,13 @@ private:
     bool m_isHandle = false;
     ConfigDiagnosticBuilder m_diagnostics;
     mutable QMap<ConfigPath, QVariant> m_scriptPresentations;
+    QProperty<Status> m_publishedStatus{Loading};
+    QProperty<bool> m_publishedReady{false}, m_publishedDirty{false}, m_publishedConflicted{false},
+        m_publishedBusy{false};
+    QProperty<QString> m_publishedError;
 };
 QObject *createConfigNamespace(ConfigQmlStore *store, const ConfigDescriptor &descriptor,
                                const ConfigPath &path, QObject *parent);
+void notifyConfigNamespace(QObject *object, const QList<ConfigPath> &paths);
+void prepareConfigNamespace(QObject *object, const QList<ConfigPath> &paths);
 } // namespace configqml

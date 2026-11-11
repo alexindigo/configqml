@@ -4,6 +4,7 @@
 #include "configprojection_p.h"
 #include "configdraft_p.h"
 #include "configapply_p.h"
+#include "configchange_p.h"
 #include "configstorehandle.h"
 #include "configshutdown_p.h"
 #include <QUuid>
@@ -34,6 +35,9 @@ ConfigSchema draftPreviewSchema(const ConfigSchema &schema, const QList<ConfigPa
 }
 ConfigDraft::ConfigDraft(ConfigStore *store, const QList<ConfigPath> &paths, QObject *parent)
     : QObject(parent), m_store(store), m_schema(store->schema()) {
+    m_changes = std::make_unique<ConfigChangePublisher>();
+    m_previewChanges = std::make_unique<ConfigChangePublisher>();
+    store->m_changes->add(this, [this](const auto &) { prepareStoreChange(); });
     if (store->status() != ConfigStore::Status::Ready) {
         m_error = "not-ready";
         return;
@@ -61,7 +65,16 @@ ConfigDraft::ConfigDraft(ConfigStore *store, const QList<ConfigPath> &paths, QOb
     m_previewSchema = draftPreviewSchema(m_schema, m_base.keys());
     connect(store, &ConfigStore::published, this, &ConfigDraft::observe);
 }
-ConfigDraft::~ConfigDraft() { closePreviewScopes(); }
+ConfigDraft::~ConfigDraft() {
+    closePreviewScopes();
+    // Scoped preview consumers must observe closure before QObject::destroyed
+    // reaches their native detached/status forwarding connections.
+    ConfigChangePublisher::prepare(this, {{m_previewChanges.get(), paths()}});
+}
+bool ConfigDraft::prepareChanges(const QList<ConfigPath> &paths) {
+    return ConfigChangePublisher::prepare(
+        this, {{m_changes.get(), paths}, {m_previewChanges.get(), paths}});
+}
 QVariant ConfigDraft::previewValue(const ConfigPath &path) const {
     if (!m_store || !m_base.contains(path))
         return {};
@@ -134,7 +147,8 @@ ConfigOperation ConfigDraft::setValue(const ConfigPath &path, const QVariant &va
     m_presentations.remove(ownedPath);
     publishPreview();
     ConfigConsumerGuard boundary(this);
-    if (boundary.invoke([&] { emit previewValuesChanged({ownedPath}); }) &&
+    if (prepareChanges({ownedPath}) &&
+        boundary.invoke([&] { emit previewValuesChanged({ownedPath}); }) &&
         boundary.invoke([&] { emit valuesChanged({ownedPath}); }))
         boundary.invoke([&] { emit stateChanged(); });
     return {true, {}};
@@ -151,7 +165,7 @@ ConfigOperation ConfigDraft::setValue(const ConfigAdmission &value) {
     m_presentations.remove(path);
     publishPreview();
     ConfigConsumerGuard boundary(this);
-    if (boundary.invoke([&] { emit previewValuesChanged({path}); }) &&
+    if (prepareChanges({path}) && boundary.invoke([&] { emit previewValuesChanged({path}); }) &&
         boundary.invoke([&] { emit valuesChanged({path}); }))
         boundary.invoke([&] { emit stateChanged(); });
     return {true, {}};
@@ -166,15 +180,13 @@ void ConfigDraft::refresh() {
     m_presentations.clear();
     m_previewPresentations.clear();
 }
-void ConfigDraft::observe() {
+void ConfigDraft::prepareStoreChange() {
     m_previewPresentations.clear();
-    if (!ConfigConsumerGuard(this).invoke([&] { emit previewValuesChanged(paths()); }))
-        return;
     if (m_busy || m_conflicted || !m_store)
         return;
     if (m_admitted && !m_admitted->valid) {
         m_conflicted = true;
-        ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
+        m_stateNotificationPending = true;
         return;
     }
     for (auto it = m_fences.cbegin(); it != m_fences.cend(); ++it) {
@@ -183,10 +195,22 @@ void ConfigDraft::observe() {
             (!m_admitted && state.contentRevision != it->contentRevision) ||
             state.pathGeneration != it->pathGeneration) {
             m_conflicted = true;
-            ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
+            m_stateNotificationPending = true;
             return;
         }
     }
+}
+void ConfigDraft::observe() {
+    prepareStoreChange();
+    const auto selected = paths();
+    const auto stateChange = std::exchange(m_stateNotificationPending, false);
+    ConfigConsumerGuard boundary(this);
+    if (!ConfigChangePublisher::prepare(
+            this, {{m_changes.get(), {}}, {m_previewChanges.get(), selected}}) ||
+        !boundary.invoke([&] { emit previewValuesChanged(selected); }))
+        return;
+    if (stateChange)
+        boundary.invoke([&] { emit stateChanged(); });
 }
 quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
     if (!valid() || m_busy)
@@ -237,12 +261,16 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
                 }
                 if (result.error.code == "draft-conflict" || result.error.code == "path-conflict")
                     guard->m_conflicted = true;
+                if (!guard->prepareChanges({}))
+                    return;
                 guard->observe(); // Publications skipped while busy still count as foreign work.
                 if (!guard)
                     return;
             }
             ConfigConsumerGuard boundary(guard);
             const auto paths = guard->paths();
+            if (!guard->prepareChanges(paths))
+                return;
             if ((result.status != "failed" &&
                  !boundary.invoke([&] { emit guard->previewScopesClosed(); })) ||
                 !boundary.invoke([&] { emit guard->previewValuesChanged(paths); }) ||
@@ -263,7 +291,8 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
             }
         },
         attempt, m_admittedEdits);
-    ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
+    if (prepareChanges({}))
+        ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
     return id;
 }
 bool ConfigDraft::discard() {
@@ -277,7 +306,7 @@ bool ConfigDraft::discard() {
     refresh();
     const auto changed = paths();
     ConfigConsumerGuard boundary(this);
-    if (boundary.invoke([&] { emit previewScopesClosed(); }) &&
+    if (prepareChanges(changed) && boundary.invoke([&] { emit previewScopesClosed(); }) &&
         boundary.invoke([&] { emit previewValuesChanged(changed); }) &&
         boundary.invoke([&] { emit valuesChanged(changed); }))
         boundary.invoke([&] { emit stateChanged(); });

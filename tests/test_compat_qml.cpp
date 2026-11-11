@@ -2,6 +2,7 @@
 #include "configqmlstore.h"
 #include "compatfixture.h"
 #include "confignumber.h"
+#include "configqmloverlay.h"
 #include <QQmlEngine>
 #include <QQmlComponent>
 #include <QTemporaryDir>
@@ -94,6 +95,11 @@ private slots:
         const bool draftRetry = QString(COMPAT_FIXTURE).endsWith("tst_draft_retry.qml");
         const bool overlayNumber = QString(COMPAT_FIXTURE).endsWith("tst_overlay_number.qml");
         const bool listOwnSave = QString(COMPAT_FIXTURE).endsWith("tst_list_own_save.qml");
+        const bool notifyOrder = QString(COMPAT_FIXTURE).endsWith("tst_notify_order.qml");
+        const QByteArray notifyBytes = "{\"settings\":{\"enabled\":true,\"rows\":[{\"compact\":"
+                                       "false,\"art\":true}]},\"wide\":18446744073709551615}";
+        if (notifyOrder)
+            compat::put(dir.filePath("user.json"), notifyBytes);
         if (listOwnSave)
             compat::put(
                 dir.filePath("user.json"),
@@ -161,9 +167,67 @@ private slots:
             initial["crossSchedule"] = crossSchedule;
         std::unique_ptr<QObject> root(component.createWithInitialProperties(initial));
         QVERIFY2(root, qPrintable(component.errorString()));
-        QTRY_VERIFY_WITH_TIMEOUT(root->property("ready").toBool() ||
-                                     !root->property("failure").toString().isEmpty(),
-                                 10000);
+        QMap<QString, QPointer<ConfigOverlayEditor>> notificationOverlays;
+        int overlayObservations = 0;
+        QList<QMetaObject::Connection> notificationConnections;
+        const auto disconnectNotifications = qScopeGuard([&] {
+            for (const auto &connection : notificationConnections)
+                QObject::disconnect(connection);
+        });
+        if (notifyOrder) {
+            auto *placements = root->property("placements").value<ConfigQmlStore *>();
+            QVERIFY(placements);
+            const auto observe = [&] {
+                for (auto it = notificationOverlays.cbegin(); it != notificationOverlays.cend();
+                     ++it) {
+                    auto *editor = it.value().data();
+                    const auto payload = root->property(it.key().toUtf8());
+                    auto *object = payload.value<QObject *>();
+                    if (!object)
+                        object = payload.value<QJSValue>().toQObject();
+                    if (!editor || !object)
+                        continue;
+                    ++overlayObservations;
+                    const auto rows =
+                        engine.toScriptValue(root->property((it.key() + "Rows").toUtf8()));
+                    if (!editor->ready()) {
+                        QVERIFY(!root->property((it.key() + "Enabled").toUtf8()).isValid());
+                        QCOMPARE(rows.property("length").toInt(), 0);
+                        continue;
+                    }
+                    auto *values = object->property("values").value<QObject *>();
+                    QVERIFY(values);
+                    QCOMPARE(values->property("enabled").toBool(),
+                             editor->value({"enabled"}).toBool());
+                    QCOMPARE(root->property((it.key() + "Enabled").toUtf8()).toBool(),
+                             editor->value({"enabled"}).toBool());
+                    const auto expected = editor->value({"rows"}).toList();
+                    QCOMPARE(rows.property(0).property("compact").toBool(),
+                             expected[0].toMap()["compact"].toBool());
+                    QCOMPARE(rows.property(0).property("art").toBool(),
+                             expected[0].toMap()["art"].toBool());
+                }
+            };
+            notificationConnections.append(connect(
+                placements->core(), &ConfigStore::overlayOpened, this,
+                [&, observe](quint64, ConfigOverlayEditor *editor) {
+                    const auto key = notificationOverlays.isEmpty()     ? QString("view")
+                                     : notificationOverlays.size() == 1 ? QString("live")
+                                                                        : QString("editor");
+                    notificationOverlays.insert(key, editor);
+                    notificationConnections.append(
+                        connect(editor, &ConfigOverlayEditor::valuesChanged, root.get(), observe));
+                    notificationConnections.append(
+                        connect(editor, &ConfigOverlayEditor::stateChanged, root.get(), observe));
+                    notificationConnections.append(
+                        connect(editor, &ConfigOverlayEditor::completed, root.get(), observe));
+                }));
+            notificationConnections.append(
+                connect(placements->core(), &ConfigStore::valuesChanged, root.get(), observe));
+        }
+        QTRY_VERIFY2_WITH_TIMEOUT(root->property("ready").toBool() ||
+                                      !root->property("failure").toString().isEmpty(),
+                                  qPrintable(root->property("startupError").toString()), 10000);
         QCOMPARE(root->property("failure").toString(), QString());
         if (retained)
             QVERIFY(obstruction.block()); // After Ready; startup remains a real successful load.
@@ -286,11 +350,29 @@ private slots:
             QVERIFY(obstruction.restore());
             QVERIFY(QMetaObject::invokeMethod(root.get(), "retry"));
         }
+        if (notifyOrder) {
+            QTRY_VERIFY(root->property("stage").toString() == "before-apply" ||
+                        !root->property("failure").toString().isEmpty());
+            QCOMPARE(root->property("failure").toString(), QString());
+            QCOMPARE(compat::bytes(dir.filePath("user.json")), notifyBytes);
+            QVERIFY(QMetaObject::invokeMethod(root.get(), "startApply"));
+        }
         QTRY_VERIFY2_WITH_TIMEOUT(root->property("finished").toBool() ||
                                       !root->property("failure").toString().isEmpty(),
                                   qPrintable(root->property("stage").toString()), 10000);
         QCOMPARE(root->property("failure").toString(), QString());
         QVERIFY(root->property("finished").toBool());
+        if (notifyOrder) {
+            const auto bytes = compat::bytes(dir.filePath("user.json"));
+            QVERIFY(bytes.contains("18446744073709551615"));
+            const auto settings =
+                ConfigJsonCodec().decode(bytes, "user").raw.value("settings").toMap();
+            QCOMPARE(settings["enabled"].toBool(), false);
+            const auto row = settings["rows"].toList().at(0).toMap();
+            QCOMPARE(row["compact"].toBool(), false);
+            QCOMPARE(row["art"].toBool(), true);
+            QVERIFY(overlayObservations >= 20);
+        }
         if (listOwnSave) {
             const auto raw =
                 ConfigJsonCodec().decode(compat::bytes(dir.filePath("user.json")), "user").raw;

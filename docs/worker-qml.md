@@ -44,6 +44,16 @@ are installed before the first notification. Rejection of the latest write
 restores authoritative effective values before failure signal/callback delivery.
 Publications never enter ingress as new persistent events.
 
+Public change delivery has a private preparation boundary. Every affected
+native and QML presentation cache is invalidated, then existing namespace and
+bound consumers are refreshed across sibling scopes, drafts, previews and all
+packet-installed overlays before public value/model/state notifications.
+Readiness guards are prepared too, including preview closure and detach.
+This does not depend on connection order or create a new input event. Namespace
+input bindings still use checked setters; explicit assignment removes the binding.
+Qt model about-to-change signals retain their required old row structure, while
+namespace getters are already current; final model signals expose the new rows.
+
 Every command settlement, including terminal-worker refusal, covers the input's
 sequence and path generation. An outstanding latest local write therefore rolls
 back to authoritative state before its failure callback; stale failures still

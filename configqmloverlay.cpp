@@ -5,6 +5,7 @@
 #include "configstorehandle.h"
 #include "configconsumer_p.h"
 #include "configoverlay_p.h"
+#include "configchange_p.h"
 #include <QQmlEngine>
 #include <QJSValueIterator>
 #include <cmath>
@@ -40,6 +41,10 @@ ConfigQmlOverlay::ConfigQmlOverlay(ConfigStore *store, ConfigOverlayEditor *edit
     connect(m_adapter, &ConfigQmlStore::inputRejected, this, &ConfigQmlOverlay::inputRejected);
     m_adapter->m_values =
         createConfigNamespace(m_adapter, *editor->schema().descriptor({}), {}, m_adapter);
+    m_adapter->initializeNotifications();
+    m_publishedPlacementToken = placementToken();
+    editor->m_changes->add(this, {}, {},
+                           [this](const auto &) { m_publishedPlacementToken = placementToken(); });
 }
 ConfigQmlOverlay::~ConfigQmlOverlay() {
     if (m_adapter->m_overlay)

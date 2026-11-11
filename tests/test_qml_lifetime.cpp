@@ -69,8 +69,9 @@ private slots:
     }
     void destroyAtQmlBoundary_data() {
         QTest::addColumn<QString>("boundary");
-        for (const auto &name : {"namespace-group", "namespace-setter", "store-rejection",
-                                 "closing-status", "completion-signal", "result-callback"})
+        for (const auto &name :
+             {"namespace-group", "namespace-binding", "namespace-setter", "store-rejection",
+              "closing-status", "completion-signal", "result-callback"})
             QTest::newRow(name) << QString::fromLatin1(name);
     }
     void destroyAtQmlBoundary() {
@@ -94,6 +95,9 @@ private slots:
             QVERIFY(bar);
             QVERIFY(connect(bar, SIGNAL(nChanged()), &destroyer, SLOT(fire())));
             core->reset({"bar"}, "user");
+        } else if (boundary == "namespace-binding") {
+            QVERIFY(connect(root.get(), SIGNAL(observedNChanged()), &destroyer, SLOT(fire())));
+            store->core()->setUser({"bar", "n"}, 1);
         } else if (boundary == "namespace-setter") {
             store->close();
             QTRY_COMPARE(store->status(), ConfigQmlStore::Closed);

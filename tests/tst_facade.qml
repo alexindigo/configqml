@@ -156,6 +156,11 @@ QtObject {
     property string closedWide: ""
     property bool reenter: false
     property bool reentered: false
+    property int bindingInput: 1
+    property var sibling: null
+    property var notificationOrder: []
+    readonly property int siblingN: sibling && sibling.ready ? sibling.values.n : -1
+    readonly property int siblingCount: sibling && sibling.ready ? sibling.values.widgets.length : -1
     property Connections listener: Connections {
         target: root.active
         enabled: root.reenter
@@ -170,7 +175,10 @@ QtObject {
         }
     }
     function run(code: string): var {
+        // Trusted test-driver expressions intentionally exercise QML assignments.
+        // qmllint disable eval
         return eval(code);
+        // qmllint enable eval
     }
     function appendBoth(): void {
         active.widgets.push(4);

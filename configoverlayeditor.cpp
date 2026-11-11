@@ -5,6 +5,7 @@
 #include "configstorehandle.h"
 #include "configconsumer_p.h"
 #include "configapply_p.h"
+#include "configchange_p.h"
 #include <QMutexLocker>
 #include <QUuid>
 
@@ -103,6 +104,7 @@ quint64 ConfigStore::openOverlay(const ConfigOverlayOptions &options, QObject *c
 }
 ConfigOverlayEditor::ConfigOverlayEditor(ConfigStore *store, const ConfigOverlayPresentation &p)
     : QObject(store), m_store(store), m_id(p.editorId), m_schema(p.schema), m_mode(p.mode) {
+    m_changes = std::make_unique<ConfigChangePublisher>();
     m_ownerPath = p.ownerPath;
     install(p);
     if (m_mode == ConfigOverlayMode::Live)
@@ -133,6 +135,11 @@ QVariant ConfigOverlayEditor::presentation(const ConfigPath &path) const {
     }
     return m_presentations.value(path);
 }
+bool ConfigOverlayEditor::notifyValues(const QList<ConfigPath> &paths) {
+    if (!ConfigChangePublisher::prepare(this, {{m_changes.get(), paths}}))
+        return false;
+    return ConfigConsumerGuard(this).invoke([&] { emit valuesChanged(paths); });
+}
 ConfigRequestHandle ConfigOverlayEditor::setValue(const ConfigPath &path, const QVariant &value) {
     const auto checked = m_schema.validate(path, value);
     ConfigRequestHandle result;
@@ -149,7 +156,7 @@ ConfigRequestHandle ConfigOverlayEditor::setValue(const ConfigPath &path, const 
     m_presentations.remove(path);
     result.accepted = true;
     ConfigConsumerGuard boundary(this);
-    if (boundary.invoke([&] { emit valuesChanged({path}); }))
+    if (notifyValues({path}))
         boundary.invoke([&] { emit stateChanged(); });
     return result;
 }
@@ -170,7 +177,7 @@ bool ConfigOverlayEditor::unset(const ConfigPath &query) {
     m_edits[path] = std::nullopt;
     m_presentations.remove(path);
     ConfigConsumerGuard boundary(this);
-    if (boundary.invoke([&] { emit valuesChanged({path}); }))
+    if (notifyValues({path}))
         boundary.invoke([&] { emit stateChanged(); });
     return true;
 }
@@ -191,11 +198,11 @@ ConfigRequestHandle ConfigOverlayEditor::writeLive(const ConfigPath &path,
     m_editSequences[path] = sequence;
     m_presentations.remove(path);
     ConfigConsumerGuard boundary(this);
-    if (boundary.invoke([&] { emit valuesChanged({path}); }))
+    if (notifyValues({path}))
         boundary.invoke([&] { emit stateChanged(); });
     return {id, sequence, true, {}};
 }
-void ConfigOverlayEditor::install(const ConfigOverlayPresentation &p) {
+void ConfigOverlayEditor::install(const ConfigOverlayPresentation &p, bool notify) {
     if (m_status == Status::Closed)
         return;
     if (!p.placementToken.isEmpty())
@@ -225,8 +232,14 @@ void ConfigOverlayEditor::install(const ConfigOverlayPresentation &p) {
         m_error.clear();
         m_status = Status::Ready;
     }
+    if (notify &&
+        ConfigChangePublisher::prepare(
+            this, {{m_changes.get(), p.refreshed ? m_schema.leaves() : QList<ConfigPath>{}}}))
+        notifyInstalled(p.refreshed);
+}
+void ConfigOverlayEditor::notifyInstalled(bool refreshed) {
     ConfigConsumerGuard boundary(this);
-    if (p.refreshed && !boundary.invoke([&] { emit valuesChanged(m_schema.leaves()); }))
+    if (refreshed && !boundary.invoke([&] { emit valuesChanged(m_schema.leaves()); }))
         return;
     boundary.invoke([&] { emit stateChanged(); });
 }
@@ -329,6 +342,8 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
             if (result.error.code == "overlay-conflict")
                 guard->m_conflicted = true;
             ConfigConsumerGuard boundary(guard);
+            if (!ConfigChangePublisher::prepare(guard, {{guard->m_changes.get(), {}}}))
+                return;
             if ((active && !boundary.invoke([&] { emit guard->stateChanged(); })) ||
                 !boundary.invoke([&] { emit guard->completed(result); }))
                 return;
@@ -349,7 +364,7 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
         m_busy = true;
     if (active && operation == "overlayReset")
         m_pendingReset = true;
-    if (active)
+    if (active && ConfigChangePublisher::prepare(this, {{m_changes.get(), {}}}))
         ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
     return id;
 }
@@ -378,6 +393,7 @@ void ConfigOverlayEditor::detach() {
         endpoint->send([id = m_id](ConfigWorker &worker) { worker.overlayDetach(id); });
     }
     m_store = nullptr;
-    ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
+    if (ConfigChangePublisher::prepare(this, {{m_changes.get(), {}}}))
+        ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
 }
 } // namespace configqml

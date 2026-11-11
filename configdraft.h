@@ -37,10 +37,15 @@ signals:
     void previewScopesClosed();
 
 private:
+    friend class ConfigQmlStore;
+    friend class ConfigStore;
+    std::unique_ptr<ConfigChangePublisher> m_changes, m_previewChanges;
+    bool prepareChanges(const QList<ConfigPath> &paths);
     friend class ConfigStoreHandle;
     void publishPreview();
     void closePreviewScopes();
     void refresh();
+    void prepareStoreChange();
     void observe();
     QPointer<ConfigStore> m_store;
     ConfigSchema m_schema;
@@ -58,5 +63,6 @@ private:
     mutable QMap<ConfigPath, QVariant> m_previewPresentations;
     bool m_conflicted = false;
     bool m_busy = false;
+    bool m_stateNotificationPending = false;
 };
 } // namespace configqml

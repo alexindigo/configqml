@@ -12,6 +12,8 @@
 
 namespace configqml {
 class ConfigWorker;
+class ConfigChangePublisher;
+class ConfigQmlStore;
 class ConfigListModel;
 class ConfigWorkerOwner;
 struct ConfigWorkerPacket;
@@ -126,6 +128,8 @@ signals:
     void overlayOpened(quint64 requestId, configqml::ConfigOverlayEditor *editor);
 
 private:
+    friend class ConfigQmlStore;
+    std::unique_ptr<ConfigChangePublisher> m_changes;
     friend class ConfigWorker;
     friend class ConfigStoreTestAccess;
     friend class ConfigDraft;

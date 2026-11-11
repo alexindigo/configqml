@@ -53,9 +53,14 @@ signals:
     void completed(const configqml::ConfigResult &result);
 
 private:
+    friend class ConfigQmlStore;
+    friend class ConfigQmlOverlay;
+    std::unique_ptr<ConfigChangePublisher> m_changes;
+    bool notifyValues(const QList<ConfigPath> &paths);
+    void notifyInstalled(bool refreshed);
     friend class ConfigStore;
     ConfigOverlayEditor(ConfigStore *store, const ConfigOverlayPresentation &presentation);
-    void install(const ConfigOverlayPresentation &presentation);
+    void install(const ConfigOverlayPresentation &presentation, bool notify = true);
     quint64 request(const QString &operation, QObject *context, ConfigStore::Callback callback);
     ConfigRequestHandle writeLive(const ConfigPath &path, const std::optional<QVariant> &value);
     QPointer<ConfigStore> m_store;
