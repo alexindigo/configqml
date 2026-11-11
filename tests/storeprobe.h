@@ -6,6 +6,10 @@
 namespace configqml {
 class ConfigStoreTestAccess {
 public:
+    static void post(ConfigWorker &worker, const ConfigWorkerPacket &packet) {
+        worker.post(packet);
+    }
+    static ConfigWorkerPacket publication(ConfigWorker &worker) { return worker.publish(); }
     static qsizetype evidenceBacklogLimit() { return ConfigWorker::EvidenceBacklogLimit; }
     static QList<ConfigEvidenceObservation> pendingEvidence(const ConfigWorker &worker,
                                                             const QString &source) {

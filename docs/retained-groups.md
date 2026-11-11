@@ -36,6 +36,12 @@ prefixes and attempt numbers are strings. No bytes, command body or raw settings
 are returned by groupInfo. Cache installation precedes completed and its detached
 callback, using the normal consumer guard and request ordering.
 
+Unrelated source errors, reload diagnostics and every other partial worker packet
+leave that view unchanged. Only a present newer complete group snapshot replaces
+it, including an explicitly empty snapshot. Older full snapshots cannot restore
+stopped state over success/release or remove newer groups. Diagnostic delivery
+never changes a capture, consumes a Retry, or clears its ingress lifecycle claim.
+
 `saveGroup` accepts retained state; `retryGroup` accepts stopped state. Every
 attempt has a fresh request/attempt ID and increments attemptNumber. Both produce
 the ordinary `saved | nothing_to_save | failed` persistence receipt with the

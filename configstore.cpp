@@ -425,16 +425,21 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
         statusChange = true;
     }
     // Complete generation is installed before the first property notification.
-    m_groups = packet.groups;
-    // Published display state is not ingress authority. Keep monotone worker
-    // observations separate from claims made before their replies can arrive.
-    for (auto it = packet.groups.cbegin(); it != packet.groups.cend(); ++it) {
-        auto &ingress = m_retainedIngress[it.key()];
-        const auto generation = packet.groupGenerations.value(it.key());
-        if (generation >= ingress.generation) {
-            ingress.generation = generation;
-            ingress.state = it->state;
-            ingress.capturePrefix = it->capturePrefix;
+    if (packet.retainedGroups &&
+        packet.retainedGroups->publicationGeneration > m_groupPublicationGeneration) {
+        const auto &groups = *packet.retainedGroups;
+        m_groupPublicationGeneration = groups.publicationGeneration;
+        m_groups = groups.groups;
+        // Published display state is not ingress authority. Keep monotone worker
+        // observations separate from claims made before their replies can arrive.
+        for (auto it = groups.groups.cbegin(); it != groups.groups.cend(); ++it) {
+            auto &ingress = m_retainedIngress[it.key()];
+            const auto generation = groups.generations.value(it.key());
+            if (generation >= ingress.generation) {
+                ingress.generation = generation;
+                ingress.state = it->state;
+                ingress.capturePrefix = it->capturePrefix;
+            }
         }
     }
     if (packet.result)

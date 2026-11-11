@@ -324,12 +324,13 @@ bool ConfigWorker::inheritFailures(ConfigResult &result) const {
 }
 ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &result, bool initial) {
     ConfigWorkerPacket packet;
+    auto &groups = packet.retainedGroups.emplace();
     for (const auto &capture : m_groups) {
         auto info = capture.info;
         for (auto &attempt : info.attempts)
             attempt.error = m_options.schema.diagnostics().sanitize(attempt.error);
-        packet.groups[info.groupToken] = info;
-        packet.groupGenerations[info.groupToken] = capture.generation;
+        groups.groups[info.groupToken] = info;
+        groups.generations[info.groupToken] = capture.generation;
     }
     packet.initial = initial;
     for (auto it = m_overlayCaptures.cbegin(); it != m_overlayCaptures.cend(); ++it) {
@@ -353,6 +354,7 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
     m_overlayPackets.clear();
     packet.result = result;
     packet.snapshot.generation = ++m_generation;
+    groups.publicationGeneration = m_generation;
     packet.snapshot.inputPrefix = m_prefix;
     auto effective = m_layers->effective(); // One full-tree owner, never the GUI.
     QSet<ConfigPath> listPaths;

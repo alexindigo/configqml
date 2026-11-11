@@ -32,6 +32,16 @@ precede callbacks; request completion order is preserved. A consumer destroying
 the store during notification cancels further store-owned delivery. Queued native
 callbacks guard their independently supplied living context.
 
+Packets distinguish complete state from absent state. Retained-group info and
+lifecycle generations travel together in an optional, publication-stamped
+snapshot: absent means unchanged; present and empty is authoritative. The facade
+installs a newer complete group view before any notification, independently of
+pending ingress claims. Diagnostic, warning, effects, metadata, readiness and
+other partial packets cannot clear it; older full snapshots cannot roll it back.
+Held replies retain capture-time state rather than receiving a newer worker view
+when delivered. Source states remain optional snapshots; values/models/overlays
+are keyed deltas, and completion/status/diagnostic fields are explicit events.
+
 ## Requests, snapshots and lifetime
 
 `save`, `flush`, `close` capture the reported input prefix, never a facade graph.

@@ -171,6 +171,7 @@ private:
     QList<ConfigSourceState> m_sourceStates;
     QMap<QString, ConfigPath> m_policyPaths;
     QMap<QString, ConfigGroupInfo> m_groups;
+    quint64 m_groupPublicationGeneration = 0;
     // Value-free ingress claims, including requests whose worker reply is pending.
     // Captures/bodies and semantic idempotency remain worker-owned.
     QMap<QString, quint64> m_retainedRequests;

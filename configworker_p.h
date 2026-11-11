@@ -15,6 +15,11 @@
 namespace configqml {
 QByteArray encodeMemoryValue(const QVariantMap &raw);
 QVariantMap decodeMemoryValue(const QByteArray &bytes);
+struct ConfigGroupSnapshot {
+    quint64 publicationGeneration = 0;
+    QMap<QString, ConfigGroupInfo> groups;
+    QMap<QString, quint64> generations;
+};
 struct ConfigWorkerPacket {
     ConfigSnapshot snapshot;
     std::shared_ptr<const ConfigSnapshot> admitted;
@@ -29,8 +34,8 @@ struct ConfigWorkerPacket {
     std::optional<ConfigSourceAccepted> sourceAccepted;
     QList<ConfigProjectionEffectsEvent> projectionEffects;
     QList<ConfigError> projectionDiagnostics;
-    QMap<QString, ConfigGroupInfo> groups;
-    QMap<QString, quint64> groupGenerations;
+    // Absent means unchanged; an engaged empty snapshot is authoritative.
+    std::optional<ConfigGroupSnapshot> retainedGroups;
     QList<ConfigOverlayPresentation> overlays;
     QMap<ConfigPath, QMap<quint64, ConfigModelPlan>> models;
     qint64 planningNanos = 0;
