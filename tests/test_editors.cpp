@@ -15,6 +15,7 @@
 #include <QSemaphore>
 #include <QDir>
 #include <QProcess>
+#include <QScopeGuard>
 #include <sys/stat.h>
 #include <unistd.h>
 using namespace configqml;
@@ -80,6 +81,72 @@ static ConfigStoreOptions options(const QString &directory = {}) {
 class EditorsTest : public QObject {
     Q_OBJECT
 private slots:
+    void admittedApplyPublicationRetry_data() {
+        QTest::addColumn<QString>("phase");
+        QTest::addColumn<int>("policy");
+        for (int policy = 0; policy < 3; ++policy)
+            for (const auto *phase : {"control", "permission", "write", "rename", "readback"})
+                QTest::newRow(qPrintable(QString("%1-policy-%2").arg(phase).arg(policy)))
+                    << QString::fromLatin1(phase) << policy;
+    }
+    void admittedApplyPublicationRetry() {
+        QFETCH(QString, phase);
+        QFETCH(int, policy);
+        QTemporaryDir dir;
+        const auto file = dir.filePath("a.json");
+        writeFile(file, "{\"n\":0,\"opaque\":{\"keep\":true}}");
+        auto o = options(dir.path());
+        o.evidenceDirectory = dir.filePath("evidence");
+        o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy(policy);
+        auto armed = std::make_shared<std::atomic_bool>(false);
+        o.fileFault = [armed, phase](const QString &step, const QString &) {
+            return step == phase && armed->exchange(false) ? QString("apply-io-fault") : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QVERIFY(store.setUser({"a", "n"}, 0).accepted);
+        QCOMPARE(request(store, [&] { return store.save(); }).status, QString("saved"));
+        auto *draft = store.scope({"a"})->draft({{"n"}});
+        QVERIFY(draft->setValue({"a", "n"}, 9).accepted);
+        auto *preview = draft->previewScope({"a"});
+        const auto restore =
+            qScopeGuard([&] { ::chmod(QFile::encodeName(dir.path()).constData(), 0700); });
+        if (phase == "permission")
+            QCOMPARE(::chmod(QFile::encodeName(dir.path()).constData(), 0500), 0);
+        else
+            armed->store(true);
+        const auto first = request(store, [&] { return draft->apply(); });
+        QCOMPARE(::chmod(QFile::encodeName(dir.path()).constData(), 0700), 0);
+        if (phase != "control") {
+            QCOMPARE(first.status, QString("failed"));
+            QCOMPARE(first.error.code, phase == "permission" ? QString("stage-open-failed")
+                                                             : QString("apply-io-fault"));
+            QVERIFY(draft->dirty());
+            QVERIFY(preview->attached());
+            QCOMPARE(store.value({"a", "n"}).toInt(), 9);
+            QVERIFY(first.rejectedPathGenerations.isEmpty());
+        } else
+            QCOMPARE(first.status, QString("saved"));
+        const auto count = store.inputs().size();
+        const auto accepted = store.info({"a", "n"});
+        const auto retry = request(store, [&] { return draft->apply(); });
+        QCOMPARE(retry.status, phase == "control" ? QString("nothing_to_save") : QString("saved"));
+        QVERIFY(!draft->dirty() && !draft->conflicted() && !draft->busy());
+        QVERIFY(!preview->attached());
+        if (phase != "control") {
+            QCOMPARE(store.inputs().size(), count);
+            QCOMPARE(store.info({"a", "n"}).intentRevision, accepted.intentRevision);
+            QCOMPARE(store.info({"a", "n"}).pathGeneration, accepted.pathGeneration);
+            QCOMPARE(store.info({"a", "n"}).latestInput, accepted.latestInput);
+            QVERIFY(!store.failures().isEmpty());
+        }
+        const auto raw = ConfigJsonCodec().decode(readFile(file), "a").raw;
+        QCOMPARE(D::leaf(T::SafeInteger, 0).validate(raw.value("n")).value.toInt(), 9);
+        QVERIFY(raw.value("opaque").toMap().value("keep").toBool());
+        ConfigStore reopened(o);
+        QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);
+        QCOMPARE(reopened.value({"a", "n"}).toInt(), 9);
+    }
     void detachedCoherentAndReopened() {
         QTemporaryDir dir;
         auto o = options(dir.path());
@@ -246,9 +313,14 @@ private slots:
     void partialFailureRetainsDraft() {
         QTemporaryDir dir;
         auto o = options(dir.path());
-        o.fileFault = [](const QString &phase, const QString &file) {
-            return file.endsWith("b.json") && phase == "write" ? QString("injected-stage")
-                                                               : QString();
+        auto broken = std::make_shared<std::atomic_bool>(true);
+        auto aWrites = std::make_shared<std::atomic_int>(0);
+        o.fileFault = [broken, aWrites](const QString &phase, const QString &file) {
+            if (file.endsWith("a.json") && phase == "write")
+                ++*aWrites;
+            return *broken && file.endsWith("b.json") && phase == "write"
+                       ? QString("injected-stage")
+                       : QString();
         };
         ConfigStore store(o);
         QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
@@ -265,15 +337,122 @@ private slots:
         QVERIFY(acceptedIntent > 0);
         QVERIFY(result.rejectedPathGenerations.isEmpty());
         QCOMPARE(request(store, [&] { return draft->apply(); }).error.code,
-                 QString("draft-conflict"));
-        QVERIFY(draft->dirty() && draft->conflicted());
+                 QString("injected-stage"));
+        QVERIFY(draft->dirty() && !draft->conflicted());
         QCOMPARE(store.info({"b", "n"}).intentRevision, acceptedIntent);
         QVERIFY(!store.failures().isEmpty());
-        o.fileFault = {};
+        *broken = false;
+        QCOMPARE(request(store, [&] { return draft->apply(); }).status, QString("saved"));
+        QCOMPARE(aWrites->load(), 1);
+        QCOMPARE(store.info({"b", "n"}).intentRevision, acceptedIntent);
+        QVERIFY(!draft->dirty() && !draft->conflicted());
         ConfigStore reopened(o);
         QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);
         QCOMPARE(reopened.value({"a", "n"}).toInt(), 7);
-        QCOMPARE(reopened.value({"b", "n"}).toInt(), 0);
+        QCOMPARE(reopened.value({"b", "n"}).toInt(), 8);
+    }
+    void admittedRetryCompetingChanges_data() {
+        QTest::addColumn<QString>("change");
+        for (const auto *change :
+             {"foreign", "foreign-equals-pending", "foreign-aba", "local-equal", "local-newer",
+              "disjoint-raw", "unrelated-error", "new-draft-edit", "rejected-new-edit"})
+            QTest::newRow(change) << QString::fromLatin1(change);
+    }
+    void admittedRetryCompetingChanges() {
+        QFETCH(QString, change);
+        QTemporaryDir dir;
+        const auto file = dir.filePath("a.json");
+        writeFile(file, "{\"n\":0,\"opaque\":true}");
+        auto o = options(dir.path());
+        auto deny = std::make_shared<std::atomic_bool>(change == "rejected-new-edit");
+        o.admission = [deny](const ConfigInput &input) {
+            return *deny && input.value.toInt() == 8 ? QString("policy") : QString();
+        };
+        auto once = std::make_shared<std::atomic_bool>(true);
+        o.fileFault = [once](const QString &phase, const QString &) {
+            return phase == "write" && once->exchange(false) ? QString("once") : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *draft = store.draft({{"a", "n"}});
+        QVERIFY(draft->setValue({"a", "n"}, 9).accepted);
+        QCOMPARE(request(store, [&] { return draft->apply(); }).error.code, QString("once"));
+        const auto accepted = store.info({"a", "n"});
+        if (change.startsWith("foreign")) {
+            writeFile(file, change == "foreign-equals-pending" ? "{\"n\":9,\"opaque\":true}"
+                                                               : "{\"n\":4,\"opaque\":true}");
+            if (change == "foreign-aba") {
+                request(store, [&] { return store.reload(); });
+                writeFile(file, "{\"n\":0,\"opaque\":true}");
+                request(store, [&] { return store.reload(); });
+            }
+        } else if (change.startsWith("local"))
+            request(store, [&] {
+                return store.setUser({"a", "n"}, change == "local-equal" ? 9 : 4).requestId;
+            });
+        else if (change == "disjoint-raw")
+            writeFile(file, "{\"n\":0,\"opaque\":false,\"local\":\"foreign\"}");
+        else if (change == "unrelated-error") {
+            writeFile(dir.filePath("b.json"), "malformed unrelated file");
+            QCOMPARE(request(store, [&] { return store.reload(); }).status, QString("failed"));
+        } else
+            QVERIFY(draft->setValue({"a", "n"}, 8).accepted);
+        if (change == "rejected-new-edit") {
+            QCOMPARE(request(store, [&] { return draft->apply(); }).error.code, QString("policy"));
+            QVERIFY(draft->dirty() && !draft->conflicted());
+            *deny = false;
+        }
+        const auto count = store.inputs().size();
+        const auto retry = request(store, [&] { return draft->apply(); });
+        const bool conflict = change.startsWith("foreign") || change.startsWith("local");
+        if (conflict) {
+            QCOMPARE(retry.error.code, QString("draft-conflict"));
+            QVERIFY(draft->dirty() && draft->conflicted());
+            QCOMPARE(store.inputs().size(), count);
+            if (change.startsWith("foreign"))
+                QCOMPARE(D::leaf(T::SafeInteger, 0)
+                             .validate(ConfigJsonCodec().decode(readFile(file), "a").raw.value("n"))
+                             .value.toInt(),
+                         change == "foreign-equals-pending" ? 9
+                         : change == "foreign-aba"          ? 0
+                                                            : 4);
+        } else {
+            const bool newEdit = change == "new-draft-edit" || change == "rejected-new-edit";
+            QCOMPARE(retry.status, QString("saved"));
+            QVERIFY(!draft->dirty() && !draft->conflicted());
+            QCOMPARE(store.inputs().size(), count + (newEdit ? 1 : 0));
+            QCOMPARE(store.info({"a", "n"}).intentRevision,
+                     accepted.intentRevision + (newEdit ? 1 : 0));
+            const auto raw = ConfigJsonCodec().decode(readFile(file), "a").raw;
+            QCOMPARE(D::leaf(T::SafeInteger, 0).validate(raw.value("n")).value.toInt(),
+                     newEdit ? 8 : 9);
+            QCOMPARE(raw.value("opaque").toBool(), change != "disjoint-raw");
+        }
+    }
+    void changedDraftRetryAdmitsOnlyDelta() {
+        QTemporaryDir dir;
+        auto o = options(dir.path());
+        auto once = std::make_shared<std::atomic_bool>(true);
+        o.fileFault = [once](const QString &phase, const QString &) {
+            return phase == "write" && once->exchange(false) ? QString("once") : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *draft = store.draft({{"a", "n"}, {"b", "n"}});
+        QVERIFY(draft->setValue({"a", "n"}, 9).accepted);
+        QVERIFY(draft->setValue({"b", "n"}, 7).accepted);
+        QCOMPARE(request(store, [&] { return draft->apply(); }).status, QString("failed"));
+        const auto unchanged = store.info({"b", "n"});
+        const auto changed = store.info({"a", "n"});
+        QVERIFY(draft->setValue({"a", "n"}, 8).accepted);
+        QCOMPARE(request(store, [&] { return draft->apply(); }).status, QString("saved"));
+        QCOMPARE(store.info({"a", "n"}).intentRevision, changed.intentRevision + 1);
+        QCOMPARE(store.info({"b", "n"}).intentRevision, unchanged.intentRevision);
+        QCOMPARE(store.info({"b", "n"}).pathGeneration, unchanged.pathGeneration);
+        ConfigStore reopened(o);
+        QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);
+        QCOMPARE(reopened.value({"a", "n"}).toInt(), 8);
+        QCOMPARE(reopened.value({"b", "n"}).toInt(), 7);
     }
     void scopesOpaqueAndIndependentDelivery() {
         auto o = options();

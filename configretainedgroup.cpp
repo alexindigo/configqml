@@ -305,6 +305,7 @@ void ConfigWorker::recordPersistent(const ConfigInput &input, const ConfigLayers
 }
 void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
                              const ConfigBackendResult &outcome) {
+    prepareApplyConfirmation(id);
     const auto saved = m_saveIntents.value(id);
     QSet<quint64> ids;
     for (const auto &intent : saved)

@@ -3,6 +3,7 @@
 #include "configconsumer_p.h"
 #include "configprojection_p.h"
 #include "configdraft_p.h"
+#include "configapply_p.h"
 #include "configstorehandle.h"
 #include "configshutdown_p.h"
 #include <QUuid>
@@ -171,10 +172,15 @@ void ConfigDraft::observe() {
         return;
     if (m_busy || m_conflicted || !m_store)
         return;
+    if (m_admitted && !m_admitted->valid) {
+        m_conflicted = true;
+        ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
+        return;
+    }
     for (auto it = m_fences.cbegin(); it != m_fences.cend(); ++it) {
         const auto state = m_store->info(it.key());
         if (state.intentRevision != it->intentRevision ||
-            state.contentRevision != it->contentRevision ||
+            (!m_admitted && state.contentRevision != it->contentRevision) ||
             state.pathGeneration != it->pathGeneration) {
             m_conflicted = true;
             ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
@@ -186,23 +192,37 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
     if (!valid() || m_busy)
         return 0;
     m_busy = true;
+    if (m_applyId.isEmpty())
+        m_applyId = "draft:" + QUuid::createUuid().toString(QUuid::Id128);
+    auto attempt = std::make_shared<ConfigApplyAttempt>();
+    attempt->ownerId = m_applyId;
+    attempt->expected = m_admitted;
+    const auto edits = m_edits;
     const QPointer<ConfigDraft> guard(this);
     const QPointer<QObject> target(context ? context : this);
     const auto id = m_store->applyGroup(
         m_edits, m_fences, this,
-        [guard, target, callback = std::move(callback)](const ConfigResult &result) {
+        [guard, target, attempt, edits,
+         callback = std::move(callback)](const ConfigResult &result) {
             if (!guard)
                 return;
             guard->m_busy = false;
             if (result.status != "failed") {
+                guard->m_admitted.reset();
+                guard->m_admittedEdits.clear();
                 guard->closePreviewScopes();
                 guard->m_edits.clear();
                 guard->m_conflicted = false;
                 guard->refresh();
             } else {
+                if (attempt->admitted) {
+                    guard->m_admitted = attempt->admitted;
+                    guard->m_admittedEdits = edits;
+                    guard->m_fences = attempt->admitted->fences;
+                }
                 // Admission rejection covers ingress, but accepts no intent. Reconcile only
                 // this attempt's single generation step, never a changed baseline or a later
-                // local write. Persistence failures deliberately carry no such settlement.
+                // local write. Admitted IO failures instead use their worker-owned witness above.
                 for (auto it = result.rejectedPathGenerations.cbegin();
                      guard->m_store && it != result.rejectedPathGenerations.cend(); ++it) {
                     auto fence = guard->m_fences.find(it.key());
@@ -241,7 +261,8 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
                         },
                         Qt::QueuedConnection);
             }
-        });
+        },
+        attempt, m_admittedEdits);
     ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
     return id;
 }
@@ -249,6 +270,8 @@ bool ConfigDraft::discard() {
     if (!valid() || m_busy)
         return false;
     closePreviewScopes();
+    m_admitted.reset();
+    m_admittedEdits.clear();
     m_edits.clear();
     m_conflicted = false;
     refresh();

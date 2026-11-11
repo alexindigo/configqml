@@ -19,6 +19,7 @@ struct ConfigOverlayOptions {
         ConfigOverlayDifferencePolicy::TopLevelOmitEqual;
 };
 struct ConfigOverlayPresentation;
+struct ConfigApplyWitness;
 class ConfigOverlayEditor : public QObject {
     Q_OBJECT
 public:
@@ -68,6 +69,9 @@ private:
     QMap<ConfigPath, QVariant> m_baseValues;
     QMap<ConfigPath, quint64> m_editSequences;
     QMap<ConfigPath, std::optional<QVariant>> m_edits;
+    std::shared_ptr<ConfigApplyWitness> m_admitted;
+    QMap<ConfigPath, std::optional<QVariant>> m_admittedEdits;
+    QString m_admittedOperation;
     mutable QMap<ConfigPath, QVariant> m_presentations;
     bool m_conflicted = false, m_busy = false, m_pendingReset = false;
     bool m_liveDirty = false;

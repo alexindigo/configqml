@@ -27,7 +27,7 @@ mutations. Unselected leaves are undefined/nonwritable. Explicit equal assignmen
 are dirty intent. A native draft exposes `value`, `setValue`, `presentation`,
 `dirty`, `conflicted`, `busy`, `apply` and `discard`.
 
-Apply queues **one grouped input** and combines its admission and persistence
+Initial Apply queues **one grouped input** and combines its admission and persistence
 into **one result**. The object thread passes already-owned checked values, not a
 second full-tree capture. The worker checks the selected per-path content revisions
 and ingress generations, stages all edits in a candidate layer owner, and accepts
@@ -52,6 +52,20 @@ it does not change the draft baseline or drop edits. Correcting the edit can the
 apply again without discard. Foreign accepted intent (even equal values), changed
 content and newer local ingress still conflict. An accepted group with a failed
 IO/partial receipt does not get this rejection settlement or erase failure history.
+
+After admitted IO, partial or uncertain failure, Apply on the same draft is an
+explicit Retry. A private worker-owned admission witness keeps the checked edits,
+selected source facts and causal fences. Unchanged Retry creates no new input,
+intent or path generation; it publishes the existing admitted work. Changing a
+draft edit admits only that delta. Successful Retry clears dirty state and closes
+preview scopes normally; a repeated failure retains both edits and failure history.
+Store reads stay read-after-write throughout.
+
+The worker freshly checks selected sources, including raw facts below pending
+value masking. A real foreign selected-path change or another accepted writer
+(even equal intent) still conflicts; unrelated source errors do not block this
+selected check. Only confirmed own publication can advance recovery fences.
+There is no recapture from the display, automatic overwrite or duplicate intent.
 
 Worker-accepted per-path **intent revisions** are distinct from object-thread
 ingress generations. Every accepted writer (direct commands, draft groups and

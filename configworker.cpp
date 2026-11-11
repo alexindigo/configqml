@@ -455,6 +455,7 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
     }
     m_previous.generation = m_generation;
     m_previous.inputPrefix = m_prefix;
+    checkApplyCaptures();
     overlayNotify();
     packet.admitted = std::make_shared<const ConfigSnapshot>(m_previous);
     packet.sourceStates = m_sourceStates;
@@ -660,6 +661,10 @@ void ConfigWorker::process(const ConfigCommand &command) {
         retainedGroupCommand(command);
         return;
     }
+    if (command.operation == "apply" && command.applyAttempt) {
+        processGroup(command);
+        return;
+    }
     if (!command.input) {
         if (command.operation == "updateRecordListPolicy") {
             recordListCommand(command);
@@ -796,9 +801,13 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
         m_unresolvedSave =
             command.operation != "autosave" && !m_saveResult.unresolvedGroups.isEmpty();
     }
-    if (command.input && command.input->kind == ConfigInput::Kind::Group) {
+    if (command.applyAttempt ||
+        (command.input && command.input->kind == ConfigInput::Kind::Group)) {
         QSet<QString> masks;
-        for (auto it = command.input->edits.cbegin(); it != command.input->edits.cend(); ++it) {
+        const auto edits = command.applyAttempt
+                               ? m_applyCaptures.value(command.applyAttempt->ownerId).edits
+                               : command.input->edits;
+        for (auto it = edits.cbegin(); it != edits.cend(); ++it) {
             const auto mask = m_layers->info(it.key()).maskedBy;
             m_saveResult.masks[it.key()] = mask;
             if (!mask.isEmpty())
@@ -1109,6 +1118,8 @@ void ConfigWorker::finishSave() {
             scheduleAutoSave();
     }
     const bool closing = m_save.operation == "close";
+    if (m_save.applyAttempt && m_save.editorId.isEmpty() && m_saveResult.status != "failed")
+        m_applyCaptures.remove(m_save.applyAttempt->ownerId);
     if (!m_save.editorId.isEmpty()) {
         const auto command = m_save;
         auto receipt = m_saveResult;
@@ -1123,6 +1134,10 @@ void ConfigWorker::finishSave() {
             auto refresh = command;
             refresh.operation = "overlayRefresh";
             refresh.input.reset();
+            if (command.applyAttempt && command.applyAttempt->admitted) {
+                refresh.applyAttempt = std::make_shared<ConfigApplyAttempt>(*command.applyAttempt);
+                refresh.applyAttempt->expected = command.applyAttempt->admitted;
+            }
             overlayCommand(refresh);
         }
         drain();

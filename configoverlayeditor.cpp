@@ -4,6 +4,7 @@
 #include "configshutdown_p.h"
 #include "configstorehandle.h"
 #include "configconsumer_p.h"
+#include "configapply_p.h"
 #include <QMutexLocker>
 #include <QUuid>
 
@@ -235,10 +236,12 @@ void ConfigStore::receiveOverlay(const ConfigOverlayPresentation &p) {
 }
 quint64 ConfigStore::overlayRequest(ConfigOverlayEditor *editor, const QString &operation,
                                     QObject *context, Callback callback,
-                                    const QMap<ConfigPath, std::optional<QVariant>> &edits) {
+                                    const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                                    const std::shared_ptr<ConfigApplyAttempt> &attempt) {
     const auto id = registerRequest(context, std::move(callback));
     ConfigCommand command{id, m_sequence, operation, {}};
     command.editorId = editor->m_id;
+    command.applyAttempt = attempt;
     command.overlayEdits = operation == "overlayWrite" ? edits : editor->m_edits;
     if (!editor->writable() || editor->busy() || !editor->ready())
         command.conversionError = !editor->writable() ? "overlay-readonly"
@@ -249,8 +252,10 @@ quint64 ConfigStore::overlayRequest(ConfigOverlayEditor *editor, const QString &
     if (command.conversionError.isEmpty() &&
         ((editor->m_mode == ConfigOverlayMode::Live) != liveOperation))
         command.conversionError = "overlay-readonly";
+    const bool retry = attempt && attempt->expected && operation == editor->m_admittedOperation &&
+                       (operation == "overlayReset" || editor->m_edits == editor->m_admittedEdits);
     const bool changes =
-        command.conversionError.isEmpty() &&
+        !retry && command.conversionError.isEmpty() &&
         (operation == "overlayWrite" || operation == "overlayApply" || operation == "overlayReset");
     if (changes) {
         ConfigInput input;
@@ -293,15 +298,34 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
     if (!m_store)
         return 0;
     const bool active = m_mode == ConfigOverlayMode::Editor && writable() && !busy() && ready();
+    std::shared_ptr<ConfigApplyAttempt> attempt;
+    if (active && (operation == "overlayApply" || operation == "overlayReset")) {
+        attempt = std::make_shared<ConfigApplyAttempt>();
+        attempt->ownerId = "overlay:" + m_id;
+        attempt->publicationFence = true;
+        attempt->expected = m_admitted;
+    }
+    const auto edits = m_edits;
     QPointer<ConfigOverlayEditor> guard(this);
     QPointer<QObject> target(context ? context : this);
     const auto id = m_store->overlayRequest(
         this, operation, this,
-        [guard, target, active, callback = std::move(callback)](const ConfigResult &result) {
+        [guard, target, active, attempt, edits, operation,
+         callback = std::move(callback)](const ConfigResult &result) {
             if (!guard || guard->status() == Status::Closed)
                 return;
             if (active)
                 guard->m_busy = false;
+            if (attempt && attempt->admitted && result.status == "failed") {
+                guard->m_admitted = attempt->admitted;
+                guard->m_admittedEdits = edits;
+                guard->m_admittedOperation = operation;
+            } else if ((result.status != "failed" && result.refreshState == "current") ||
+                       result.status == "discarded") {
+                guard->m_admitted.reset();
+                guard->m_admittedEdits.clear();
+                guard->m_admittedOperation.clear();
+            }
             if (result.error.code == "overlay-conflict")
                 guard->m_conflicted = true;
             ConfigConsumerGuard boundary(guard);
@@ -319,7 +343,8 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
                         },
                         Qt::QueuedConnection);
             }
-        });
+        },
+        {}, attempt);
     if (active)
         m_busy = true;
     if (active && operation == "overlayReset")

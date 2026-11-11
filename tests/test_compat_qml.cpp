@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QSaveFile>
 #include <QElapsedTimer>
+#include <QScopeGuard>
 using namespace configqml;
 namespace {
 // A directory cannot be opened as an O_RDWR regular lock file, even with DAC override.
@@ -72,6 +73,10 @@ private slots:
         const bool overlay = QString(COMPAT_FIXTURE).endsWith("tst_overlay_editor.qml");
         const bool liveOverlay = QString(COMPAT_FIXTURE).endsWith("tst_live_overlay.qml");
         const bool draftPreview = QString(COMPAT_FIXTURE).endsWith("tst_draft_preview.qml");
+        const bool draftRetry = QString(COMPAT_FIXTURE).endsWith("tst_draft_retry.qml");
+        if (draftRetry)
+            compat::put(dir.filePath("user.json"),
+                        "{\"settings\":{\"label\":\"before\"},\"opaque\":{\"keep\":true}}");
         const bool valueCopy = QString(COMPAT_FIXTURE).endsWith("tst_value_copy.qml");
         if (valueCopy) {
             const QByteArray record =
@@ -125,6 +130,26 @@ private slots:
         if (retained)
             QVERIFY(obstruction.block()); // After Ready; startup remains a real successful load.
         QVERIFY(QMetaObject::invokeMethod(root.get(), "run"));
+        if (draftRetry) {
+            const auto restore = qScopeGuard([&] {
+                QFile::setPermissions(dir.path(),
+                                      QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+            });
+            QTRY_VERIFY(root->property("action").toString() == "block" ||
+                        !root->property("failure").toString().isEmpty());
+            QCOMPARE(root->property("failure").toString(), QString());
+            QVERIFY(QFile::setPermissions(dir.path(), QFile::ReadOwner | QFile::ExeOwner));
+            QVERIFY(QMetaObject::invokeMethod(root.get(), "faultReady"));
+            QTRY_VERIFY(root->property("action").toString() == "repair" ||
+                        !root->property("failure").toString().isEmpty());
+            QVERIFY(QFile::setPermissions(dir.path(),
+                                          QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+            QCOMPARE(root->property("failure").toString(), QString());
+            const auto before =
+                ConfigJsonCodec().decode(compat::bytes(dir.filePath("user.json")), "user").raw;
+            QCOMPARE(before.value("settings").toMap().value("label").toString(), QString("before"));
+            QVERIFY(QMetaObject::invokeMethod(root.get(), "retryReady"));
+        }
         if (draftPreview) {
             QTRY_VERIFY(root->property("action").toString() == "foreign" ||
                         !root->property("failure").toString().isEmpty());
@@ -229,7 +254,13 @@ private slots:
         QCOMPARE(root->property("failure").toString(), QString());
         QVERIFY(root->property("finished").toBool());
         if (strictEmpty || overlay || pattern || recordList || unknownData || pendingRebase ||
-            sharedParents || liveOverlay || draftPreview || valueCopy) {
+            sharedParents || liveOverlay || draftPreview || draftRetry || valueCopy) {
+            if (draftRetry) {
+                const auto raw =
+                    ConfigJsonCodec().decode(compat::bytes(dir.filePath("user.json")), "user").raw;
+                QCOMPARE(raw.value("settings").toMap().value("label").toString(), QString("after"));
+                QVERIFY(raw.value("opaque").toMap().value("keep").toBool());
+            }
             if (valueCopy) {
                 const auto raw =
                     ConfigJsonCodec().decode(compat::bytes(dir.filePath("user.json")), "user").raw;

@@ -15,6 +15,7 @@ class ConfigWorker;
 class ConfigListModel;
 class ConfigWorkerOwner;
 struct ConfigWorkerPacket;
+struct ConfigApplyAttempt;
 class ConfigStoreTestAccess;
 class ConfigDraft;
 class ConfigStoreHandle;
@@ -132,11 +133,13 @@ private:
     friend class ConfigOverlayEditor;
     quint64 overlayRequest(ConfigOverlayEditor *editor, const QString &operation, QObject *context,
                            Callback callback,
-                           const QMap<ConfigPath, std::optional<QVariant>> &edits = {});
+                           const QMap<ConfigPath, std::optional<QVariant>> &edits = {},
+                           const std::shared_ptr<ConfigApplyAttempt> &attempt = {});
     void receiveOverlay(const ConfigOverlayPresentation &presentation);
     quint64 applyGroup(const QMap<ConfigPath, std::optional<QVariant>> &edits,
                        const QMap<ConfigPath, ConfigPathState> &fences, QObject *context,
-                       Callback callback);
+                       Callback callback, const std::shared_ptr<ConfigApplyAttempt> &attempt = {},
+                       const QMap<ConfigPath, std::optional<QVariant>> &admittedEdits = {});
     quint64 profileRequest(const QString &operation, const QString &name, const QString &file,
                            const QList<ConfigPath> &paths, QObject *context, Callback callback);
     ConfigRequestHandle write(ConfigInput::Kind kind, const ConfigPath &path, const QVariant &value,

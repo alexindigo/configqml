@@ -23,7 +23,7 @@ add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp
     configconsumer_p.h configresult.h configstore.h configstore.cpp configworker_p.h configworker.cpp
     configshutdown_p.h configshutdown.cpp)
 target_sources(configqml_core PRIVATE configprojection_p.h configprojection.cpp
-    configprojection.h configsourceprojection_p.h configevidence_p.h configevidence.cpp configworkerevidence.cpp configsourceprovenance.cpp
+    configprojection.h configsourceprojection_p.h configevidence_p.h configevidence.cpp configworkerevidence.cpp configsourceprovenance.cpp configapply_p.h configapply.cpp
     configrecordlistpolicy.h configrecordlistpolicy.cpp configrecordlistcommands.cpp configretainedgroup.cpp
     configlistmodel.h configlistmodel.cpp configdraft.h configdraft.cpp configgroup.cpp
     configstorehandle.h configstorehandle.cpp configmigration.cpp configjsonbackup.cpp
@@ -172,7 +172,7 @@ if(BUILD_TESTING)
         add_executable(test_projection_bridge tests/test_projection_bridge.cpp)
         target_link_libraries(test_projection_bridge PRIVATE configqml::configqml Qt6::Test)
         add_test(NAME projection_bridge COMMAND test_projection_bridge)
-        foreach(suite projections fallback_layers startup_policy record_list_policy unknown_data source_events retained_groups strict_empty pending_rebase shared_parents overlay_editor live_overlay draft_preview value_copy string_pattern)
+        foreach(suite projections fallback_layers startup_policy record_list_policy unknown_data source_events retained_groups strict_empty pending_rebase shared_parents overlay_editor live_overlay draft_preview draft_retry value_copy string_pattern)
             add_executable(test_qml_${suite} tests/test_compat_qml.cpp)
             target_link_libraries(test_qml_${suite} PRIVATE configqml::configqml Qt6::Test Qt6::Quick)
             target_compile_definitions(test_qml_${suite} PRIVATE QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"

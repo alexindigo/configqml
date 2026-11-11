@@ -5,6 +5,7 @@
 
 namespace configqml {
 class ConfigStoreHandle;
+struct ConfigApplyWitness;
 // Detached editor. Its values are not an optimistic store layer.
 class ConfigDraft : public QObject {
     Q_OBJECT
@@ -50,6 +51,9 @@ private:
     QMap<ConfigPath, QVariant> m_base;
     QMap<ConfigPath, ConfigPathState> m_fences;
     QMap<ConfigPath, std::optional<QVariant>> m_edits;
+    QString m_applyId;
+    std::shared_ptr<ConfigApplyWitness> m_admitted;
+    QMap<ConfigPath, std::optional<QVariant>> m_admittedEdits;
     mutable QMap<ConfigPath, QVariant> m_presentations;
     mutable QMap<ConfigPath, QVariant> m_previewPresentations;
     bool m_conflicted = false;

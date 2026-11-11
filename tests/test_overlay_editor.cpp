@@ -132,6 +132,135 @@ bool pendingBackend(ConfigStore &store) {
 class OverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void admittedFrozenApplyRetry_data() {
+        QTest::addColumn<QString>("phase");
+        QTest::addColumn<bool>("reset");
+        for (const auto *phase : {"stage", "write", "rename", "readback"})
+            for (bool reset : {false, true})
+                QTest::newRow(qPrintable(QString("%1-reset-%2").arg(phase).arg(reset)))
+                    << QString::fromLatin1(phase) << reset;
+    }
+    void admittedFrozenApplyRetry() {
+        QFETCH(QString, phase);
+        QFETCH(bool, reset);
+        QTemporaryDir dir;
+        const auto file = dir.filePath("main.json");
+        compat::put(file, "{\"rows\":[{\"id\":\"x\",\"opaqueRow\":true,\"instanceSettings\":{"
+                          "\"volume\":2,\"opaque\":{\"keep\":true}}}],\"opaqueRoot\":true}");
+        auto o = mainOptions(file);
+        auto once = std::make_shared<std::atomic_bool>(true);
+        o.fileFault = [once, phase](const QString &step, const QString &) {
+            return step == phase && once->exchange(false) ? QString("apply-io-fault") : QString();
+        };
+        ConfigStore base(baseOptions()), main(o);
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        auto *editor = open(main, selection(main, base.scope({"settings"})));
+        if (!reset)
+            QVERIFY(editor->setValue({"volume"}, 9).accepted);
+        const auto first = compat::request(
+            main, [&] { return reset ? editor->resetOverrides() : editor->apply(); });
+        QCOMPARE(first.status, QString("failed"));
+        QVERIFY(editor->dirty());
+        const auto count = main.inputs().size();
+        const auto accepted = main.info({"rows"});
+        const auto retry = compat::request(
+            main, [&] { return reset ? editor->resetOverrides() : editor->apply(); });
+        QCOMPARE(retry.status, QString("saved"));
+        QCOMPARE(retry.refreshState, QString("current"));
+        QCOMPARE(main.inputs().size(), count);
+        QCOMPARE(main.info({"rows"}).intentRevision, accepted.intentRevision);
+        QCOMPARE(main.info({"rows"}).pathGeneration, accepted.pathGeneration);
+        QVERIFY(!editor->dirty() && !editor->conflicted());
+        const auto raw = ConfigJsonCodec().decode(compat::bytes(file), "main").raw;
+        QVERIFY(raw.value("opaqueRoot").toBool());
+        const auto row = raw.value("rows").toList().first().toMap();
+        QVERIFY(row.value("opaqueRow").toBool());
+        const auto overrides = row.value("instanceSettings").toMap();
+        if (reset)
+            QVERIFY(!row.contains("instanceSettings"));
+        else {
+            QCOMPARE(D::leaf(T::SafeInteger, 0).validate(overrides.value("volume")).value.toInt(),
+                     9);
+            QVERIFY(overrides.value("opaque").toMap().value("keep").toBool());
+        }
+        ConfigStore reopened(o);
+        QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);
+        QCOMPARE(open(reopened, selection(reopened, base.scope({"settings"})))
+                     ->value({"volume"})
+                     .toInt(),
+                 reset ? 1 : 9);
+    }
+    void frozenRetryCompetingChanges_data() {
+        QTest::addColumn<QString>("change");
+        for (const auto *change : {"foreign-owner", "local-owner-equal", "base-equal",
+                                   "new-editor-edit", "rejected-new-edit", "discard-then-edit"})
+            QTest::newRow(change) << QString::fromLatin1(change);
+    }
+    void frozenRetryCompetingChanges() {
+        QFETCH(QString, change);
+        QTemporaryDir dir;
+        const auto file = dir.filePath("main.json");
+        compat::put(
+            file,
+            "{\"rows\":[{\"id\":\"x\",\"instanceSettings\":{\"volume\":2,\"opaque\":true}}]}");
+        auto o = mainOptions(file);
+        auto deny = std::make_shared<std::atomic_bool>(change == "rejected-new-edit");
+        o.admission = [deny](const ConfigInput &input) {
+            const auto rows = input.value.toList();
+            const auto settings = rows.isEmpty()
+                                      ? QVariantMap{}
+                                      : rows.first().toMap().value("instanceSettings").toMap();
+            return *deny && settings.value("volume").toInt() == 10 ? QString("policy") : QString();
+        };
+        auto once = std::make_shared<std::atomic_bool>(true);
+        o.fileFault = [once](const QString &phase, const QString &) {
+            return phase == "write" && once->exchange(false) ? QString("once") : QString();
+        };
+        ConfigStore base(baseOptions()), main(o);
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        auto *editor = open(main, selection(main, base.scope({"settings"})));
+        QVERIFY(editor->setValue({"volume"}, 9).accepted);
+        QCOMPARE(compat::request(main, [&] { return editor->apply(); }).error.code,
+                 QString("once"));
+        const auto before = main.info({"rows"}).intentRevision;
+        if (change == "foreign-owner")
+            compat::put(
+                file,
+                "{\"rows\":[{\"id\":\"x\",\"instanceSettings\":{\"volume\":4,\"opaque\":true}}]}");
+        else if (change == "local-owner-equal")
+            compat::request(main,
+                            [&] { return main.setUser({"rows"}, main.value({"rows"})).requestId; });
+        else if (change == "base-equal")
+            compat::request(base,
+                            [&] { return base.setUser({"settings", "volume"}, 1).requestId; });
+        else if (change == "discard-then-edit") {
+            QCOMPARE(compat::request(main, [&] { return editor->discard(); }).status,
+                     QString("discarded"));
+            QVERIFY(!editor->dirty());
+            QVERIFY(editor->setValue({"volume"}, 10).accepted);
+        } else
+            QVERIFY(editor->setValue({"volume"}, 10).accepted);
+        if (change == "rejected-new-edit") {
+            QCOMPARE(compat::request(main, [&] { return editor->apply(); }).error.code,
+                     QString("policy"));
+            QVERIFY(editor->dirty() && !editor->conflicted());
+            *deny = false;
+        }
+        const auto retry = compat::request(main, [&] { return editor->apply(); });
+        if (change == "new-editor-edit" || change == "rejected-new-edit" ||
+            change == "discard-then-edit") {
+            QCOMPARE(retry.status, QString("saved"));
+            QCOMPARE(retry.refreshState, QString("current"));
+            QCOMPARE(main.info({"rows"}).intentRevision, before + 1);
+            QVERIFY(!editor->dirty() && !editor->conflicted());
+            QCOMPARE(editor->value({"volume"}).toInt(), 10);
+        } else {
+            QCOMPARE(retry.error.code, QString("overlay-conflict"));
+            QVERIFY(editor->dirty() && editor->conflicted());
+        }
+    }
     void placementTokensTrackObservableRawMapping() {
         ConfigStore base(baseOptions()), main(mainOptions());
         QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);

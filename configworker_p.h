@@ -7,6 +7,7 @@
 #include "configoverlay_p.h"
 #include "configdraft_p.h"
 #include "configevidence_p.h"
+#include "configapply_p.h"
 #include <QQueue>
 #include <QTimer>
 #include <QFileSystemWatcher>
@@ -67,6 +68,7 @@ struct ConfigCommand {
     QString editorId;
     QMap<ConfigPath, std::optional<QVariant>> overlayEdits;
     std::shared_ptr<const ConfigDraftPreview> preview;
+    std::shared_ptr<ConfigApplyAttempt> applyAttempt;
 };
 struct ConfigPendingIntent {
     quint64 id = 0, input = 0;
@@ -117,7 +119,7 @@ public:
     void overlayLease(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
     void overlayRelease(const QString &token);
     void overlayContinue(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
-    void overlayChanged(const QString &editorId);
+    void overlayChanged(const QString &editorId, bool ownerChange = false);
     void overlayDetach(const QString &editorId);
     void overlayScopeClosed(const std::shared_ptr<std::atomic_bool> &lifetime);
     void draftPreview(const std::shared_ptr<const ConfigDraftPreview> &preview);
@@ -132,6 +134,14 @@ signals:
 
 private:
     friend class ConfigStoreTestAccess;
+    QMap<QString, ConfigApplyCapture> m_applyCaptures;
+    QVariantList applySourceFacts(const ConfigPath &path) const;
+    void checkApplyCaptures();
+    void prepareApplyConfirmation(const QString &source);
+    ConfigApplyCapture *applyCapture(const ConfigCommand &command);
+    void rememberApply(const ConfigCommand &command, const QList<ConfigPath> &paths,
+                       const QMap<ConfigPath, std::optional<QVariant>> &edits);
+    void reconcileApplyRejection(const ConfigCommand &command);
     struct OwnPublication {
         ConfigSourcePreimage output, predecessor;
         ConfigCommand origin;

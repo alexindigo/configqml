@@ -172,6 +172,15 @@ the normal route/mask/coverage/evidence fields, `editorId`, and `refreshState`:
 | 2 | `stale` | Publication still has its truthful save status, but later owner/base ingress prevents refresh. Preview remains dirty/conflicted and must not be silently closed or discarded. |
 | 3 | `not_refreshed` | Failed admission/publication; preview and failure evidence remain. |
 
+After admitted publication failure, the same frozen editor can Apply or repeat
+resetOverrides to retry unchanged work without a new owning-leaf input or intent.
+It shares the draft's worker-owned admission recovery boundary. Confirmed own
+publication may advance owner fences; selected foreign/other-writer changes,
+placement/identity changes and frozen base changes still conflict. Pending values
+cannot hide a foreign raw owner edit. New editor edits are a new checked atomic
+owning-leaf choice, not a duplicate admission of an unchanged Retry. Success still
+requires conditional refresh; failed/stale outcomes retain preview and history.
+
 `discard` asynchronously recaptures current base/placement, returning
 `discarded | failed`; only success drops the preview/conflict. The application
 obtains user confirmation before discarding work. `detach` closes delivery and

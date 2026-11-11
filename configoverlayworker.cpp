@@ -374,6 +374,10 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
     const bool liveWrite = t->operation == "overlayWrite";
     const bool refresh = t->operation == "overlayRefresh";
     const bool discard = t->operation == "overlayDiscard";
+    const bool retry = command.applyAttempt && command.applyAttempt->expected;
+    const auto recovery = retry ? applyCapture(command) : nullptr;
+    if (retry && !recovery)
+        t->error = "overlay-conflict";
     if (t->original && !discard && t->selection.mode == ConfigOverlayMode::Editor &&
         (t->error.isEmpty() || t->error == "overlay-selection" || t->error == "overlay-identity")) {
         const auto &old = *t->original;
@@ -382,9 +386,11 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
                 old.baseIngress.value(it.key()) != t->selection.base->revision(it.key()))
                 t->error = "overlay-conflict";
         // The apply command itself is one new owner ingress, not an external edit.
-        const auto expected = old.ownerIngress + (apply ? 1 : 0);
+        const auto expected = old.ownerIngress + (apply && command.input ? 1 : 0);
+        const auto ownerFence =
+            recovery ? recovery->fences.value(old.selection.ownerPath) : old.ownerFence;
         if (t->selection.owner->revision(old.selection.ownerPath) != expected ||
-            (!refresh && !sameFence(old.ownerFence, t->captured.ownerFence)))
+            (!refresh && !sameFence(ownerFence, t->captured.ownerFence)))
             t->error = "overlay-conflict";
     }
     if (t->original && t->selection.mode != ConfigOverlayMode::Editor &&
@@ -403,6 +409,7 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         } else {
             p.refreshed = true;
             m_overlayCaptures[t->editorId] = t->captured;
+            m_applyCaptures.remove("overlay:" + t->editorId);
         }
         m_overlayPackets.append(p);
         release(t);
@@ -426,6 +433,8 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         return;
     }
     if (!apply && !liveWrite) {
+        if (discard)
+            m_applyCaptures.remove("overlay:" + t->editorId);
         p.refreshed = true;
         m_overlayCaptures[t->editorId] = t->captured;
         m_overlayPackets.append(p);
@@ -455,6 +464,14 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         });
         release(t);
         post(publish(command.requestId ? std::optional<ConfigResult>(result) : std::nullopt));
+        return;
+    }
+    if (retry && !command.input) {
+        command.applyAttempt->admitted = command.applyAttempt->expected;
+        release(t);
+        m_overlayCommands.remove(t->token);
+        m_overlayTransactions.remove(t->token);
+        beginSave(command);
         return;
     }
     const auto &source = liveWrite ? t->captured : *t->original;
@@ -506,6 +523,14 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
     if (!error.isEmpty()) {
         result.status = "failed";
         result.error = {error, {}, command.operation};
+        result.rejectedPathGenerations = input.pathGenerations;
+        reconcileApplyRejection(command);
+        if (retry && command.applyAttempt->expected->valid) {
+            auto &capture = m_overlayCaptures[t->editorId];
+            const auto ingress = m_endpoint->revision(t->selection.ownerPath);
+            if (ingress == capture.ownerIngress + 1)
+                capture.ownerIngress = ingress;
+        }
         if (liveWrite) {
             p.refreshed = true;
             p.coveredSequence = input.sequence;
@@ -540,6 +565,7 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
     post(publish());
     t->captured.ownerFence = m_previous.information.value(t->selection.ownerPath);
     m_overlayCaptures[t->editorId] = t->captured;
+    rememberApply(command, {t->selection.ownerPath}, input.edits);
     m_overlayCommands.remove(t->token);
     m_overlayTransactions.remove(t->token);
     beginSave(command);
@@ -597,11 +623,13 @@ void ConfigWorker::overlayNotify() {
             it->revisions[path] = revision;
         }
         if (changed)
-            endpoint->send([id = it->editorId](ConfigWorker &w) { w.overlayChanged(id); });
+            endpoint->send([id = it->editorId, own = endpoint == m_endpoint](ConfigWorker &w) {
+                w.overlayChanged(id, own);
+            });
         ++it;
     }
 }
-void ConfigWorker::overlayChanged(const QString &id) {
+void ConfigWorker::overlayChanged(const QString &id, bool ownerChange) {
     if (!m_overlayCaptures.contains(id))
         return;
     const auto capture = m_overlayCaptures.value(id);
@@ -611,6 +639,12 @@ void ConfigWorker::overlayChanged(const QString &id) {
         command.editorId = id;
         enqueue(command);
     } else {
+        const auto recovery = m_applyCaptures.constFind("overlay:" + id);
+        if (ownerChange && recovery != m_applyCaptures.cend()) {
+            const auto witness = recovery->witness.lock();
+            if (witness && witness->valid)
+                return;
+        }
         ConfigOverlayPresentation p;
         p.editorId = id;
         p.conflicted = true;
@@ -648,6 +682,7 @@ QString ConfigWorker::overlayPlacementToken(const QString &id, const ConfigOverl
     return id + ':' + QString::number(previous.revision);
 }
 void ConfigWorker::overlayDetach(const QString &id) {
+    m_applyCaptures.remove("overlay:" + id);
     m_overlayPlacements.remove(id);
     auto capture = m_overlayCaptures.take(id);
     m_overlaySubscriptions.remove(id + ":owner");
