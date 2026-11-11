@@ -322,6 +322,41 @@ bool ConfigWorker::inheritFailures(ConfigResult &result) const {
     }
     return found;
 }
+// Own JSON serialization may replace native numeric storage with its exact atom.
+// Compare that representation change without rounding/decoding numeric lexemes.
+static bool sameConfirmedContent(const QVariant &a, const QVariant &b) {
+    if (a == b)
+        return true;
+    if (a.metaType().id() == QMetaType::QVariantList &&
+        b.metaType().id() == QMetaType::QVariantList) {
+        const auto left = a.toList(), right = b.toList();
+        if (left.size() != right.size())
+            return false;
+        for (qsizetype i = 0; i < left.size(); ++i)
+            if (!sameConfirmedContent(left[i], right[i]))
+                return false;
+        return true;
+    }
+    if (a.metaType().id() == QMetaType::QVariantMap &&
+        b.metaType().id() == QMetaType::QVariantMap) {
+        const auto left = a.toMap(), right = b.toMap();
+        if (left.keys() != right.keys())
+            return false;
+        for (auto it = left.cbegin(); it != left.cend(); ++it)
+            if (!sameConfirmedContent(it.value(), right.value(it.key())))
+                return false;
+        return true;
+    }
+    const auto numeric = [](const QVariant &v) {
+        const auto id = v.metaType().id();
+        return v.metaType() == QMetaType::fromType<ConfigNumber>() || id == QMetaType::LongLong ||
+               id == QMetaType::ULongLong || id == QMetaType::Double;
+    };
+    if (!numeric(a) || !numeric(b))
+        return false;
+    const auto left = encodeJsonValue(a), right = encodeJsonValue(b);
+    return left.ok() && right.ok() && left.bytes == right.bytes;
+}
 ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &result, bool initial) {
     ConfigWorkerPacket packet;
     auto &groups = packet.retainedGroups.emplace();
@@ -402,6 +437,11 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
         state.workerCovered = qMax(m_prefix, m_pathInputs.value(path));
         state.latestInput = m_pathInputs.value(path);
         state.intentRevision = m_pathIntents.value(path);
+        const auto before = m_previous.information.value(path);
+        const auto confirmation = m_ownConfirmations.constFind(path);
+        const bool ownConfirmation = confirmation != m_ownConfirmations.cend() &&
+                                     confirmation->first == before.provenance.contributions &&
+                                     confirmation->second == state.provenance.contributions;
         QVariantList content{next, QString::number(state.intentRevision)};
         for (const auto &policy : m_listPolicies)
             if (policy.path == path)
@@ -414,20 +454,27 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
             content.append(
                 QVariantMap{{"present", bool(raw)}, {"value", raw.value_or(QVariant())}});
         }
-        if (!m_content.contains(path) || m_content.value(path) != content) {
+        const bool sameContent =
+            m_content.contains(path) &&
+            (m_content.value(path) == content ||
+             (ownConfirmation && sameConfirmedContent(m_content.value(path), content)));
+        if (!sameContent)
             ++m_contentRevisions[path];
-            m_content[path] = content;
-        }
+        m_content[path] = content;
         state.contentRevision = m_contentRevisions.value(path);
         state.pathGeneration = m_pathGenerations.value(path);
         state.publicationGeneration = packet.snapshot.generation;
-        const auto before = m_previous.information.value(path);
-        if (initial || next != m_previous.values.value(path) ||
-            state.pathGeneration != before.pathGeneration ||
+        const bool selectionChanged =
+            initial || !sameContent || state.pathGeneration != before.pathGeneration ||
             state.provenance.layerId != before.provenance.layerId ||
+            state.provenance.sourceId != before.provenance.sourceId ||
             state.provenance.maskedBy != before.provenance.maskedBy ||
-            state.provenance.contributions != before.provenance.contributions ||
-            state.contentRevision != before.contentRevision) {
+            (!ownConfirmation && state.provenance.contributions != before.provenance.contributions);
+        if (!selectionChanged)
+            state.publicationGeneration = before.publicationGeneration;
+        // Metadata still advances in packet order, not in command-fence order.
+        if (selectionChanged || next != m_previous.values.value(path) ||
+            state.provenance.contributions != before.provenance.contributions) {
             packet.snapshot.values[path] = next;
             packet.snapshot.information[path] = state;
             const auto descriptor = *m_options.schema.descriptor(path);
@@ -448,11 +495,11 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
                 versions[packet.snapshot.generation] = rows;
                 packet.planningNanos += planningTimer.nsecsElapsed();
             }
-        } else
-            state.publicationGeneration = before.publicationGeneration;
+        }
         m_previous.values[path] = next;
         m_previous.information[path] = state;
     }
+    m_ownConfirmations.clear();
     m_previous.generation = m_generation;
     m_previous.inputPrefix = m_prefix;
     checkApplyCaptures();

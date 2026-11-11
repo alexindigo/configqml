@@ -57,6 +57,13 @@ private slots:
         QTest::addColumn<int>("crossSchedule");
         QTest::addColumn<QString>("numberLeg");
         QTest::addColumn<QString>("numberMode");
+        if (QString(COMPAT_FIXTURE).endsWith("tst_list_own_save.qml")) {
+            // This fixture uses the shared integer case selector, not a watch schedule.
+            QTest::newRow("no-save") << 0 << QString() << QString();
+            QTest::newRow("saved-original") << 1 << QString() << QString();
+            QTest::newRow("saved-fresh-control") << 2 << QString() << QString();
+            return;
+        }
         if (QString(COMPAT_FIXTURE).endsWith("tst_overlay_number.qml")) {
             for (const auto *leg : {"integer", "fraction", "json", "absent", "string"})
                 for (const auto *mode : {"live", "editor", "view"})
@@ -86,6 +93,11 @@ private slots:
         const bool draftPreview = QString(COMPAT_FIXTURE).endsWith("tst_draft_preview.qml");
         const bool draftRetry = QString(COMPAT_FIXTURE).endsWith("tst_draft_retry.qml");
         const bool overlayNumber = QString(COMPAT_FIXTURE).endsWith("tst_overlay_number.qml");
+        const bool listOwnSave = QString(COMPAT_FIXTURE).endsWith("tst_list_own_save.qml");
+        if (listOwnSave)
+            compat::put(
+                dir.filePath("user.json"),
+                "{\"rows\":[{\"id\":\"x\",\"label\":\"original\"}],\"wide\":18446744073709551615}");
         const QByteArray numberBytes =
             "{\"rows\":[{\"id\":\"selected\",\"instanceSettings\":{\"threshold\":17,\"hide\":false}"
             ",\"opaque\":{\"keep\":true}}]}";
@@ -139,6 +151,8 @@ private slots:
         engine.addImportPath(QML_IMPORT_ROOT);
         QQmlComponent component(&engine, QUrl::fromLocalFile(COMPAT_FIXTURE));
         QVariantMap initial{{"directory", dir.path()}};
+        if (listOwnSave)
+            initial["scenario"] = crossSchedule;
         if (overlayNumber) {
             initial["leg"] = numberLeg;
             initial["mode"] = numberMode;
@@ -277,6 +291,13 @@ private slots:
                                   qPrintable(root->property("stage").toString()), 10000);
         QCOMPARE(root->property("failure").toString(), QString());
         QVERIFY(root->property("finished").toBool());
+        if (listOwnSave) {
+            const auto raw =
+                ConfigJsonCodec().decode(compat::bytes(dir.filePath("user.json")), "user").raw;
+            QVERIFY(raw.value("rows").toList().isEmpty());
+            QCOMPARE(raw.value("wide").value<ConfigNumber>().token(),
+                     QString("18446744073709551615"));
+        }
         if (overlayNumber) {
             QCOMPARE(compat::bytes(dir.filePath("base.json")), QByteArray("{}"));
             QCOMPARE(compat::bytes(dir.filePath("owner.json")),

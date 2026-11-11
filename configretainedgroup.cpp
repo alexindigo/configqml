@@ -306,6 +306,10 @@ void ConfigWorker::recordPersistent(const ConfigInput &input, const ConfigLayers
 void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
                              const ConfigBackendResult &outcome) {
     prepareApplyConfirmation(id);
+    const auto route = m_routes.value(id);
+    QMap<ConfigPath, QList<ConfigContribution>> before;
+    for (const auto &path : m_options.schema.leaves())
+        before[path] = m_layers->info(path).contributions;
     const auto saved = m_saveIntents.value(id);
     QSet<quint64> ids;
     for (const auto &intent : saved)
@@ -340,7 +344,6 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
             capture.intents[id].subtract(ids);
         }
     advanceOwnPublications(id, outcome, ids);
-    const auto route = m_routes.value(id);
     auto disk = *m_layers->source(route.layerId, id);
     disk.raw = raw;
     disk.bytes = outcome.bytes;
@@ -354,6 +357,14 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
     disk.localIntent = !remaining.isEmpty();
     disk.exists |= disk.localIntent;
     m_layers->replaceSource(route.layerId, disk);
+    for (auto it = before.cbegin(); it != before.cend(); ++it) {
+        const auto after = m_layers->info(it.key()).contributions;
+        auto prior = m_ownConfirmations.find(it.key());
+        if (prior != m_ownConfirmations.end() && prior->second == it.value())
+            prior->second = after;
+        else
+            m_ownConfirmations[it.key()] = {it.value(), after};
+    }
     refreshDirty(id);
     m_acceptOrigin = "own_save";
     m_acceptCause = "save";

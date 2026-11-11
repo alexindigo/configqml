@@ -392,8 +392,9 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
             if (it->workerCovered < state.latestInput ||
                 it->pathGeneration != state.pathGeneration ||
                 it->workerCovered < state.workerCovered ||
-                it->publicationGeneration <= state.publicationGeneration)
+                packet.snapshot.generation <= m_cachePublications.value(it.key()))
                 continue;
+            m_cachePublications[it.key()] = packet.snapshot.generation;
             const auto next = packet.snapshot.values.value(it.key());
             if (m_cache.values.value(it.key()) != next) {
                 changed.append(it.key());

@@ -24,6 +24,17 @@ newer pending local write; settlement of that latest write restores the last
 authoritative value. Failed intent/evidence is retained separately from getters.
 Topology, input, path-generation and publication-generation fences stay active.
 
+Per-path `publicationGeneration` fences selection freshness, not delivery of
+provenance metadata. Confirmed own save/readback keeps that fence when displayed
+and raw content, intent/ingress and list metadata/mapping are unchanged. Exact
+before/after contribution transitions establish own confirmation; a receipt alone
+does not. Native numeric storage becoming its identical JSON token is not new
+content, without rounding or rewriting exact atoms. Confirmation still delivers
+fresh provenance in independently ordered snapshot packets; delayed equal-fence
+metadata cannot roll it back. Foreign observations, other-writer intent, hidden
+raw changes, remapping and metadata updates retain their stale-selection fences,
+including foreign preflight before an otherwise successful own save.
+
 Grouped publications install all eligible caches before notification. One shared
 `ConfigConsumerGuard` governs synchronous consumer emissions/callbacks: it holds
 QPointer lifetime checks on the stack and callers stop continuation if an emitter

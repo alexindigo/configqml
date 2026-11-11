@@ -305,6 +305,9 @@ private:
     QMap<ConfigPath, quint64> m_pathIntents;
     QMap<ConfigPath, QVariantList> m_content;
     QMap<ConfigPath, quint64> m_contentRevisions;
+    // Exact provenance transitions from confirmed own IO, consumed by publish().
+    QMap<ConfigPath, QPair<QList<ConfigContribution>, QList<ConfigContribution>>>
+        m_ownConfirmations;
     ConfigSnapshot m_previous;
     QMap<ConfigPath, QMap<quint64, QList<ConfigModelRow>>> m_modelVersions;
     QMap<QString, ConfigRoute> m_routes;

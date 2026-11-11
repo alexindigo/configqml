@@ -171,6 +171,7 @@ private:
     QString m_userLayerId;
     QString m_storeId;
     ConfigSnapshot m_cache;
+    QMap<ConfigPath, quint64> m_cachePublications; // Metadata delivery order, not edit freshness.
     QList<ConfigSourceState> m_sourceStates;
     QMap<QString, ConfigPath> m_policyPaths;
     QMap<QString, ConfigGroupInfo> m_groups;

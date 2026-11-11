@@ -91,6 +91,11 @@ but ordinary `.__proto__` lookup accesses the wrapper's JavaScript prototype.
 | 2 | `mode: "editor"` | Frozen base and unnormalized owning-leaf capture. Equal intent, ABA, raw invalid/masked input, inode/provenance change, reorder or list-policy remapping invalidates its fences. Dirty preview is retained on conflict. |
 | 3 | `mode: "live"` | Writable live namespace. Declared-leaf assignments and `unset` queue through owning-leaf admission without `overlay-busy`. Base/owner changes refresh like view mode. Missing/replaced placement gives Error/`overlay-identity`; scope/owner closure gives Error/`overlay-owner`. An errored live handle cannot retarget or resume. |
 
+Confirmed own save/readback alone does not invalidate an unchanged captured
+owner generation or frozen owner/base selection. Provenance still updates; real
+foreign/other-writer content, raw/mapping and metadata changes keep their fences.
+An own save cannot make a previously stale open or Apply selection current.
+
 ### Runtime live writers (0.5.0)
 
 Open with the same ten options, choosing `mode: "live"`. The existing namespace

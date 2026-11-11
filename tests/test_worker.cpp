@@ -45,6 +45,41 @@ static const ConfigPath number{"bar", "n"};
 class WorkerTest : public QObject {
     Q_OBJECT
 private slots:
+    void ownConfirmationMetadataRemainsOrdered() {
+        auto o = options();
+        o.autoSave = false;
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QSignalSpy completed(&store, &ConfigStore::completed);
+        QVERIFY(store.setUser(widgets, QVariantList{3, 1, 2, 4}).accepted);
+        QTRY_COMPARE(completed.size(), 1);
+        auto *model = store.listModel(widgets);
+        QCOMPARE(model->rowCount(), 4);
+        const auto captured = store.snapshot();
+        const auto pending = store.info(widgets);
+        const auto contribution = [](const ConfigPathState &state) {
+            for (const auto &item : state.provenance.contributions)
+                if (item.sourceId == "memory")
+                    return item;
+            return ConfigContribution{};
+        };
+        QVERIFY(contribution(pending).localIntentRevision > 0);
+        store.save();
+        QTRY_COMPARE(completed.size(), 2);
+        QCOMPARE(completed.last().first().value<ConfigResult>().status, QString("saved"));
+        const auto confirmed = store.info(widgets);
+        QCOMPARE(confirmed.publicationGeneration, pending.publicationGeneration);
+        QCOMPARE(confirmed.contentRevision, pending.contentRevision);
+        QCOMPARE(contribution(confirmed).localIntentRevision, quint64(0));
+        QVERIFY(contribution(confirmed).revision != contribution(pending).revision);
+        ConfigWorkerPacket older;
+        older.snapshot = captured;
+        Probe::inject(store, older); // Delayed metadata with the same command fence.
+        QCOMPARE(store.info(widgets).provenance.contributions, confirmed.provenance.contributions);
+        QCOMPARE(store.info(widgets).publicationGeneration, pending.publicationGeneration);
+        QCOMPARE(model->rowCount(), 4);
+        QCOMPARE(store.value(widgets), captured.values.value(widgets));
+    }
     void readYourWritesAndStaleReplies() {
         ConfigStore store(options());
         QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);

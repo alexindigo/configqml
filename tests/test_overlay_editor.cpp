@@ -132,6 +132,93 @@ bool pendingBackend(ConfigStore &store) {
 class OverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void generationContinuationAcrossOwnSave_data() {
+        QTest::addColumn<QString>("operation");
+        QTest::addColumn<QString>("change");
+        for (const auto *operation : {"open", "apply"})
+            for (const auto *change : {"none", "owner-foreign", "owner-equal-foreign",
+                                       "owner-local", "metadata", "base-foreign"}) {
+                if (QString(operation) == "open" && QString(change) == "base-foreign")
+                    continue; // Open captures its current base, not a prior base fence.
+                QTest::newRow(qPrintable(QString("%1-%2").arg(operation, change)))
+                    << QString::fromLatin1(operation) << QString::fromLatin1(change);
+            }
+    }
+    void generationContinuationAcrossOwnSave() {
+        QFETCH(QString, operation);
+        QFETCH(QString, change);
+        QTemporaryDir dir;
+        const auto mainFile = dir.filePath("main.json"), baseFile = dir.filePath("base.json");
+        compat::put(mainFile, "{\"rows\":[{\"id\":\"x\",\"instanceSettings\":{\"volume\":2}}],"
+                              "\"wide\":18446744073709551615}");
+        compat::put(baseFile, "{\"volume\":1}");
+        auto o = mainOptions(mainFile);
+        o.recordListPolicies = {{"rows", {"rows"}, {}, "id"}};
+        ConfigStore base(baseOptions(baseFile)), main(o);
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        QCOMPARE(compat::request(
+                     main, [&] { return main.setUser({"rows"}, main.value({"rows"})).requestId; })
+                     .status,
+                 QString("accepted"));
+        QCOMPARE(
+            compat::request(base, [&] { return base.setUser({"settings", "volume"}, 1).requestId; })
+                .status,
+            QString("accepted"));
+        const auto selected = selection(main, base.scope({"settings"}));
+        auto *editor = operation == "apply" ? open(main, selected) : nullptr;
+        if (editor)
+            QVERIFY(editor->setValue({"volume"}, 7).accepted);
+        QCOMPARE(compat::request(main, [&] { return main.save(); }).status, QString("saved"));
+        QCOMPARE(compat::request(base, [&] { return base.save(); }).status, QString("saved"));
+        QCOMPARE(main.info({"rows"}).publicationGeneration, selected.ownerGeneration);
+        if (change == "owner-foreign" || change == "owner-equal-foreign") {
+            compat::put(mainFile,
+                        change == "owner-equal-foreign"
+                            ? compat::bytes(mainFile)
+                            : QByteArray("{\"rows\":[{\"id\":\"x\",\"instanceSettings\":{"
+                                         "\"volume\":4}}],\"wide\":18446744073709551615}"));
+            QCOMPARE(compat::request(main, [&] { return main.reload(); }).status,
+                     QString("reloaded"));
+        } else if (change == "owner-local")
+            compat::request(main,
+                            [&] { return main.setUser({"rows"}, main.value({"rows"})).requestId; });
+        else if (change == "metadata")
+            QCOMPARE(compat::request(main, [&] { return main.updateRecordListPolicy("rows", {}); })
+                         .status,
+                     QString("projected"));
+        else if (change == "base-foreign")
+            compat::put(baseFile, "{\"volume\":3}"); // Apply's preflight must discover it.
+        const auto result = compat::request(
+            main, [&] { return editor ? editor->apply() : main.openOverlay(selected); });
+        if (change != "none") {
+            QCOMPARE(result.error.code, QString("overlay-conflict"));
+            if (editor)
+                QVERIFY(editor->dirty() && editor->conflicted());
+        } else {
+            QCOMPARE(result.status, editor ? QString("saved") : QString("opened"));
+            if (editor) {
+                QCOMPARE(result.refreshState, QString("current"));
+                QCOMPARE(editor->value({"volume"}).toInt(), 7);
+                const auto rows = ConfigJsonCodec()
+                                      .decode(compat::bytes(mainFile), "main")
+                                      .raw.value("rows")
+                                      .toList();
+                QCOMPARE(
+                    D::leaf(T::SafeInteger, 0)
+                        .validate(
+                            rows.first().toMap().value("instanceSettings").toMap().value("volume"))
+                        .value.toInt(),
+                    7);
+            }
+        }
+        QCOMPARE(ConfigJsonCodec()
+                     .decode(compat::bytes(mainFile), "main")
+                     .raw.value("wide")
+                     .value<ConfigNumber>()
+                     .token(),
+                 QString("18446744073709551615"));
+    }
     void nativeNumericDestinationLifecycle_data() {
         QTest::addColumn<int>("mode");
         for (int mode = 0; mode < 3; ++mode)

@@ -112,6 +112,12 @@ value is explicit user choice, not an inferred diff of a detached display copy.
 Property/model generations install coherently before completion. Unrelated path
 publications do not invalidate a displayed leaf's address generation.
 
+An unchanged list keeps its displayed generation across its own successful save
+confirmation/readback, including cross-shard saves. Captured remove/edit, transfer,
+ensure/copy/at endpoints remain usable without copying a fresh generation. A
+foreign or other-writer change, hidden raw change, mapping or metadata change
+still invalidates them; own save does not refresh an already-stale endpoint.
+
 ### Raw-preserving transfer (0.3.0)
 
 The same `editRecordList` command accepts a transfer operation:
