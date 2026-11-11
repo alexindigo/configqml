@@ -55,6 +55,7 @@ struct ConfigCommand {
     std::optional<ConfigRetainedGroupOptions> retainedGroup;
     bool retainedLookup = false;
     QString groupToken, groupState;
+    QString evidenceAttemptId; // Immutable provenance snapshot for a prior publication.
     // Object-thread snapshot, including earlier pending lifecycle claims.
     QMap<QString, quint64> groupGenerations;
     std::shared_ptr<ConfigOverlayTransaction> overlay;
@@ -80,8 +81,6 @@ struct ConfigRetainedCapture {
     QMap<QString, QSet<quint64>> intents;
     QMap<QString, QVariantMap> bases;
     QMap<QString, ConfigRevision> revisions;
-    QMap<QString, ConfigRevision> uncertain;
-    QMap<QString, QByteArray> uncertainBytes;
     QMap<QString, QVariantMap> originalBases;
     QMap<QString, ConfigRevision> originalRevisions;
     QMap<QString, QByteArray> bytes, originalBytes;
@@ -128,6 +127,23 @@ signals:
 
 private:
     friend class ConfigStoreTestAccess;
+    struct OwnPublication {
+        ConfigSourcePreimage output, predecessor;
+        ConfigCommand origin;
+        QSet<quint64> intents;
+    };
+    QMap<QString, QMap<QString, OwnPublication>> m_ownPublications;
+    QMap<QString, ConfigSourcePreimage> m_recoveryPreimages;
+    ConfigCommand publicationOrigin() const;
+    void rememberOwnPublication(const QString &source, const ConfigBackendResult &outcome,
+                                const QByteArray &bytes, const ConfigSourcePreimage &predecessor);
+    std::optional<OwnPublication> ownPublication(const QString &source,
+                                                 const ConfigBackendResult &read) const;
+    bool samePublicationBase(const QString &source, const ConfigSourcePreimage &a,
+                             const ConfigSourcePreimage &b) const;
+    bool savePredecessor(const QString &source, const ConfigSourcePreimage &preimage) const;
+    void advanceOwnPublications(const QString &source, const ConfigBackendResult &outcome,
+                                const QSet<quint64> &confirmedIntents);
     static constexpr qsizetype EvidenceBacklogLimit = 64;
     static constexpr qsizetype EvidencePublicationReserve = 8;
     struct PendingEvidence {

@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "compatfixture.h"
+#include "confignumber.h"
 #include "storeprobe.h"
 #include <QTemporaryDir>
 #include <QSaveFile>
 #include <QSignalSpy>
 #include <atomic>
+#include <algorithm>
+#include <QSemaphore>
+#include <QScopeGuard>
 using namespace configqml;
 using D = ConfigDescriptor;
 using T = D::Type;
@@ -59,6 +63,255 @@ struct DeploymentInput : QObject {
 class SourceEventsTest : public QObject {
     Q_OBJECT
 private slots:
+    void uncertainOwnEchoKeepsNewestChoice_data() {
+        QTest::addColumn<int>("policy");
+        QTest::addColumn<bool>("retained");
+        for (int policy = 0; policy < 3; ++policy)
+            for (bool retained : {false, true})
+                QTest::newRow(
+                    qPrintable(QString("policy-%1-retained-%2").arg(policy).arg(retained)))
+                    << policy << retained;
+    }
+    void uncertainOwnEchoKeepsNewestChoice() {
+        QFETCH(int, policy);
+        QFETCH(bool, retained);
+        QTemporaryDir dir;
+        const auto path = dir.filePath("user.json");
+        compat::put(path, "{\"n\":0}\n");
+        auto o = options(dir.path());
+        o.jsonFiles[0].watchMode = ConfigWatchMode::Live;
+        o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy(policy);
+        o.evidenceDirectory = dir.filePath("evidence");
+        auto entered = std::make_shared<QSemaphore>(), release = std::make_shared<QSemaphore>();
+        auto once = std::make_shared<std::atomic_bool>(true);
+        auto readbackReads = std::make_shared<std::atomic<quint64>>(0);
+        auto backend = std::make_shared<ConfigJsonBackend *>(nullptr);
+        o.fileFault = [=](const QString &phase, const QString &) {
+            if (phase == "readback" && once->exchange(false)) {
+                *readbackReads = (*backend)->reads("user") + 1;
+                entered->release();
+                if (!release->tryAcquire(1, 10000))
+                    return QString("fixture-timeout");
+                return QString("terminal-readback-fault");
+            }
+            return QString();
+        };
+        ConfigStore store(o);
+        DeploymentInput consumer(store);
+        int reRequests = 0;
+        connect(&store, &ConfigStore::sourceAccepted, this, [&](const auto &event) {
+            if (event.origin == "external") {
+                ++reRequests; // Model the native application's external-choice forwarding.
+                store.setUser({"n"}, event.facts.first().value);
+            }
+        });
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        control(store, [&](auto &worker) { *backend = worker.jsonBackend(); });
+        QString head, tail;
+        if (retained) {
+            head = compat::request(store, [&] {
+                       return store.retainGroup({"head", {{"n"}}, {{{"n"}, true, 1}}, {}});
+                   }).groupToken;
+            tail = compat::request(store, [&] {
+                       return store.retainGroup({"tail", {{"n"}}, {{{"n"}, true, 0}}, {head}});
+                   }).groupToken;
+            QVERIFY(!head.isEmpty() && !tail.isEmpty());
+        } else
+            QVERIFY(store.setUser({"n"}, 1).accepted);
+        const auto unblock = qScopeGuard([release] { release->release(); });
+        const auto first = retained ? store.saveGroup(head) : store.save();
+        QVERIFY(entered->tryAcquire(1, 5000));
+        if (!retained)
+            QVERIFY(store.setUser({"n"}, 0).accepted); // The original newer tail, not a re-request.
+        release->release();
+        const auto failed = compat::request(store, [&] { return first; });
+        QCOMPARE(failed.status, QString("failed"));
+        QCOMPARE(failed.error.code, QString("terminal-readback-fault"));
+        QCOMPARE(failed.publicationState, QString("uncertain"));
+        QVERIFY(!failed.coveredRevisions.contains("user"));
+        quint64 reads = 0;
+        QTRY_VERIFY(([&] {
+            control(store, [&](auto &worker) { reads = worker.jsonBackend()->reads("user"); });
+            return reads > readbackReads->load();
+        })());
+        QCOMPARE(reRequests, 0);
+        QVERIFY(consumer.deployments.isEmpty());
+        QCOMPARE(store.value({"n"}).toInt(), 0);
+        if (retained) {
+            QCOMPARE(store.groupInfo(head).state, QString("stopped"));
+            QCOMPARE(store.groupInfo(head).attempts.size(), 1);
+        }
+        bool own = false;
+        const auto ownEvidence = store.sourceStates().first().evidence;
+        for (const auto &reference : ownEvidence)
+            if (reference.role == "own" && reference.phase == "read") {
+                const auto meta =
+                    decodeJsonValue(compat::bytes(reference.directory + "/metadata.json"))
+                        .value.toMap();
+                QCOMPARE(meta.value("requestId").toString(), QString::number(failed.requestId));
+                QCOMPARE(meta.value("groupToken").toString(), failed.groupToken);
+                QCOMPARE(meta.value("attemptId").toString(), failed.attemptId);
+                QCOMPARE(meta.value("revision").toString(),
+                         QString::fromLatin1(failed.publications.first().revision.token));
+                own = true;
+            }
+        QVERIFY(own);
+        const auto retry = compat::request(
+            store, [&] { return retained ? store.retryGroup(head) : store.save(); });
+        QCOMPARE(retry.status, QString("saved"));
+        bool retryOwn = false;
+        for (const auto &reference : retry.evidence)
+            if (reference.role == "own" && reference.phase == "readback") {
+                const auto meta =
+                    decodeJsonValue(compat::bytes(reference.directory + "/metadata.json"))
+                        .value.toMap();
+                QCOMPARE(meta.value("requestId").toString(), QString::number(failed.requestId));
+                QCOMPARE(meta.value("groupToken").toString(), failed.groupToken);
+                QCOMPARE(meta.value("attemptId").toString(), failed.attemptId);
+                retryOwn = true;
+            }
+        QVERIFY(retryOwn);
+        if (retained) {
+            QCOMPARE(retry.groupToken, head);
+            QCOMPARE(retry.requestKey, failed.requestKey);
+            QCOMPARE(retry.capturePrefix, failed.capturePrefix);
+            QCOMPARE(retry.attemptNumber, quint64(2));
+            QVERIFY(retry.attemptId != failed.attemptId);
+            QCOMPARE(compat::request(store, [&] { return store.saveGroup(tail); }).status,
+                     QString("saved"));
+        }
+        QCOMPARE(reRequests, 0);
+        QCOMPARE(store.value({"n"}).toInt(), 0);
+        QCOMPARE(ConfigJsonCodec()
+                     .decode(compat::bytes(path), "user")
+                     .raw.value("n")
+                     .value<ConfigNumber>()
+                     .integer(false)
+                     .value.toInt(),
+                 0);
+        ConfigStore restart(o);
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value({"n"}).toInt(), 0);
+    }
+    void uncertainOwnDoesNotHideForeign_data() {
+        QTest::addColumn<int>("policy");
+        QTest::addColumn<bool>("retained");
+        QTest::addColumn<bool>("sameBytes");
+        for (int policy = 0; policy < 3; ++policy)
+            for (bool retained : {false, true})
+                for (bool sameBytes : {false, true})
+                    QTest::newRow(qPrintable(QString("policy-%1-retained-%2-same-%3")
+                                                 .arg(policy)
+                                                 .arg(retained)
+                                                 .arg(sameBytes)))
+                        << policy << retained << sameBytes;
+    }
+    void uncertainOwnDoesNotHideForeign() {
+        QFETCH(int, policy);
+        QFETCH(bool, retained);
+        QFETCH(bool, sameBytes);
+        QTemporaryDir dir;
+        const auto path = dir.filePath("user.json");
+        compat::put(path, "{\"n\":0}");
+        auto o = options(dir.path());
+        o.evidenceDirectory = dir.filePath("evidence");
+        o.jsonFiles[0].watchMode = ConfigWatchMode::Live;
+        o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy(policy);
+        auto once = std::make_shared<std::atomic_bool>(true);
+        o.fileFault = [once](const QString &phase, const QString &) {
+            return phase == "readback" && once->exchange(false) ? QString("readback-fault")
+                                                                : QString();
+        };
+        ConfigStore store(o);
+        DeploymentInput consumer(store);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QString token;
+        if (retained)
+            token = compat::request(store, [&] {
+                        return store.retainGroup({"head", {{"n"}}, {{{"n"}, true, 1}}, {}});
+                    }).groupToken;
+        else
+            QVERIFY(store.setUser({"n"}, 1).accepted);
+        const auto failed = compat::request(
+            store, [&] { return retained ? store.saveGroup(token) : store.save(); });
+        QCOMPARE(failed.publicationState, QString("uncertain"));
+        QTRY_VERIFY(([&] {
+            const auto refs = store.sourceStates().first().evidence;
+            return std::any_of(refs.cbegin(), refs.cend(),
+                               [](const auto &r) { return r.role == "own" && r.phase == "read"; });
+        })());
+        QVERIFY(consumer.deployments.isEmpty());
+        const auto foreign = sameBytes ? compat::bytes(path) : QByteArray("{\"n\":7}");
+        replace(path, foreign);
+        QTRY_COMPARE(consumer.deployments.size(), 1);
+        QCOMPARE(consumer.deployments.last().cause, QString("watch"));
+        QCOMPARE(consumer.deployed().first().toInt(), sameBytes ? 1 : 7);
+        QVERIFY(consumer.deployments.last().facts.first().revision !=
+                failed.publications.first().revision);
+        QCOMPARE(compat::bytes(path), foreign);
+        if (retained) {
+            QCOMPARE(store.groupInfo(token).state, QString("stopped"));
+            QCOMPARE(store.groupInfo(token).attempts.size(), 1);
+        }
+    }
+    void mixedOwnAndForeignRead_data() {
+        QTest::addColumn<bool>("retained");
+        QTest::newRow("ordinary") << false;
+        QTest::newRow("retained") << true;
+    }
+    void mixedOwnAndForeignRead() {
+        QFETCH(bool, retained);
+        QTemporaryDir dir;
+        const auto a = dir.filePath("a.json"), b = dir.filePath("b.json");
+        compat::put(a, "{\"n\":0}");
+        compat::put(b, "{\"n\":0}");
+        auto o = options(dir.path());
+        o.schema = ConfigSchema(D::group({{"a", D::group({{"n", D::leaf(T::SafeInteger, 0)}})},
+                                          {"b", D::group({{"n", D::leaf(T::SafeInteger, 0)}})}}));
+        o.layers[0].sources = {{"a", {"a"}, {}}, {"b", {"b"}, {}}};
+        o.jsonFiles = {{"user", "a", a}, {"user", "b", b}};
+        o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy::StrictPendingRebase;
+        o.observedPaths = {{"a", "n"}, {"b", "n"}};
+        o.evidenceDirectory = dir.filePath("evidence");
+        auto once = std::make_shared<std::atomic_bool>(true);
+        o.fileFault = [once](const QString &phase, const QString &) {
+            return phase == "readback" && once->exchange(false) ? QString("readback-fault")
+                                                                : QString();
+        };
+        ConfigStore store(o);
+        DeploymentInput consumer(store);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto originalA = consumer.accepted.last().facts.first().revision;
+        QString token;
+        if (retained)
+            token =
+                compat::request(store, [&] {
+                    return store.retainGroup({"head", {{"a", "n"}}, {{{"a", "n"}, true, 1}}, {}});
+                }).groupToken;
+        else
+            QVERIFY(store.setUser({"a", "n"}, 1).accepted);
+        QCOMPARE(
+            compat::request(store, [&] { return retained ? store.saveGroup(token) : store.save(); })
+                .publicationState,
+            QString("uncertain"));
+        replace(b, "{\"n\":7}");
+        QCOMPARE(compat::request(store, [&] { return store.reload(); }).status,
+                 QString("reloaded"));
+        QCOMPARE(consumer.deployments.size(), 1);
+        QCOMPARE(consumer.deployments.last().changedPaths, (QList<ConfigPath>{{"b", "n"}}));
+        QCOMPARE(consumer.deployed(), QVariantList({qint64(0), qint64(7)}));
+        QCOMPARE(consumer.deployments.last().facts.first().revision, originalA);
+        QCOMPARE(store.value({"a", "n"}).toInt(), 1);
+        QCOMPARE(store.value({"b", "n"}).toInt(), 7);
+        QCOMPARE(compat::request(store,
+                                 [&] { return retained ? store.retryGroup(token) : store.save(); })
+                     .status,
+                 QString("saved"));
+        ConfigStore restart(o);
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value({"a", "n"}).toInt(), 1);
+        QCOMPARE(restart.value({"b", "n"}).toInt(), 7);
+    }
     void ownLiveEchoDoesNotDeploy() {
         QTemporaryDir dir;
         auto o = options(dir.path());

@@ -783,6 +783,7 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
     m_recoveryRead = false;
     m_recoveryChecked.clear();
     m_recoveryWhole.clear();
+    m_recoveryPreimages.clear();
     m_unresolvedSave = false;
     if (!command.groupToken.isEmpty()) {
         describeGroup(m_saveResult, m_groups.value(command.groupToken).info);
@@ -880,13 +881,10 @@ void ConfigWorker::continueSave() {
         m_savePublished |= outcome->success;
         if (outcome->success) {
             confirmed(m_activeSource, decodeMemoryValue(outcome->bytes), *outcome);
-        } else {
-            if (!m_save.groupToken.isEmpty() && outcome->publicationWitness) {
-                auto &capture = m_groups[m_save.groupToken];
-                capture.uncertain[m_activeSource] = *outcome->publicationWitness;
-                capture.uncertainBytes[m_activeSource] = m_activeBytes;
-            }
-        }
+        } else
+            rememberOwnPublication(
+                m_activeSource, *outcome, m_activeBytes,
+                {m_saveRevisions.value(m_activeSource), m_saveBytes.value(m_activeSource)});
     }
     if (m_saveSources.isEmpty()) {
         finishSave();
@@ -915,9 +913,7 @@ void ConfigWorker::continueSave() {
             return;
         }
     }
-    bool uncertain = false;
-    for (const auto &capture : m_groups)
-        uncertain |= capture.uncertain.contains(m_activeSource);
+    const bool uncertain = m_ownPublications.contains(m_activeSource);
     if (uncertain && !m_recoveryChecked.contains(m_activeSource)) {
         m_recoveryChecked.insert(m_activeSource);
         if (!m_files.contains(m_activeSource)) {
@@ -1031,13 +1027,11 @@ void ConfigWorker::continueSave() {
             }
             m_acceptOrigin = "own_save";
             m_acceptCause = "save";
-        } else {
-            if (!m_save.groupToken.isEmpty() && outcome.publicationWitness) {
-                auto &capture = m_groups[m_save.groupToken];
-                capture.uncertain[m_activeSource] = *outcome.publicationWitness;
-                capture.uncertainBytes[m_activeSource] = transaction.candidateBytes;
-            }
-        }
+        } else
+            rememberOwnPublication(
+                m_activeSource, outcome, transaction.candidateBytes,
+                transaction.preflightBase.value_or(ConfigSourcePreimage{
+                    m_saveRevisions.value(m_activeSource), m_saveBytes.value(m_activeSource)}));
         if (!retentionError.isEmpty()) {
             m_saveResult.status = "failed";
             m_saveResult.error = {retentionError, m_activeSource, "readback"};
@@ -1279,8 +1273,23 @@ ConfigError ConfigWorker::acceptFileObservations(const QMap<QString, ConfigBacke
     QMap<QString, QList<ConfigSource>> replacements, diskReplacements;
     QMap<QString, ConfigSource> admitted;
     bool changed = false;
+    bool ownObserved = false;
     for (auto it = reads.cbegin(); it != reads.cend(); ++it) {
         const auto &read = it.value();
+        if (cause != "preflight")
+            if (const auto own = ownPublication(it.key(), read)) {
+                ownObserved = true;
+                const auto retained =
+                    retainObservation(it.key(), read, phase, "own", own->origin, result);
+                if (!retained.isEmpty())
+                    errors.append({retained, it.key(), "read", m_json->path(it.key())});
+                else
+                    m_json->confirm(it.key(),
+                                    read.revision); // Verified read identity, not a saved receipt.
+                // This acquired own version is not a new external disk choice.
+                // Keep pending intent, stopped attempts and admitted facts intact.
+                continue;
+            }
         const auto file = m_files.value(it.key());
         const auto route = m_fileRoutes.value(it.key());
         ConfigJsonCodec codec(m_options.schema.diagnostics().at(route.prefix));
@@ -1409,7 +1418,7 @@ ConfigError ConfigWorker::acceptFileObservations(const QMap<QString, ConfigBacke
         result->status = "failed";
         result->error = errors.first();
     }
-    if (changed || (result && cause == "reload") || !errors.isEmpty()) {
+    if (changed || ownObserved || (result && cause == "reload") || !errors.isEmpty()) {
         if (changed) {
             m_acceptOrigin = "external";
             m_acceptCause = cause;

@@ -79,6 +79,16 @@ native/raw/environment paths. Existing Integer/UnsignedInteger descriptors keep
 their exact qint64/quint64 domains. Missing, nullable, finite Real and URL rules
 remain the native schema contract.
 
+Uncertain publication witnesses share one worker-owned provenance registry with
+watch/reload admission and Retry, for ordinary and retained work. A successful
+read of the exact witnessed revision AND bytes is retained as `own` under the
+original request/group/attempt correlation, not admitted as a new external disk
+choice. Watches remain active and failed work stays pending/stopped. Another
+revision, even with identical bytes, remains external. Mixed-source reads admit
+foreign sources without exposing uncertain own output as an external fact.
+Retry validates the causal capture, then executes normal publication/readback;
+only successful confirmation advances waiting own descendants and covers intent.
+
 ## Verification
 
 Native CTest covers ordered exact-prefix persistence, held effects/replies,

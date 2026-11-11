@@ -23,7 +23,7 @@ add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp
     configconsumer_p.h configresult.h configstore.h configstore.cpp configworker_p.h configworker.cpp
     configshutdown_p.h configshutdown.cpp)
 target_sources(configqml_core PRIVATE configprojection_p.h configprojection.cpp
-    configprojection.h configsourceprojection_p.h configevidence_p.h configevidence.cpp configworkerevidence.cpp
+    configprojection.h configsourceprojection_p.h configevidence_p.h configevidence.cpp configworkerevidence.cpp configsourceprovenance.cpp
     configrecordlistpolicy.h configrecordlistpolicy.cpp configrecordlistcommands.cpp configretainedgroup.cpp
     configlistmodel.h configlistmodel.cpp configdraft.h configdraft.cpp configgroup.cpp
     configstorehandle.h configstorehandle.cpp configmigration.cpp configjsonbackup.cpp

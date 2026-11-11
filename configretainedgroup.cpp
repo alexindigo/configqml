@@ -314,8 +314,7 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
     auto &remaining = m_intents[id];
     remaining.removeIf([&](const ConfigPendingIntent &intent) { return ids.contains(intent.id); });
     for (auto &intent : remaining)
-        if (intent.frozen && sameSourcePreimage(*intent.frozen, {m_saveRevisions.value(id),
-                                                                 m_saveBytes.value(id)})) {
+        if (intent.frozen && savePredecessor(id, *intent.frozen)) {
             // Correlated own descendants may advance a frozen ordinary witness,
             // just as retained captures do; foreign rebases cannot advance it.
             intent.frozen = ConfigSourcePreimage{outcome.revision, outcome.bytes};
@@ -330,8 +329,7 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
         if (capture.bases.contains(id)) {
             if (m_files.value(id).conflictPolicy == ConfigConflictPolicy::StrictPendingRebase &&
                 capture.info.groupToken != m_save.groupToken &&
-                !sameSourcePreimage({capture.revisions.value(id), capture.bytes.value(id)},
-                                    {m_saveRevisions.value(id), m_saveBytes.value(id)}))
+                !savePredecessor(id, {capture.revisions.value(id), capture.bytes.value(id)}))
                 continue; // An ordinary rebase cannot launder foreign data into a capture.
             if (capture.info.groupToken == m_save.groupToken)
                 capture.confirmedRevisions[id] = outcome.revision;
@@ -339,16 +337,8 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
             capture.revisions[id] = outcome.revision;
             capture.bytes[id] = outcome.bytes;
             capture.intents[id].subtract(ids);
-            if (capture.uncertain.contains(id)) {
-                if (capture.info.groupToken == m_save.groupToken) {
-                    capture.uncertain.remove(id);
-                    capture.uncertainBytes.remove(id);
-                } else {
-                    capture.uncertain[id] = outcome.revision;
-                    capture.uncertainBytes[id] = outcome.bytes;
-                }
-            }
         }
+    advanceOwnPublications(id, outcome, ids);
     const auto route = m_routes.value(id);
     auto disk = *m_layers->source(route.layerId, id);
     disk.raw = raw;
@@ -368,14 +358,28 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
     m_acceptCause = "save";
 }
 bool ConfigWorker::recoverOwnPublication(const QString &source, const ConfigBackendResult &read) {
-    QString error;
+    const auto own = ownPublication(source, read);
+    QString retention;
     if (m_files.contains(source))
-        error = retainObservation(source, read, "readback", "late", m_save, &m_saveResult);
-    for (const auto &capture : m_groups)
-        if (capture.uncertain.contains(source) &&
-            (!read.success || capture.uncertain.value(source) != read.revision ||
-             capture.uncertainBytes.value(source) != read.bytes))
+        retention = retainObservation(source, read, "readback", own ? "own" : "late",
+                                      own ? own->origin : m_save, &m_saveResult);
+    QString error = read.success ? QString() : read.error.code;
+    const ConfigSourcePreimage capture{m_saveRevisions.value(source), m_saveBytes.value(source)};
+    const ConfigSourcePreimage observation{read.revision, read.bytes};
+    const auto publications = m_ownPublications.value(source);
+    for (auto it = publications.cbegin(); it != publications.cend(); ++it) {
+        const bool exactOwn =
+            read.success && it->output.revision == read.revision && it->output.bytes == read.bytes;
+        const bool causal = samePublicationBase(source, capture, it->predecessor) ||
+                            samePublicationBase(source, capture, it->output);
+        // Ordinary strict work also retains its existing exact-preimage restoration path.
+        const bool restored =
+            it.key().isEmpty() && read.success && samePublicationBase(source, capture, observation);
+        if (!(exactOwn && causal) && !restored)
             error = read.success ? QString("source-preimage-conflict") : read.error.code;
+    }
+    if (!retention.isEmpty())
+        error = retention;
     if (!error.isEmpty()) {
         m_saveResult.status = "failed";
         m_saveResult.error = {error, source, "readback"};
@@ -386,10 +390,12 @@ bool ConfigWorker::recoverOwnPublication(const QString &source, const ConfigBack
     ConfigJsonCodec codec(m_options.schema.diagnostics().at(m_routes.value(source).prefix));
     const auto raw = m_files.contains(source) ? codec.decode(read.bytes, source).raw
                                               : decodeMemoryValue(read.bytes);
+    m_recoveryPreimages[source] = capture;
     m_saveBases[source] = raw;
     m_saveRevisions[source] = read.revision;
     m_saveBytes[source] = read.bytes;
     m_recoveryWhole.insert(source);
+    m_saveRebase.remove(source); // Verified own recovery is never a foreign rebase.
     return true;
 }
 void ConfigWorker::retainedGroupCommand(const ConfigCommand &command) {
@@ -614,8 +620,13 @@ void ConfigWorker::retainedGroupCommand(const ConfigCommand &command) {
         capture.bases.clear();
         capture.revisions.clear();
         capture.intents.clear();
-        capture.uncertain.clear();
-        capture.uncertainBytes.clear();
+        for (auto it = m_ownPublications.begin(); it != m_ownPublications.end();) {
+            it.value().remove(command.groupToken);
+            if (it.value().isEmpty())
+                it = m_ownPublications.erase(it);
+            else
+                ++it;
+        }
         capture.originalBases.clear();
         capture.originalRevisions.clear();
         capture.bytes.clear();

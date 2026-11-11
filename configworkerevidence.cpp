@@ -89,7 +89,9 @@ QString ConfigWorker::retainObservation(const QString &id, const ConfigBackendRe
         observation.requestId =
             command->requestId ? QString::number(command->requestId) : QString();
         observation.groupToken = command->groupToken;
-        if (!command->groupToken.isEmpty())
+        if (!command->evidenceAttemptId.isEmpty())
+            observation.attemptId = command->evidenceAttemptId;
+        else if (!command->groupToken.isEmpty())
             observation.attemptId =
                 m_groups.value(command->groupToken).info.attempts.isEmpty()
                     ? QString()

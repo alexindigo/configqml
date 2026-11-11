@@ -256,11 +256,22 @@ private slots:
         QCOMPARE(saved.inputPrefix, quint64(1));
         QCOMPARE(flushed.inputPrefix, quint64(2));
         QCOMPARE(saved.status, fault ? QString("failed") : QString("saved"));
-        QCOMPARE(flushed.status, fault > 1 ? QString("failed") : QString("saved"));
+        QCOMPARE(flushed.status, QString("saved"));
         QCOMPARE(saved.publicationState, fault > 1 ? QString("uncertain") : QString("known"));
         QCOMPARE(flushed.publicationState, QString("known"));
-        if (fault > 1)
-            QCOMPARE(flushed.error.code, QString("revision-conflict"));
+        QVERIFY(flushed.error.empty());
+        QVariantMap raw;
+        bool read = false;
+        Probe::run(
+            store,
+            [&](auto &w) {
+                const auto id =
+                    w.backend()->submit({ConfigBackendRequest::Operation::Read, "memory", {}, {}});
+                raw = decodeMemoryValue(w.backend()->take(id)->bytes);
+            },
+            this, [&] { read = true; });
+        QTRY_VERIFY(read);
+        QCOMPARE(valueAt(raw, number)->toLongLong(), 2);
         if (fault)
             QVERIFY(!store.failures().isEmpty());
     }

@@ -945,7 +945,7 @@ private slots:
     }
     void uncertainOwnOutputAndFrozenOverride_data() {
         QTest::addColumn<bool>("recover");
-        QTest::newRow("readback-fault-no-hidden-recovery") << false;
+        QTest::newRow("readback-fault-explicit-own-retry") << false;
         QTest::newRow("restore-preflight-after-uncertain-effect") << true;
     }
     void uncertainOwnOutputAndFrozenOverride() {
@@ -970,11 +970,18 @@ private slots:
         QCOMPARE(failed.publicationState, QString("uncertain"));
         QCOMPARE(warnings.size(), 1);
         const auto own = compat::bytes(path);
-        QCOMPARE(compat::request(store, [&] { return store.save(); }).error.code,
-                 QString("source-preimage-conflict"));
-        QCOMPARE(compat::bytes(path), own);
-        if (!recover)
+        if (!recover) {
+            const auto retry = compat::request(store, [&] { return store.save(); });
+            QCOMPARE(retry.status, QString("saved"));
+            QCOMPARE(retry.publications[0].rebasedOnto, failed.publications[0].rebasedOnto);
+            QCOMPARE(retry.publications[0].overriddenPaths, (QList<ConfigPath>{{"b"}}));
+            QCOMPARE(compat::bytes(path), own);
+            ConfigStore restart(o);
+            QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+            QCOMPARE(restart.value({"a"}).toInt(), 7);
+            QCOMPARE(restart.value({"b"}).toInt(), 9);
             return;
+        }
         replace(path, "{\"a\":77,\"b\":44}");
         QCOMPARE(compat::request(store, [&] { return store.save(); }).error.code,
                  QString("source-preimage-conflict"));

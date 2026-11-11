@@ -89,9 +89,11 @@ file, including newer never-attempted edits, use that frozen preimage strictly.
 They cannot publish around it by rebasing; other sources remain independent.
 Later saves, including autosave, may retry the strict capture. Exact-byte
 restoration resolves it despite a changed final inode/mtime. After an uncertain
-effect, ordinary work has no implicit own-output recovery: the computed preflight
-base must be restored before retry. Retained groups keep their explicit recovery
-protocol. Nothing is recaptured from the facade or discarded.
+effect, both ordinary and retained work can recover the exact own publication
+revision AND bytes through their captured causal predecessor. Retry still runs
+publication, sync and readback before success; an own watcher read never settles
+failed work. Ordinary exact-preimage restoration remains supported. Nothing is
+recaptured from the facade or discarded.
 
 Every attempt retains `original`, fresh `foreign`, `published` and `readback`
 observations where available. Evidence metadata keys are unchanged. A route fact
