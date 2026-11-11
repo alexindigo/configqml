@@ -132,6 +132,69 @@ bool pendingBackend(ConfigStore &store) {
 class OverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void nativeNumericDestinationLifecycle_data() {
+        QTest::addColumn<int>("mode");
+        for (int mode = 0; mode < 3; ++mode)
+            QTest::newRow(qPrintable(QString::number(mode))) << mode;
+    }
+    void nativeNumericDestinationLifecycle() {
+        QFETCH(int, mode);
+        auto b = baseOptions();
+        auto object = D::leaf(T::Record, QVariantMap{{"n", 1.0}});
+        object.fields = {{"n", D::leaf(T::Real, 0.0)}};
+        b.schema = ConfigSchema(D::group(
+            {{"settings", D::group({{"threshold", D::leaf(T::Real, 10.0)},
+                                    {"object", object},
+                                    {"numbers", D::list(D::leaf(T::Real, 0.0), {1.0})}})}}));
+        b.layers[0].sources.removeLast();
+        ConfigStore base(b), main(mainOptions());
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        const auto rows = [](int n) {
+            return QVariantList{QVariantMap{
+                {"id", "x"},
+                {"instanceSettings",
+                 QVariantMap{{"threshold", n},
+                             {"object", QVariantMap{{"n", n}}},
+                             {"numbers", QVariantList{n}},
+                             {"wide", decodeJsonValue("18446744073709551615").value}}}}};
+        };
+        QCOMPARE(compat::request(main, [&] { return main.setUser({"rows"}, rows(17)).requestId; })
+                     .status,
+                 QString("accepted"));
+        auto *editor =
+            open(main, selection(main, base.scope({"settings"}), ConfigOverlayMode(mode)));
+        QCOMPARE(editor->value({"threshold"}).metaType().id(), QMetaType::Double);
+        QCOMPARE(editor->value({"threshold"}).toDouble(), 17.0);
+        QCOMPARE(editor->value({"object"}).toMap().value("n").toDouble(), 17.0);
+        QCOMPARE(editor->value({"numbers"}).toList().first().metaType().id(), QMetaType::Double);
+        if (ConfigOverlayMode(mode) == ConfigOverlayMode::Editor) {
+            QVERIFY(editor->setValue({"threshold"}, 18).accepted);
+            QVERIFY(editor->setValue({"object"}, QVariantMap{{"n", 18u}}).accepted);
+            QCOMPARE(compat::request(main, [&] { return editor->apply(); }).status,
+                     QString("saved"));
+            QCOMPARE(editor->value({"threshold"}).toDouble(), 18.0);
+        } else {
+            QCOMPARE(
+                compat::request(main, [&] { return main.setUser({"rows"}, rows(19)).requestId; })
+                    .status,
+                QString("accepted"));
+            QTRY_COMPARE(editor->value({"threshold"}).toDouble(), 19.0);
+            QTRY_COMPARE(editor->value({"object"}).toMap().value("n").toDouble(), 19.0);
+            if (ConfigOverlayMode(mode) == ConfigOverlayMode::Live) {
+                QCOMPARE(compat::request(
+                             main, [&] { return editor->setValue({"threshold"}, 20).requestId; })
+                             .status,
+                         QString("accepted"));
+                QCOMPARE(editor->value({"threshold"}).toDouble(), 20.0);
+            }
+        }
+        if (ConfigOverlayMode(mode) != ConfigOverlayMode::View)
+            QVERIFY(!editor->setValue({"threshold"}, QString("17")).accepted);
+        const auto raw =
+            main.value({"rows"}).toList().first().toMap().value("instanceSettings").toMap();
+        QCOMPARE(raw.value("wide").value<ConfigNumber>().token(), QString("18446744073709551615"));
+    }
     void admittedFrozenApplyRetry_data() {
         QTest::addColumn<QString>("phase");
         QTest::addColumn<bool>("reset");

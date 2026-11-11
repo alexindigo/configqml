@@ -81,6 +81,31 @@ static ConfigStoreOptions options(const QString &directory = {}) {
 class EditorsTest : public QObject {
     Q_OBJECT
 private slots:
+    void openNumericDraftUsesDeclaredDomain() {
+        QTemporaryDir dir;
+        auto o = options(dir.path());
+        auto record = D::leaf(T::Record, QVariantMap{{"n", 0.0}});
+        record.fields = {{"n", D::leaf(T::Real, 0.0)}};
+        o.schema = ConfigSchema(D::group({{"a", D::group({{"record", record}})},
+                                          {"b", D::group({{"n", D::leaf(T::SafeInteger, 0)}})}}));
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto open = D::leaf(T::Record, QVariantMap{});
+        open.open = true;
+        const auto captured = open.validate(QVariantMap{{"n", 17}});
+        QVERIFY(captured.ok());
+        auto *draft = store.draft({{"a", "record"}});
+        QVERIFY(draft->setValue({"a", "record"}, captured.value).accepted);
+        QCOMPARE(draft->value({"a", "record"}).toMap().value("n").metaType().id(),
+                 QMetaType::Double);
+        QCOMPARE(draft->previewValue({"a", "record"}).toMap().value("n").toDouble(), 17.0);
+        QVERIFY(!draft->setValue({"a", "record"}, QVariantMap{{"n", QString("17")}}).accepted);
+        QCOMPARE(request(store, [&] { return draft->apply(); }).status, QString("saved"));
+        QVERIFY(!draft->dirty());
+        ConfigStore reopened(o);
+        QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);
+        QCOMPARE(reopened.value({"a", "record"}).toMap().value("n").toDouble(), 17.0);
+    }
     void admittedApplyPublicationRetry_data() {
         QTest::addColumn<QString>("phase");
         QTest::addColumn<int>("policy");

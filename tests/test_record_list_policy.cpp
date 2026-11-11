@@ -94,6 +94,47 @@ QVariantList displayed(ConfigStore &store, bool same, bool right = false) {
 class RecordListTest : public QObject {
     Q_OBJECT
 private slots:
+    void openNumericRecordListUsesDeclaredDomain() {
+        auto row = D::leaf(T::Record, QVariantMap{{"id", "x"}, {"n", 0.0}});
+        row.fields = {{"id", D::leaf(T::String, QString())}, {"n", D::leaf(T::Real, 0.0)}};
+        ConfigStoreOptions o;
+        o.autoSave = false;
+        o.schema = ConfigSchema(
+            D::group({{"rows", D::list(row, {QVariantMap{{"id", "x"}, {"n", 0.0}}})}}));
+        o.layers = {{"user",
+                     ConfigLayerKind::File,
+                     ConfigAdmissionPolicy::FieldFallback,
+                     {{"user", {}, {}}},
+                     true}};
+        o.recordListPolicies = {{"rows", {"rows"}, {}, "id", {}, false, true}};
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        ConfigRecordListMetadata metadata;
+        metadata.ready = true;
+        metadata.entries = {{"x", true, false, true, {{"n", 17}}}};
+        QCOMPARE(
+            compat::request(store, [&] { return store.updateRecordListPolicy("rows", metadata); })
+                .status,
+            QString("projected"));
+        ConfigRecordListEdit edit;
+        edit.field = "n";
+        auto open = D::leaf(T::Record, QVariantMap{});
+        open.open = true;
+        const auto captured = open.validate(QVariantMap{{"n", 17}});
+        QVERIFY(captured.ok());
+        edit.value = captured.value.toMap().value("n");
+        ConfigRecordListEditOptions edits{store.info({"rows"}).publicationGeneration, {}, {edit}};
+        QCOMPARE(compat::request(store, [&] { return store.editRecordList("rows", edits); }).status,
+                 QString("admitted"));
+        const auto value = store.value({"rows"}).toList().first().toMap().value("n");
+        QCOMPARE(value.metaType().id(), QMetaType::Double);
+        QCOMPARE(value.toDouble(), 17.0);
+        edits.generation = store.info({"rows"}).publicationGeneration;
+        edits.edits[0].value = QString("17");
+        QCOMPARE(compat::request(store, [&] { return store.editRecordList("rows", edits); }).status,
+                 QString("failed"));
+        QCOMPARE(store.value({"rows"}).toList().first().toMap().value("n").toDouble(), 17.0);
+    }
     void samePolicyAddressesAndSameList() {
         auto o = transferOptions(true);
         ConfigStore store(o);

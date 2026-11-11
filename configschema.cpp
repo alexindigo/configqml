@@ -90,6 +90,12 @@ static ConfigValueResult numericValue(const QVariant &input, Type type, const Co
     default:
         break;
     }
+    // Admission into an open position preserves its numeric storage. A later
+    // declared destination selects the domain, independently of input format.
+    // Real uses finite binary-double semantics, just like ConfigNumber::real().
+    if (type == Type::Real && (result.value.metaType().id() == QMetaType::LongLong ||
+                               result.value.metaType().id() == QMetaType::ULongLong))
+        result.value = result.value.toDouble();
     if (result.ok() && result.value.metaType() == QMetaType::fromType<ConfigNumber>()) {
         const auto number = result.value.value<ConfigNumber>();
         if (type == Type::Integer || type == Type::SafeInteger || type == Type::UnsignedInteger)
@@ -143,8 +149,7 @@ ConfigDescriptor::validateCaptured(const QVariant &input, const ConfigPath &path
             if (n < -9007199254740991.0 || n > 9007199254740991.0)
                 return fail("unsafe-integer");
             owned.value = QVariant::fromValue(qint64(n));
-        } else if (type == Type::Real && input.metaType().id() == QMetaType::LongLong)
-            owned.value = input.toDouble();
+        }
     }
     if (!supportedConstraints(*this))
         return fail("descriptor");

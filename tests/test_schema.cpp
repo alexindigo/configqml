@@ -14,6 +14,83 @@ using T = D::Type;
 class SchemaTest : public QObject {
     Q_OBJECT
 private slots:
+    void realDestinationDomain_data() {
+        QTest::addColumn<QVariant>("input");
+        QTest::newRow("int") << QVariant(17);
+        QTest::newRow("uint") << QVariant(17u);
+        QTest::newRow("signed") << QVariant::fromValue(qint64(17));
+        QTest::newRow("unsigned") << QVariant::fromValue(quint64(17));
+        QTest::newRow("float") << QVariant(17.5f);
+        QTest::newRow("double") << QVariant(17.5);
+        QTest::newRow("json") << decodeJsonValue("17").value;
+        QTest::newRow("wide-signed") << QVariant::fromValue(std::numeric_limits<qint64>::max());
+        QTest::newRow("wide-unsigned") << QVariant::fromValue(std::numeric_limits<quint64>::max());
+    }
+    void realDestinationDomain() {
+        QFETCH(QVariant, input);
+        auto open = D::leaf(T::Record, QVariantMap{});
+        open.open = true;
+        const auto admitted = open.validate(QVariantMap{{"number", input}});
+        QVERIFY(admitted.ok());
+        const auto stored = admitted.value.toMap().value("number");
+        const auto original = encodeJsonValue(stored).bytes;
+        const auto number = D::leaf(T::Real, 0.0);
+        const auto expected = stored.metaType() == QMetaType::fromType<ConfigNumber>()
+                                  ? stored.value<ConfigNumber>().real().value.toDouble()
+                                  : stored.toDouble();
+        for (const auto format : {D::Format::Native, D::Format::Qml}) {
+            const auto checked = number.validate(stored, {}, format);
+            QVERIFY(checked.ok());
+            QCOMPARE(checked.value.metaType().id(), QMetaType::Double);
+            QCOMPARE(checked.value.toDouble(), expected);
+            auto record = D::leaf(T::Record, QVariantMap{});
+            auto map = D::leaf(T::Map, QVariantMap{});
+            map.element = {number};
+            record.fields = {{"list", D::list(number, {})}, {"map", map}};
+            const auto nested = record.validate(
+                QVariantMap{{"list", QVariantList{stored}}, {"map", QVariantMap{{"n", stored}}}},
+                {}, format);
+            QVERIFY(nested.ok());
+            QCOMPARE(nested.value.toMap().value("list").toList().first().metaType().id(),
+                     QMetaType::Double);
+            QCOMPARE(nested.value.toMap().value("map").toMap().value("n").toDouble(), expected);
+        }
+        QCOMPARE(encodeJsonValue(stored).bytes, original);
+    }
+    void numericDestinationSafeguards() {
+        auto real = D::leaf(T::Real, 17); // Defaults/choices/bounds use the same domain.
+        real.minimum = 10;
+        real.maximum = 20u;
+        real.choices = {17u, 18.5};
+        ConfigSchema schema(D::group({{"n", real}}));
+        QVERIFY(schema.valid());
+        QCOMPARE(schema.defaults().value("n").metaType().id(), QMetaType::Double);
+        QVERIFY(schema.validate({"n"}, 17).ok());
+        QCOMPARE(real.validate(19).errors.first().code, QString("choice"));
+        real.choices.clear();
+        QCOMPARE(real.validate(21).errors.first().code, QString("range"));
+        for (const auto &wrong :
+             QList<QVariant>{QString("17"), true, QVariantMap{}, QVariantList{17}})
+            QVERIFY(!real.validate(wrong).ok());
+        for (const auto n :
+             {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()})
+            QVERIFY(!real.validate(n).ok());
+        QVERIFY(!real.validate(decodeJsonValue("1e400").value).ok());
+        QVERIFY(!D::leaf(T::Integer, 0).validate(17.0).ok());
+        QVERIFY(!D::leaf(T::SafeInteger, 0).validate(17.5, {}, D::Format::Qml).ok());
+        QVERIFY(!D::leaf(T::SafeInteger, 0).validate(qint64(9007199254740992LL)).ok());
+        QVERIFY(!D::leaf(T::UnsignedInteger, quint64(0)).validate(qint64(-1)).ok());
+        QVERIFY(!D::leaf(T::Integer, 0).validate(17, {}, D::Format::Qml).ok());
+        const auto atom = decodeJsonValue("9007199254740993").value;
+        QVERIFY(!atom.value<ConfigNumber>().exactPresentation());
+        const auto integer = D::leaf(T::Integer, 0).validate(atom);
+        QVERIFY(integer.ok());
+        QCOMPARE(integer.value.toLongLong(), 9007199254740993LL);
+        QVERIFY(D::leaf(T::Real, 0.0).validate(atom).ok());
+        QCOMPARE(encodeJsonValue(atom).bytes, QByteArray("9007199254740993"));
+        const auto zero = D::leaf(T::Real, 0.0).validate(-0.0);
+        QVERIFY(zero.ok() && std::signbit(zero.value.toDouble()));
+    }
     void unknownNumericPresentationIsLossless() {
         for (const auto &text : {"123", "1.25", "-0", "123.00", "1.25e2", "9007199254740992"}) {
             const auto number = *ConfigNumber::fromJson(text);

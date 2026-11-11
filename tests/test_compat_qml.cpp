@@ -55,15 +55,26 @@ class CompatibilityQmlTest : public QObject {
 private slots:
     void boundConsumer_data() {
         QTest::addColumn<int>("crossSchedule");
+        QTest::addColumn<QString>("numberLeg");
+        QTest::addColumn<QString>("numberMode");
+        if (QString(COMPAT_FIXTURE).endsWith("tst_overlay_number.qml")) {
+            for (const auto *leg : {"integer", "fraction", "json", "absent", "string"})
+                for (const auto *mode : {"live", "editor", "view"})
+                    QTest::newRow(qPrintable(QString("%1-%2").arg(leg, mode)))
+                        << 0 << QString::fromLatin1(leg) << QString::fromLatin1(mode);
+            return;
+        }
         if (QString(COMPAT_FIXTURE).endsWith("tst_source_events.qml")) {
-            QTest::newRow("back-to-back") << 0;
-            QTest::newRow("80ms-gap") << 80;
-            QTest::newRow("watch-separated") << -1;
+            QTest::newRow("back-to-back") << 0 << QString() << QString();
+            QTest::newRow("80ms-gap") << 80 << QString() << QString();
+            QTest::newRow("watch-separated") << -1 << QString() << QString();
         } else
-            QTest::newRow("default") << 0;
+            QTest::newRow("default") << 0 << QString() << QString();
     }
     void boundConsumer() {
         QFETCH(int, crossSchedule);
+        QFETCH(QString, numberLeg);
+        QFETCH(QString, numberMode);
         QTemporaryDir dir;
         compat::put(dir.filePath("legacy.json"),
                     "{\"oldCount\":7,\"a\":1,\"b\":2,\"wide\":18446744073709551615}");
@@ -74,6 +85,15 @@ private slots:
         const bool liveOverlay = QString(COMPAT_FIXTURE).endsWith("tst_live_overlay.qml");
         const bool draftPreview = QString(COMPAT_FIXTURE).endsWith("tst_draft_preview.qml");
         const bool draftRetry = QString(COMPAT_FIXTURE).endsWith("tst_draft_retry.qml");
+        const bool overlayNumber = QString(COMPAT_FIXTURE).endsWith("tst_overlay_number.qml");
+        const QByteArray numberBytes =
+            "{\"rows\":[{\"id\":\"selected\",\"instanceSettings\":{\"threshold\":17,\"hide\":false}"
+            ",\"opaque\":{\"keep\":true}}]}";
+        if (overlayNumber) {
+            compat::put(dir.filePath("base.json"), "{}");
+            compat::put(dir.filePath("owner.json"),
+                        numberLeg == "json" ? numberBytes : QByteArray("{}"));
+        }
         if (draftRetry)
             compat::put(dir.filePath("user.json"),
                         "{\"settings\":{\"label\":\"before\"},\"opaque\":{\"keep\":true}}");
@@ -119,6 +139,10 @@ private slots:
         engine.addImportPath(QML_IMPORT_ROOT);
         QQmlComponent component(&engine, QUrl::fromLocalFile(COMPAT_FIXTURE));
         QVariantMap initial{{"directory", dir.path()}};
+        if (overlayNumber) {
+            initial["leg"] = numberLeg;
+            initial["mode"] = numberMode;
+        }
         if (sourceEvents)
             initial["crossSchedule"] = crossSchedule;
         std::unique_ptr<QObject> root(component.createWithInitialProperties(initial));
@@ -253,6 +277,11 @@ private slots:
                                   qPrintable(root->property("stage").toString()), 10000);
         QCOMPARE(root->property("failure").toString(), QString());
         QVERIFY(root->property("finished").toBool());
+        if (overlayNumber) {
+            QCOMPARE(compat::bytes(dir.filePath("base.json")), QByteArray("{}"));
+            QCOMPARE(compat::bytes(dir.filePath("owner.json")),
+                     numberLeg == "json" ? numberBytes : QByteArray("{}"));
+        }
         if (strictEmpty || overlay || pattern || recordList || unknownData || pendingRebase ||
             sharedParents || liveOverlay || draftPreview || draftRetry || valueCopy) {
             if (draftRetry) {
