@@ -300,6 +300,7 @@ ConfigResult ConfigWorker::resultFor(const ConfigCommand &command) const {
     result.storeId = m_options.storeId;
     result.operation = command.operation;
     result.inputPrefix = command.prefix;
+    result.evidence = command.preflightEvidence;
     return result;
 }
 bool ConfigWorker::inheritFailures(ConfigResult &result) const {
@@ -1286,7 +1287,8 @@ void ConfigWorker::armWatches() {
         if (!watched.contains(path))
             m_watcher->addPath(path);
 }
-bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
+bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command,
+                               QList<ConfigEvidenceReference> *evidence) {
     QMap<QString, ConfigBackendResult> reads;
     QList<ConfigError> acquisitionErrors;
     std::optional<ConfigResult> result;
@@ -1322,6 +1324,8 @@ bool ConfigWorker::reloadFiles(const std::optional<ConfigCommand> &command) {
     }
     const auto error = acceptFileObservations(reads, command, result ? &*result : nullptr, "read",
                                               command ? "reload" : "watch", acquisitionErrors);
+    if (result && evidence)
+        evidence->append(result->evidence);
     armWatches();
     return error.empty();
 }

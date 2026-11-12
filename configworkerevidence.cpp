@@ -102,11 +102,14 @@ QString ConfigWorker::retainObservation(const QString &id, const ConfigBackendRe
             if (pending.attemptKey == attemptKey &&
                 pending.observation.requestId == observation.requestId)
                 return drainEvidence(id, result);
-    observation.observationOrder = ++m_observationOrder;
     auto &queue = m_pendingEvidence[id];
     // Each acquisition boundary reserves its worst-case observation count before
     // reading/publishing. A transaction owns those slots until synchronous return.
-    Q_ASSERT(queue.size() < EvidenceBacklogLimit);
+    if (queue.size() >= EvidenceBacklogLimit) {
+        m_evidenceBlocked.insert(id);
+        return "evidence-backlog";
+    }
+    observation.observationOrder = ++m_observationOrder;
     queue.enqueue({std::move(observation), attemptKey});
     if (queue.size() == EvidenceBacklogLimit)
         m_evidenceBlocked.insert(id);

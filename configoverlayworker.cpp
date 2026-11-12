@@ -165,7 +165,8 @@ void ConfigWorker::overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransac
     }
     m_reloadSelection = paths;
     const bool preflight =
-        m_files.isEmpty() || reloadFiles(ConfigCommand{0, m_prefix, "reload", {}});
+        m_files.isEmpty() ||
+        reloadFiles(ConfigCommand{0, m_prefix, "reload", {}}, &t->preflightEvidence);
     m_reloadSelection.clear();
     if (!preflight) {
         t->error = "overlay-conflict";
@@ -336,7 +337,8 @@ void ConfigWorker::overlayContinue(const std::shared_ptr<ConfigOverlayTransactio
     } catch (...) {
         // Keep correlation until the continuation has completed or handed it
         // to persistence. A native predicate must never escape Qt's dispatcher.
-        const auto command = m_overlayCommands.take(t->token);
+        auto command = m_overlayCommands.take(t->token);
+        command.preflightEvidence.append(t->preflightEvidence);
         m_overlayTransactions.remove(t->token);
         t->cancelled = true;
         release(t);
@@ -349,6 +351,7 @@ void ConfigWorker::overlayContinue(const std::shared_ptr<ConfigOverlayTransactio
             result.error = {"worker-exception", {}, command.operation};
             if (t->operation == "overlayRefresh") {
                 result = m_overlayReceipts.take(t->editorId);
+                result.evidence.append(t->preflightEvidence);
                 result.refreshState = "stale";
             }
             fail("worker-exception");
@@ -363,6 +366,7 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         return;
     }
     auto command = m_overlayCommands.value(t->token);
+    command.preflightEvidence.append(t->preflightEvidence);
     auto result = resultFor(command);
     result.editorId = t->editorId;
     result.refreshState = "not_refreshed";
@@ -401,6 +405,7 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         t->error = p.error;
     if (refresh) {
         result = m_overlayReceipts.take(t->editorId);
+        result.evidence.append(t->preflightEvidence);
         result.refreshState = t->error.isEmpty() ? "current" : "stale";
         if (!t->error.isEmpty()) {
             p = {};

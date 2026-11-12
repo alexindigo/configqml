@@ -87,7 +87,8 @@ quint64 ConfigStore::importProfile(const QString &file, const QList<ConfigPath> 
                                    QObject *context, Callback callback) {
     return profileRequest("importProfile", {}, file, paths, context, std::move(callback));
 }
-void ConfigWorker::processGroup(const ConfigCommand &command) {
+void ConfigWorker::processGroup(const ConfigCommand &inputCommand) {
+    auto command = inputCommand;
     const auto input = command.input.value_or(ConfigInput{});
     const bool retry = command.applyAttempt && command.applyAttempt->expected;
     auto fences = input.fences;
@@ -100,7 +101,8 @@ void ConfigWorker::processGroup(const ConfigCommand &command) {
     QString error;
     if (!fences.isEmpty() && !m_files.isEmpty()) {
         m_reloadSelection = fences.keys();
-        const bool fresh = reloadFiles(ConfigCommand{0, m_prefix, "reload", {}});
+        const bool fresh =
+            reloadFiles(ConfigCommand{0, m_prefix, "reload", {}}, &command.preflightEvidence);
         m_reloadSelection.clear();
         if (!fresh)
             error = "draft-refresh";

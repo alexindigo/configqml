@@ -163,6 +163,13 @@ hide unretained evidence obligations of that save, even if no dirty setting
 intent remains after a confirmed publication. The pending FIFO is in memory;
 it is not crash-durable before the evidence write succeeds.
 
+Enqueue enforces the same 64-entry bound in Release even if an acquisition caller
+misses its reservation: it marks the source blocked and reports `evidence-backlog`
+without adding entry65. Existing queued observations are never evicted. Draft
+and overlay Retry receipts also carry references drained by their internal
+selected-source refresh, with the original observation metadata and ordering;
+those references are not lost in a temporary reload result.
+
 ## Opt-in deletion
 
 `ConfigJsonFile::deleteWhenEmpty` / `JsonFileSource.deleteWhenEmpty` defaults false

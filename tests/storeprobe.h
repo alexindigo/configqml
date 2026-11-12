@@ -14,6 +14,24 @@ public:
     static bool ordinaryOwnPublication(const ConfigWorker &worker, const QString &source) {
         return worker.m_ownPublications.value(source).contains(QString());
     }
+    static QString acquireEvidence(ConfigWorker &worker, const QString &source) {
+        const auto capacity = worker.prepareEvidence(source, 1);
+        if (!capacity.isEmpty())
+            return capacity;
+        auto *backend = worker.jsonBackend();
+        const auto id = backend->submit({ConfigBackendRequest::Operation::Read, source, {}, {}});
+        return worker.retainObservation(source, *backend->take(id), "read", "foreign");
+    }
+    static QString retainUnreservedEvidence(ConfigWorker &worker, const QString &source,
+                                            const ConfigBackendResult &read) {
+        return worker.retainObservation(source, read, "read", "foreign");
+    }
+    static qsizetype frozenIntents(const ConfigWorker &worker, const QString &source) {
+        qsizetype count = 0;
+        for (const auto &intent : worker.m_intents.value(source))
+            count += bool(intent.frozen);
+        return count;
+    }
     static QList<ConfigEvidenceObservation> pendingEvidence(const ConfigWorker &worker,
                                                             const QString &source) {
         QList<ConfigEvidenceObservation> result;

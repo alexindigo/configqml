@@ -69,6 +69,7 @@ struct ConfigCommand {
     QMap<ConfigPath, std::optional<QVariant>> overlayEdits;
     std::shared_ptr<const ConfigDraftPreview> preview;
     std::shared_ptr<ConfigApplyAttempt> applyAttempt;
+    QList<ConfigEvidenceReference> preflightEvidence;
 };
 struct ConfigPendingIntent {
     quint64 id = 0, input = 0;
@@ -188,7 +189,8 @@ private:
     static void recordPublication(ConfigResult &result, const QString &source,
                                   const ConfigBackendResult &outcome, bool published = true);
     static void finalizePublicationState(ConfigResult &result);
-    bool reloadFiles(const std::optional<ConfigCommand> &command = {});
+    bool reloadFiles(const std::optional<ConfigCommand> &command = {},
+                     QList<ConfigEvidenceReference> *evidence = nullptr);
     ConfigError acceptFileObservations(const QMap<QString, ConfigBackendResult> &reads,
                                        const std::optional<ConfigCommand> &command,
                                        ConfigResult *result, const QString &phase,
