@@ -55,12 +55,18 @@ signals:
 private:
     friend class ConfigQmlStore;
     friend class ConfigQmlOverlay;
+    friend class ConfigStoreTestAccess;
+    struct InstalledChange {
+        QList<ConfigPath> paths;
+        bool state = false;
+        bool empty() const { return paths.isEmpty() && !state; }
+    };
     std::unique_ptr<ConfigChangePublisher> m_changes;
     bool notifyValues(const QList<ConfigPath> &paths);
-    void notifyInstalled(bool refreshed);
+    void notifyInstalled(const InstalledChange &change);
     friend class ConfigStore;
     ConfigOverlayEditor(ConfigStore *store, const ConfigOverlayPresentation &presentation);
-    void install(const ConfigOverlayPresentation &presentation, bool notify = true);
+    InstalledChange install(const ConfigOverlayPresentation &presentation, bool notify = true);
     quint64 request(const QString &operation, QObject *context, ConfigStore::Callback callback);
     ConfigRequestHandle writeLive(const ConfigPath &path, const std::optional<QVariant> &value);
     QPointer<ConfigStore> m_store;

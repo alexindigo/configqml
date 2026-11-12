@@ -202,9 +202,20 @@ ConfigRequestHandle ConfigOverlayEditor::writeLive(const ConfigPath &path,
         boundary.invoke([&] { emit stateChanged(); });
     return {id, sequence, true, {}};
 }
-void ConfigOverlayEditor::install(const ConfigOverlayPresentation &p, bool notify) {
+ConfigOverlayEditor::InstalledChange
+ConfigOverlayEditor::install(const ConfigOverlayPresentation &p, bool notify) {
+    InstalledChange change;
     if (m_status == Status::Closed)
-        return;
+        return change;
+    const auto token = m_placementToken;
+    const auto wasDirty = dirty();
+    const auto conflicted = m_conflicted;
+    const auto status = m_status;
+    const auto error = m_error;
+    QMap<ConfigPath, QVariant> before;
+    if (p.refreshed)
+        for (const auto &path : m_schema.leaves())
+            before[path] = value(path);
     if (!p.placementToken.isEmpty())
         m_placementToken = p.placementToken;
     if (p.dirtyKnown)
@@ -232,16 +243,22 @@ void ConfigOverlayEditor::install(const ConfigOverlayPresentation &p, bool notif
         m_error.clear();
         m_status = Status::Ready;
     }
-    if (notify &&
-        ConfigChangePublisher::prepare(
-            this, {{m_changes.get(), p.refreshed ? m_schema.leaves() : QList<ConfigPath>{}}}))
-        notifyInstalled(p.refreshed);
+    for (auto it = before.cbegin(); it != before.cend(); ++it)
+        if (it.value() != value(it.key()))
+            change.paths.append(it.key());
+    change.state = !change.paths.isEmpty() || token != m_placementToken || wasDirty != dirty() ||
+                   conflicted != m_conflicted || status != m_status || error != m_error;
+    if (notify && !change.empty() &&
+        ConfigChangePublisher::prepare(this, {{m_changes.get(), change.paths}}))
+        notifyInstalled(change);
+    return change;
 }
-void ConfigOverlayEditor::notifyInstalled(bool refreshed) {
+void ConfigOverlayEditor::notifyInstalled(const InstalledChange &change) {
     ConfigConsumerGuard boundary(this);
-    if (refreshed && !boundary.invoke([&] { emit valuesChanged(m_schema.leaves()); }))
+    if (!change.paths.isEmpty() && !boundary.invoke([&] { emit valuesChanged(change.paths); }))
         return;
-    boundary.invoke([&] { emit stateChanged(); });
+    if (change.state)
+        boundary.invoke([&] { emit stateChanged(); });
 }
 void ConfigStore::receiveOverlay(const ConfigOverlayPresentation &p) {
     if (auto editor = m_overlays.value(p.editorId))
@@ -264,7 +281,7 @@ quint64 ConfigStore::overlayRequest(ConfigOverlayEditor *editor, const QString &
         operation == "overlayWrite" || operation == "save" || operation == "flush";
     if (command.conversionError.isEmpty() &&
         ((editor->m_mode == ConfigOverlayMode::Live) != liveOperation))
-        command.conversionError = "overlay-readonly";
+        command.conversionError = "overlay-mode";
     const bool retry = attempt && attempt->expected && operation == editor->m_admittedOperation &&
                        (operation == "overlayReset" || editor->m_edits == editor->m_admittedEdits);
     const bool changes =
@@ -281,8 +298,7 @@ quint64 ConfigStore::overlayRequest(ConfigOverlayEditor *editor, const QString &
         command.input = input;
         command.prefix = input.sequence;
     }
-    if (!m_accepting || (liveOperation && !command.conversionError.isEmpty()) ||
-        !m_owner->dispatch(command)) {
+    if (!m_accepting || !command.conversionError.isEmpty() || !m_owner->dispatch(command)) {
         ConfigResult result;
         result.requestId = id;
         result.storeId = m_storeId;
@@ -310,7 +326,10 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
                                      ConfigStore::Callback callback) {
     if (!m_store)
         return 0;
-    const bool active = m_mode == ConfigOverlayMode::Editor && writable() && !busy() && ready();
+    const bool editorOperation =
+        operation == "overlayApply" || operation == "overlayReset" || operation == "overlayDiscard";
+    const bool active =
+        m_mode == ConfigOverlayMode::Editor && editorOperation && !busy() && ready();
     std::shared_ptr<ConfigApplyAttempt> attempt;
     if (active && (operation == "overlayApply" || operation == "overlayReset")) {
         attempt = std::make_shared<ConfigApplyAttempt>();
@@ -327,6 +346,8 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
          callback = std::move(callback)](const ConfigResult &result) {
             if (!guard || guard->status() == Status::Closed)
                 return;
+            const auto wasBusy = guard->m_busy;
+            const auto wasConflicted = guard->m_conflicted;
             if (active)
                 guard->m_busy = false;
             if (attempt && attempt->admitted && result.status == "failed") {
@@ -342,9 +363,10 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
             if (result.error.code == "overlay-conflict")
                 guard->m_conflicted = true;
             ConfigConsumerGuard boundary(guard);
-            if (!ConfigChangePublisher::prepare(guard, {{guard->m_changes.get(), {}}}))
+            const bool changed = wasBusy != guard->m_busy || wasConflicted != guard->m_conflicted;
+            if (changed && !ConfigChangePublisher::prepare(guard, {{guard->m_changes.get(), {}}}))
                 return;
-            if ((active && !boundary.invoke([&] { emit guard->stateChanged(); })) ||
+            if ((changed && !boundary.invoke([&] { emit guard->stateChanged(); })) ||
                 !boundary.invoke([&] { emit guard->completed(result); }))
                 return;
             if (target && callback) {

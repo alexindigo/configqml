@@ -132,6 +132,190 @@ bool pendingBackend(ConfigStore &store) {
 class OverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void unrelatedPublicationsDoNotNotifyOverlays_data() {
+        QTest::addColumn<int>("mode");
+        for (int mode = 0; mode < 3; ++mode)
+            QTest::newRow(qPrintable(QString::number(mode))) << mode;
+    }
+    void unrelatedPublicationsDoNotNotifyOverlays() {
+        QFETCH(int, mode);
+        auto o = mainOptions();
+        const auto rows = *o.schema.descriptor({"rows"});
+        o.schema =
+            ConfigSchema(D::group({{"placements", D::group({{"rows", rows}})},
+                                   {"other", D::group({{"n", D::leaf(T::SafeInteger, 0)}})}}));
+        o.layers[0].sources[0].prefix = {"placements"};
+        o.layers[0].sources.append({"other", {"other"}, {}});
+        ConfigStore base(baseOptions()), main(o);
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        auto selected = selection(main, base.scope({"settings"}), ConfigOverlayMode(mode));
+        selected.ownerPath = {"placements", "rows"};
+        selected.ownerGeneration = main.info(selected.ownerPath).publicationGeneration;
+        auto *editor = open(main, selected);
+        QCOMPARE(compat::request(main, [&] { return main.flush(); }).status,
+                 QString("nothing_to_save"));
+        QSignalSpy state(editor, &ConfigOverlayEditor::stateChanged);
+        QSignalSpy values(editor, &ConfigOverlayEditor::valuesChanged);
+        int preparations = 0;
+        QObject preparationObserver;
+        ConfigStoreTestAccess::observeOverlayPreparation(*editor, &preparationObserver,
+                                                         [&](const auto &) { ++preparations; });
+        auto packets = std::make_shared<std::atomic_int>(0);
+        bool watching = false;
+        const auto id = editor->editorId();
+        ConfigStoreTestAccess::run(
+            main,
+            [id, packets](auto &worker) {
+                QObject::connect(
+                    &worker, &ConfigWorker::packetReady, &worker,
+                    [id, packets](const ConfigWorkerPacket &packet) {
+                        for (const auto &presentation : packet.overlays)
+                            if (presentation.editorId == id)
+                                ++*packets;
+                    },
+                    Qt::DirectConnection);
+            },
+            this, [&] { watching = true; });
+        QTRY_VERIFY(watching);
+        for (int n = 1; n <= 3; ++n) {
+            QCOMPARE(
+                compat::request(main, [&] { return main.setUser({"other", "n"}, n).requestId; })
+                    .status,
+                QString("accepted"));
+            QCOMPARE(compat::request(main, [&] { return main.save(); }).status, QString("saved"));
+            QCOMPARE(
+                compat::request(base, [&] { return base.setUser({"extra", "n"}, n).requestId; })
+                    .status,
+                QString("accepted"));
+        }
+        QCOMPARE(packets->load(), 0);
+        QCOMPARE(state.size(), 0);
+        QCOMPARE(values.size(), 0);
+        QCOMPARE(preparations, 0);
+        ConfigWorkerPacket duplicate;
+        ConfigOverlayPresentation same;
+        same.editorId = id;
+        same.placementToken = editor->placementToken();
+        same.dirtyKnown = ConfigOverlayMode(mode) == ConfigOverlayMode::Live;
+        same.dirty = editor->dirty();
+        duplicate.overlays.append(same);
+        ConfigStoreTestAccess::inject(main, duplicate);
+        QCOMPARE(state.size(), 0);
+        QCOMPARE(values.size(), 0);
+        QCOMPARE(preparations, 0);
+        same.refreshed = true;
+        for (const auto &path : editor->schema().leaves()) {
+            same.values[path] = editor->value(path);
+            same.baseValues[path] = base.value(ConfigPath{"settings"} + path);
+        }
+        duplicate.overlays = {same};
+        ConfigStoreTestAccess::inject(main, duplicate);
+        QCOMPARE(state.size(), 0);
+        QCOMPARE(values.size(), 0);
+        QCOMPARE(preparations, 0);
+        if (ConfigOverlayMode(mode) != ConfigOverlayMode::View) {
+            const auto local = editor->setValue({"volume"}, 7);
+            QVERIFY(local.accepted);
+            QVERIFY(editor->dirty());
+            QVERIFY(state.size() > 0 && values.size() > 0);
+            if (ConfigOverlayMode(mode) == ConfigOverlayMode::Live) {
+                QCOMPARE(compat::request(main, [&] { return local.requestId; }).status,
+                         QString("accepted"));
+                QCOMPARE(compat::request(main, [&] { return editor->save(); }).status,
+                         QString("saved"));
+                QTRY_VERIFY(!editor->dirty());
+            } else {
+                QCOMPARE(compat::request(main, [&] { return editor->apply(); }).status,
+                         QString("saved"));
+                QVERIFY(!editor->dirty());
+            }
+        }
+        state.clear();
+        values.clear();
+        QCOMPARE(compat::request(base,
+                                 [&] {
+                                     return base
+                                         .setUser({"settings", "object"},
+                                                  QVariantMap{{"a", 9}, {"b", 2}})
+                                         .requestId;
+                                 })
+                     .status,
+                 QString("accepted"));
+        if (ConfigOverlayMode(mode) == ConfigOverlayMode::Editor)
+            QTRY_VERIFY(editor->conflicted());
+        else {
+            QTRY_COMPARE(editor->value({"object"}).toMap()["a"].toInt(), 9);
+            QVERIFY(values.size() > 0);
+            QCOMPARE(values.last()[0].value<QList<ConfigPath>>(), QList<ConfigPath>{{"object"}});
+        }
+        QVERIFY(state.size() > 0);
+        const auto token = editor->placementToken();
+        state.clear();
+        auto replacement = main.value(selected.ownerPath).toList();
+        auto row = replacement[0].toMap();
+        row["id"] = QString("replaced");
+        replacement[0] = row;
+        QCOMPARE(compat::request(
+                     main, [&] { return main.setUser(selected.ownerPath, replacement).requestId; })
+                     .status,
+                 QString("accepted"));
+        QTRY_VERIFY(editor->placementToken() != token);
+        QVERIFY(state.size() > 0);
+        state.clear();
+        editor->detach();
+        QCOMPARE(state.size(), 1);
+        QCOMPARE(editor->status(), ConfigOverlayEditor::Status::Closed);
+    }
+    void operationModeErrors_data() {
+        QTest::addColumn<int>("mode");
+        QTest::addColumn<QString>("operation");
+        for (int mode = 0; mode < 3; ++mode)
+            for (const auto *operation : {"apply", "reset", "discard", "save", "flush"}) {
+                const bool liveOperation =
+                    QString(operation) == "save" || QString(operation) == "flush";
+                if ((mode == 1 && !liveOperation) || (mode == 2 && liveOperation))
+                    continue;
+                QTest::newRow(qPrintable(QString("%1-%2").arg(mode).arg(operation)))
+                    << mode << QString(operation);
+            }
+    }
+    void operationModeErrors() {
+        QFETCH(int, mode);
+        QFETCH(QString, operation);
+        ConfigStore base(baseOptions()), main(mainOptions());
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        auto *editor =
+            open(main, selection(main, base.scope({"settings"}), ConfigOverlayMode(mode)));
+        QSignalSpy state(editor, &ConfigOverlayEditor::stateChanged);
+        int preparations = 0;
+        QObject preparationObserver;
+        ConfigStoreTestAccess::observeOverlayPreparation(*editor, &preparationObserver,
+                                                         [&](const auto &) { ++preparations; });
+        const auto before = main.info({"rows"});
+        const auto inputs = main.inputs().size();
+        const auto result = compat::request(main, [&] {
+            if (operation == "apply")
+                return editor->apply();
+            if (operation == "reset")
+                return editor->resetOverrides();
+            if (operation == "discard")
+                return editor->discard();
+            if (operation == "save")
+                return editor->save();
+            return editor->flush();
+        });
+        QCOMPARE(result.status, QString("failed"));
+        QCOMPARE(result.error.code,
+                 mode == 0 ? QString("overlay-readonly") : QString("overlay-mode"));
+        QCOMPARE(main.inputs().size(), inputs);
+        QCOMPARE(main.info({"rows"}).intentRevision, before.intentRevision);
+        QCOMPARE(main.info({"rows"}).pathGeneration, before.pathGeneration);
+        QVERIFY(!editor->busy() && !editor->conflicted() && !editor->dirty());
+        QCOMPARE(state.size(), 0);
+        QCOMPARE(preparations, 0);
+    }
     void generationContinuationAcrossOwnSave_data() {
         QTest::addColumn<QString>("operation");
         QTest::addColumn<QString>("change");

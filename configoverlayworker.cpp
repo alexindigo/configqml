@@ -689,6 +689,7 @@ QString ConfigWorker::overlayPlacementToken(const QString &id, const ConfigOverl
 void ConfigWorker::overlayDetach(const QString &id) {
     m_applyCaptures.remove("overlay:" + id);
     m_overlayPlacements.remove(id);
+    m_overlayDelivered.remove(id);
     auto capture = m_overlayCaptures.take(id);
     m_overlaySubscriptions.remove(id + ":owner");
     if (capture.selection.base)

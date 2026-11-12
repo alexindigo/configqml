@@ -45,6 +45,8 @@ QtObject {
     property var editor: null
     property bool overlayChecking: false
     property bool applying: false
+    property bool quietChecking: false
+    property int quietSignals: 0
     readonly property var ownerValues: store.values
     readonly property var ownerRows: ready ? ownerValues.settings.rows : []
     readonly property bool ownerEnabled: ready ? ownerValues.settings.enabled : true
@@ -92,6 +94,7 @@ QtObject {
     property ConfigStore placements: ConfigStore {
         autoSave: false
         schema: ConfigSchema {
+            ConfigValue { key: "other"; valueType: ConfigValue.Integer; defaultValue: 0 }
             ConfigValue {
                 key: "rows"; valueType: ConfigValue.List; defaultValue: [{id: "x"}]
                 ConfigValue {
@@ -100,7 +103,8 @@ QtObject {
                 }
             }
         }
-        sources: [MemorySource { sourceId: "placements"; writable: true }]
+        sources: [MemorySource { sourceId: "placements"; writable: true },
+            MemorySource { layerId: "runtime"; sourceId: "runtime"; kind: MemorySource.Runtime; writable: false }]
     }
     property Connections scopeSignals: Connections {
         target: root.scope
@@ -137,15 +141,15 @@ QtObject {
     }
     property Connections viewSignals: Connections {
         target: root.view
-        function onStateChanged(): void { root.observeOverlay("view"); }
+        function onStateChanged(): void { root.overlayStateEvent("view"); }
     }
     property Connections liveSignals: Connections {
         target: root.live
-        function onStateChanged(): void { root.observeOverlay("live"); }
+        function onStateChanged(): void { root.overlayStateEvent("live"); }
     }
     property Connections editorSignals: Connections {
         target: root.editor
-        function onStateChanged(): void { root.observeOverlay("editor"); }
+        function onStateChanged(): void { root.overlayStateEvent("editor"); }
     }
     function check(ok: bool, message: string): bool {
         if (!ok && failure === "") failure = stage + ": " + message;
@@ -269,18 +273,48 @@ QtObject {
             else if (mode === "live") { live = result.editor; openOverlay("editor"); }
             else {
                 editor = result.editor;
-                overlayChecking = true;
-                stage = "editor-write";
-                editor.values.rows[0].compact = false;
-                editor.values.rows[0].art = true;
-                editor.values.enabled = true;
-                check(editorEnabled === true, "editor immediate bound input");
-                editor.apply(function(saved) {
-                    if (!check(saved.status === "saved" && saved.refreshState === "current", "editor Apply")) return;
-                    stage = "wait-editor";
-                    advanceOverlays();
-                });
+                checkUnrelatedOverlayDelivery();
             }
+        });
+    }
+    function overlayStateEvent(kind: string): void {
+        if (quietChecking) ++quietSignals;
+        observeOverlay(kind);
+    }
+    function checkUnrelatedOverlayDelivery(): void {
+        placements.flush(function() {
+            stage = "unrelated-overlay-publication";
+            quietSignals = 0;
+            quietChecking = true;
+            placements.setRuntime(["other"], 7, function(result) {
+                quietChecking = false;
+                if (!check(result.status === "accepted" && quietSignals === 0,
+                           "unrelated write emits zero overlay stateChanged")) return;
+                stage = "overlay-mode-errors";
+                editor.save(function(editorResult) {
+                    if (!check(editorResult.error.code === "overlay-mode", "editor save mode code")) return;
+                    live.apply(function(liveResult) {
+                        if (!check(liveResult.error.code === "overlay-mode", "live Apply mode code")) return;
+                        view.flush(function(viewResult) {
+                            if (check(viewResult.error.code === "overlay-readonly", "view read-only code"))
+                                editOverlay();
+                        });
+                    });
+                });
+            });
+        });
+    }
+    function editOverlay(): void {
+        overlayChecking = true;
+        stage = "editor-write";
+        editor.values.rows[0].compact = false;
+        editor.values.rows[0].art = true;
+        editor.values.enabled = true;
+        check(editorEnabled === true, "editor immediate bound input");
+        editor.apply(function(saved) {
+            if (!check(saved.status === "saved" && saved.refreshState === "current", "editor Apply")) return;
+            stage = "wait-editor";
+            advanceOverlays();
         });
     }
     function observeOverlay(kind: string): void {

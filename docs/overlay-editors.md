@@ -87,9 +87,9 @@ but ordinary `.__proto__` lookup accesses the wrapper's JavaScript prototype.
 
 | # | Surface | Behavior |
 |---|---|---|
-| 1 | `mode: "view"` | Read-only live namespace. Worker subscriptions refresh the current checked displayed address after base/owner changes. Missing/replaced placement gives Error/`overlay-identity`; base scope/owner closure gives Error/`overlay-owner`. Writes/unset/apply/reset/discard refuse `overlay-readonly`. |
-| 2 | `mode: "editor"` | Frozen base and unnormalized owning-leaf capture. Equal intent, ABA, raw invalid/masked input, inode/provenance change, reorder or list-policy remapping invalidates its fences. Dirty preview is retained on conflict. |
-| 3 | `mode: "live"` | Writable live namespace. Declared-leaf assignments and `unset` queue through owning-leaf admission without `overlay-busy`. Base/owner changes refresh like view mode. Missing/replaced placement gives Error/`overlay-identity`; scope/owner closure gives Error/`overlay-owner`. An errored live handle cannot retarget or resume. |
+| 1 | `mode: "view"` | Read-only live namespace. Worker subscriptions refresh the current checked displayed address after base/owner changes. Missing/replaced placement gives Error/`overlay-identity`; base scope/owner closure gives Error/`overlay-owner`. Writes/unset/apply/reset/discard/save/flush refuse `overlay-readonly`. |
+| 2 | `mode: "editor"` | Frozen base and unnormalized owning-leaf capture. Equal intent, ABA, raw invalid/masked input, inode/provenance change, reorder or list-policy remapping invalidates its fences. Dirty preview is retained on conflict. `save`/`flush` refuse `overlay-mode`; use Apply. |
+| 3 | `mode: "live"` | Writable live namespace. Declared-leaf assignments and `unset` queue through owning-leaf admission without `overlay-busy`. Base/owner changes refresh like view mode. Missing/replaced placement gives Error/`overlay-identity`; scope/owner closure gives Error/`overlay-owner`. An errored live handle cannot retarget or resume. Apply/reset/discard refuse `overlay-mode`. |
 
 Confirmed own save/readback alone does not invalidate an unchanged captured
 owner generation or frozen owner/base selection. Provenance still updates; real
@@ -125,7 +125,7 @@ It returns a Boolean ingress result. Groups cannot be assigned or unset.
 queued inputs, and return the normal save receipt. They never save the base.
 Autosave follows the owning store's policy. `dirty` includes pending local
 inputs and pending work on the selected owner source; `busy` stays false.
-Apply/reset/discard remain editor operations and refuse on a live handle.
+Apply/reset/discard remain editor operations and refuse `overlay-mode` on a live handle.
 Detach closes delivery as before; admitted writes are ordinary store intent.
 
 Open settles/preflights selected owner/base paths on their workers. The displayed
@@ -151,6 +151,19 @@ Handles expose read-only `editorId`, `values`, `ready`, `dirty`, `conflicted`,
 `completed(result)`. Operations return request IDs immediately and complete in the
 main store's existing order, after eligible cache installation, signal before
 detached callback. In editor mode, busy edits/apply/reset/discard refuse `overlay-busy`.
+
+Overlay publications are deltas. Unchanged token/dirty metadata and duplicate
+presentations do not prepare bindings or emit `stateChanged`. Refreshes notify
+only changed effective leaves; actual value, token, dirty, status, error or
+conflict changes still notify, as do busy transitions around editor operations.
+All overlays in a packet install before any binding or public handler runs.
+Unsupported mode operations complete with their error without introducing busy
+or conflict state. Completion delivery is independent of change notification.
+
+Create each base `scope` or `previewScope` once and keep the handle for that
+lifetime. Repeated calls allocate distinct parent-owned handles and register
+distinct publication consumers; do not call them in a reevaluating binding.
+See [scoped handles](editors-profiles.md#scoped-handles).
 
 `editorId` identifies the handle and stays constant. Read-only `placementToken`
 is a worker-owned, handle-local observation token for the selected raw row mapping

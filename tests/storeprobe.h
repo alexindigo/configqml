@@ -2,10 +2,15 @@
 #pragma once
 #include "configworker_p.h"
 #include "configshutdown_p.h"
+#include "configchange_p.h"
 
 namespace configqml {
 class ConfigStoreTestAccess {
 public:
+    static void observeOverlayPreparation(ConfigOverlayEditor &editor, QObject *context,
+                                          ConfigChangePublisher::Callback callback) {
+        editor.m_changes->add(context, std::move(callback));
+    }
     static void post(ConfigWorker &worker, const ConfigWorkerPacket &packet) {
         worker.post(packet);
     }

@@ -149,6 +149,14 @@ info, listModel, setUser, save, draft, scope and detach. Native draft paths rema
 absolute store paths, including when created by a scoped handle. Handle QObject
 parentage determines lifetime, independently of shared persistence ownership.
 
+Call `scope()` and `previewScope()` once and keep the returned handle. This
+applies to store, nested-handle and draft factories in native code and QML.
+Every call allocates a distinct parent-owned handle with its own publication
+registration; calls are not cached. Do not create handles from reevaluating
+bindings or repeat the factory on each write. Reuse the living handle until
+detach/closure or parent destruction, then create a new one if needed. Preview
+handles still close at the Apply/discard/destruction boundaries described above.
+
 ## Named raw profiles
 
 ```qml

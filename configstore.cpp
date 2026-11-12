@@ -453,7 +453,8 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
                 ingress.pendingState.clear();
             }
     ConfigConsumerGuard boundary(this);
-    QList<QPair<QPointer<ConfigOverlayEditor>, bool>> overlayNotifications;
+    QList<QPair<QPointer<ConfigOverlayEditor>, ConfigOverlayEditor::InstalledChange>>
+        overlayNotifications;
     QList<ConfigChangePublisher::Change> preparations{{m_changes.get(), changed}};
     for (const auto &p : packet.overlays) {
         if (packet.result && packet.result->operation == "openOverlay" &&
@@ -462,10 +463,11 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
             m_overlayPresentations[packet.result->requestId] =
                 std::make_shared<ConfigOverlayPresentation>(p);
         else if (auto editor = m_overlays.value(p.editorId)) {
-            editor->install(p, false);
-            overlayNotifications.append({editor, p.refreshed});
-            preparations.append({editor->m_changes.get(),
-                                 p.refreshed ? editor->schema().leaves() : QList<ConfigPath>{}});
+            const auto change = editor->install(p, false);
+            if (!change.empty()) {
+                overlayNotifications.append({editor, change});
+                preparations.append({editor->m_changes.get(), change.paths});
+            }
         }
     }
     if (packet.sourceStates)

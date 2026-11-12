@@ -374,7 +374,9 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
         state.editorId = it.key();
         state.placementToken = overlayPlacementToken(it.key(), it->selection);
         state.dirtyKnown = it->selection.mode == ConfigOverlayMode::Live;
-        state.dirty = m_dirty.contains(m_layers->info(it->selection.ownerPath).route.sourceId);
+        state.dirty = state.dirtyKnown &&
+                      m_dirty.contains(m_layers->info(it->selection.ownerPath).route.sourceId);
+        const auto metadata = qMakePair(state.placementToken, state.dirty);
         bool found = false;
         for (auto &presentation : m_overlayPackets)
             if (presentation.editorId == it.key()) {
@@ -383,8 +385,10 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
                 presentation.dirty = state.dirty;
                 found = true;
             }
-        if (!found)
+        if (!found && (!m_overlayDelivered.contains(it.key()) ||
+                       m_overlayDelivered.value(it.key()) != metadata))
             m_overlayPackets.append(state);
+        m_overlayDelivered[it.key()] = metadata;
     }
     packet.overlays = std::move(m_overlayPackets);
     m_overlayPackets.clear();
