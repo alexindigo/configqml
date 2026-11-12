@@ -2,8 +2,10 @@
 
 configqml 0.4.0 targets C++17 and Qt 6.12 on Linux. The initial verified platform
 is x86_64 Arch Linux. Before 1.0 the API/ABI may change; rebuild consumers when
-upgrading. CMake package version matching uses SameMinorVersion, and the shared
-libraries have SONAME major 0. `ConfigQml 1.0` is the QML import revision, not a
+upgrading. CMake package version matching uses SameMinorVersion. Before 1.0 each
+minor release has its own SONAME `so.0.<minor>`; consumers rebuild on minor bumps.
+For 0.5.0 this is `libconfigqml_core.so.0.5` and `libconfigqml.so.0.5`.
+`ConfigQml 1.0` is the QML import revision, not a
 claim that the library has reached stable version 1.0.
 
 ## Installed targets
@@ -28,6 +30,8 @@ include directory, so `#include <configstore.h>` works without manual paths.
 Both libraries install under GNUInstallDirs' library directory, and CMake package
 files under `${CMAKE_INSTALL_LIBDIR}/cmake/configqml`. The generated QML plugin,
 qmldir and qmltypes install under `${CONFIGQML_QML_INSTALL_DIR}/ConfigQml`.
+The Qt-loadable plugin is a MODULE, `libconfigqmlplugin.so`, linked to the
+versioned QML shared library; it retains Qt's plugin loader filename.
 The default QML directory retains Qt's QML-to-library relationship beneath the
 configured library directory. Override it with an ordinary command-line value
 such as `-DCONFIGQML_QML_INSTALL_DIR=imports/qml`.

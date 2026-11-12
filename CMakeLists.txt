@@ -13,6 +13,10 @@ set(_configqml_include_dir "${CMAKE_INSTALL_INCLUDEDIR}/configqml")
 set(_configqml_cmake_dir "${CMAKE_INSTALL_LIBDIR}/cmake/configqml")
 set(_configqml_data_dir "${CMAKE_INSTALL_DATADIR}/configqml")
 set(_configqml_license_dir "${CMAKE_INSTALL_DATADIR}/licenses/configqml")
+set(_configqml_soversion "${PROJECT_VERSION_MAJOR}")
+if(PROJECT_VERSION_MAJOR LESS 1)
+    set(_configqml_soversion "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
+endif()
 
 add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp configschema.h
     confignumber.cpp confignumber.h configdiagnostic.cpp
@@ -32,7 +36,7 @@ target_sources(configqml_core PRIVATE configoverlayeditor.h configoverlayeditor.
     configoverlay_p.h configoverlaypolicy.cpp configoverlayworker.cpp)
 add_library(configqml::core ALIAS configqml_core)
 set_target_properties(configqml_core PROPERTIES EXPORT_NAME core
-    VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR} INSTALL_RPATH "$ORIGIN")
+    VERSION ${PROJECT_VERSION} SOVERSION ${_configqml_soversion} INSTALL_RPATH "$ORIGIN")
 target_compile_definitions(configqml_core PRIVATE CONFIGQML_VERSION="${PROJECT_VERSION}")
 target_link_libraries(configqml_core PUBLIC Qt6::Core)
 target_include_directories(configqml_core PUBLIC
@@ -67,7 +71,7 @@ if(CONFIGQML_BUILD_QML)
     target_include_directories(configqml PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<INSTALL_INTERFACE:${_configqml_include_dir}>)
     target_compile_options(configqml PRIVATE -Wall -Wextra -Wpedantic)
-    set_target_properties(configqml PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR}
+    set_target_properties(configqml PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${_configqml_soversion}
         INSTALL_RPATH "$ORIGIN")
 
     # Retain Qt's QML-to-library relationship even with a custom GNU libdir.
