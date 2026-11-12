@@ -376,6 +376,8 @@ bool ConfigWorker::recoverOwnPublication(const QString &source, const ConfigBack
         retention = retainObservation(source, read, "readback", own ? "own" : "late",
                                       own ? own->origin : m_save, &m_saveResult);
     QString error = read.success ? QString() : read.error.code;
+    if (retention.isEmpty())
+        supersedeOrdinaryPublication(source, read);
     const ConfigSourcePreimage capture{m_saveRevisions.value(source), m_saveBytes.value(source)};
     const ConfigSourcePreimage observation{read.revision, read.bytes};
     const auto publications = m_ownPublications.value(source);
@@ -399,6 +401,8 @@ bool ConfigWorker::recoverOwnPublication(const QString &source, const ConfigBack
             {source, false, read.revision, "known", m_saveResult.error});
         return false;
     }
+    if (!m_ownPublications.contains(source))
+        return true; // Superseded PathIntent work keeps its original per-path baseline.
     ConfigJsonCodec codec(m_options.schema.diagnostics().at(m_routes.value(source).prefix));
     const auto raw = m_files.contains(source) ? codec.decode(read.bytes, source).raw
                                               : decodeMemoryValue(read.bytes);

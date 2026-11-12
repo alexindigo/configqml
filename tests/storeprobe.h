@@ -11,6 +11,9 @@ public:
     }
     static ConfigWorkerPacket publication(ConfigWorker &worker) { return worker.publish(); }
     static qsizetype evidenceBacklogLimit() { return ConfigWorker::EvidenceBacklogLimit; }
+    static bool ordinaryOwnPublication(const ConfigWorker &worker, const QString &source) {
+        return worker.m_ownPublications.value(source).contains(QString());
+    }
     static QList<ConfigEvidenceObservation> pendingEvidence(const ConfigWorker &worker,
                                                             const QString &source) {
         QList<ConfigEvidenceObservation> result;

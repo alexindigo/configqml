@@ -44,6 +44,25 @@ bool ConfigWorker::savePredecessor(const QString &source,
            (m_recoveryPreimages.contains(source) &&
             samePublicationBase(source, preimage, m_recoveryPreimages.value(source)));
 }
+void ConfigWorker::supersedeOrdinaryPublication(const QString &source,
+                                                const ConfigBackendResult &read) {
+    // An uncertainty witness classifies exact own output; it is not an extra
+    // conflict policy. Call only after retaining this successful observation.
+    if (!read.success || !m_files.contains(source) ||
+        m_files.value(source).conflictPolicy != ConfigConflictPolicy::PathIntent)
+        return;
+    auto found = m_ownPublications.find(source);
+    if (found == m_ownPublications.end())
+        return;
+    auto &publications = found.value();
+    const auto ordinary = publications.constFind(QString());
+    if (ordinary != publications.cend() &&
+        (ordinary->output.revision != read.revision || ordinary->output.bytes != read.bytes)) {
+        publications.remove(QString());
+        if (publications.isEmpty())
+            m_ownPublications.erase(found);
+    }
+}
 void ConfigWorker::advanceOwnPublications(const QString &source, const ConfigBackendResult &outcome,
                                           const QSet<quint64> &confirmedIntents) {
     auto found = m_ownPublications.find(source);

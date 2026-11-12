@@ -110,6 +110,13 @@ foreign sources without exposing uncertain own output as an external fact.
 Retry validates the causal capture, then executes normal publication/readback;
 only successful confirmation advances waiting own descendants and covers intent.
 
+For ordinary JSON PathIntent work, a successfully retained different observation
+supersedes the uncertain-output witness. Watch, reload and save-time recovery
+share that classification. Intent and its original per-path baseline remain:
+normal saves merge disjoint foreign changes or report `path-conflict` on overlap,
+not a permanent strict-preimage refusal. The foreign observation does not cover
+unsaved intent. Strict policies and retained-group recovery stay unchanged.
+
 ## Verification
 
 Native CTest covers ordered exact-prefix persistence, held effects/replies,

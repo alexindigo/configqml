@@ -159,6 +159,7 @@ private:
     bool savePredecessor(const QString &source, const ConfigSourcePreimage &preimage) const;
     void advanceOwnPublications(const QString &source, const ConfigBackendResult &outcome,
                                 const QSet<quint64> &confirmedIntents);
+    void supersedeOrdinaryPublication(const QString &source, const ConfigBackendResult &read);
     static constexpr qsizetype EvidenceBacklogLimit = 64;
     static constexpr qsizetype EvidencePublicationReserve = 8;
     struct PendingEvidence {

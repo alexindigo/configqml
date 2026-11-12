@@ -201,6 +201,13 @@ normal local-filesystem identity checks, not protection against privileged
 metadata forgery. Only changed values/provenance generate GUI deltas. Reloads
 overlay outstanding intent without replacing its original conflict baseline.
 
+A successfully retained foreign observation also releases a superseded ordinary
+PathIntent uncertain-output witness. It does not discard or confirm pending
+intent: the next save still merges per path against the original baseline.
+Disjoint foreign writes survive, overlaps report `path-conflict`, and resolving
+the overlap permits a later save. Strict policies and retained groups retain
+their strict uncertain-publication recovery behavior.
+
 `reload(callback)` explicitly reads the named file sources and publishes one
 coherent admitted generation. Results use operation reload and status reloaded
 or failed; they are not save receipts. Save statuses remain exactly saved,

@@ -63,6 +63,116 @@ struct DeploymentInput : QObject {
 class SourceEventsTest : public QObject {
     Q_OBJECT
 private slots:
+    void foreignSupersedesOrdinaryPathIntentRecovery_data() {
+        QTest::addColumn<int>("policy");
+        QTest::addColumn<bool>("retained");
+        QTest::addColumn<int>("discovery");
+        QTest::addColumn<bool>("overlap");
+        for (int policy = 0; policy < 3; ++policy)
+            for (bool retained : {false, true})
+                for (int discovery = 0; discovery < 3; ++discovery)
+                    for (bool overlap : {false, true})
+                        QTest::newRow(
+                            qPrintable(QString("policy-%1-retained-%2-discovery-%3-overlap-%4")
+                                           .arg(policy)
+                                           .arg(retained)
+                                           .arg(discovery)
+                                           .arg(overlap)))
+                            << policy << retained << discovery << overlap;
+    }
+    void foreignSupersedesOrdinaryPathIntentRecovery() {
+        QFETCH(int, policy);
+        QFETCH(bool, retained);
+        QFETCH(int, discovery);
+        QFETCH(bool, overlap);
+        QTemporaryDir dir;
+        const auto path = dir.filePath("user.json");
+        const QByteArray original = "{\"n\":0,\"other\":0,\"wide\":18446744073709551615}";
+        const QByteArray foreign =
+            overlap ? QByteArray("{\"n\":9,\"other\":7,\"wide\":18446744073709551615}")
+                    : QByteArray("{\"n\":0,\"other\":7,\"wide\":18446744073709551615}");
+        compat::put(path, original);
+        auto o = options(dir.path());
+        o.schema = ConfigSchema(
+            D::group({{"n", D::leaf(T::SafeInteger, 0)}, {"other", D::leaf(T::SafeInteger, 0)}}));
+        o.observedPaths = {{"n"}, {"other"}};
+        o.evidenceDirectory = dir.filePath("evidence");
+        o.jsonFiles[0].watchMode = discovery == 2 ? ConfigWatchMode::Live : ConfigWatchMode::Off;
+        o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy(policy);
+        auto once = std::make_shared<std::atomic_bool>(true);
+        o.fileFault = [once](const QString &phase, const QString &) {
+            return phase == "readback" && once->exchange(false) ? QString("readback-fault")
+                                                                : QString();
+        };
+        ConfigStore store(o);
+        DeploymentInput consumer(store);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        if (discovery != 2)
+            QCOMPARE(compat::request(store, [&] { return store.reload(); }).status,
+                     QString("reloaded"));
+        consumer.deployments.clear();
+        QString token;
+        if (retained)
+            token = compat::request(store, [&] {
+                        return store.retainGroup({"review", {{"n"}}, {{{"n"}, true, 1}}, {}});
+                    }).groupToken;
+        else
+            QVERIFY(store.setUser({"n"}, 1).accepted);
+        const auto failed = compat::request(
+            store, [&] { return retained ? store.saveGroup(token) : store.save(); });
+        QCOMPARE(failed.status, QString("failed"));
+        QCOMPARE(failed.publicationState, QString("uncertain"));
+        QCOMPARE(failed.error.code, QString("readback-fault"));
+        replace(path, foreign);
+        if (discovery == 1)
+            QCOMPARE(compat::request(store, [&] { return store.reload(); }).status,
+                     QString("reloaded"));
+        else if (discovery == 2)
+            QTRY_COMPARE(consumer.deployments.size(), 1);
+        if (discovery) {
+            QCOMPARE(consumer.deployments.size(), 1);
+            QCOMPARE(consumer.deployments.last().cause,
+                     discovery == 2 ? QString("watch") : QString("reload"));
+            QCOMPARE(store.value({"n"}).toInt(), 1); // Pending intent still masks the disk choice.
+            QCOMPARE(store.value({"other"}).toInt(), 7);
+        }
+        const auto next = compat::request(
+            store, [&] { return retained ? store.retryGroup(token) : store.save(); });
+        const bool pathIntent = policy == 0 && !retained;
+        if (!pathIntent) {
+            QCOMPARE(next.status, QString("failed"));
+            QCOMPARE(next.error.code, QString("source-preimage-conflict"));
+            QCOMPARE(compat::bytes(path), foreign);
+            return; // Existing strict and retained recovery contracts are unchanged.
+        }
+        QCOMPARE(next.status, overlap ? QString("failed") : QString("saved"));
+        if (overlap) {
+            QCOMPARE(next.error.code, QString("path-conflict"));
+            QCOMPARE(compat::bytes(path), foreign);
+        }
+        bool witnessed = true;
+        control(store, [&](auto &worker) {
+            witnessed = ConfigStoreTestAccess::ordinaryOwnPublication(worker, "user");
+        });
+        QVERIFY(!witnessed);
+        if (overlap) {
+            replace(path, "{\"n\":0,\"other\":7,\"wide\":18446744073709551615}");
+            QCOMPARE(compat::request(store, [&] { return store.save(); }).status, QString("saved"));
+        }
+        QCOMPARE(compat::request(store, [&] { return store.save(); }).status,
+                 QString("nothing_to_save"));
+        QCOMPARE(store.value({"n"}).toInt(), 1);
+        QCOMPARE(store.value({"other"}).toInt(), 7);
+        QVERIFY(compat::bytes(path).contains("18446744073709551615"));
+        QVERIFY(!store.failures().isEmpty());
+        QCOMPARE(store.failures().first().error.code, QString("readback-fault"));
+        auto restartOptions = o;
+        restartOptions.jsonFiles[0].watchMode = ConfigWatchMode::StartupSnapshot;
+        ConfigStore restart(restartOptions);
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value({"n"}).toInt(), 1);
+        QCOMPARE(restart.value({"other"}).toInt(), 7);
+    }
     void uncertainOwnEchoKeepsNewestChoice_data() {
         QTest::addColumn<int>("policy");
         QTest::addColumn<bool>("retained");

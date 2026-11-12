@@ -1347,9 +1347,11 @@ ConfigError ConfigWorker::acceptFileObservations(const QMap<QString, ConfigBacke
                     retainObservation(it.key(), read, phase, "own", own->origin, result);
                 if (!retained.isEmpty())
                     errors.append({retained, it.key(), "read", m_json->path(it.key())});
-                else
+                else {
+                    supersedeOrdinaryPublication(it.key(), read);
                     m_json->confirm(it.key(),
                                     read.revision); // Verified read identity, not a saved receipt.
+                }
                 // This acquired own version is not a new external disk choice.
                 // Keep pending intent, stopped attempts and admitted facts intact.
                 continue;
@@ -1365,6 +1367,8 @@ ConfigError ConfigWorker::acceptFileObservations(const QMap<QString, ConfigBacke
                                                 read.success ? "foreign" : "late", command, result);
         if (!retention.isEmpty() || !retained.isEmpty())
             error = {retained.isEmpty() ? retention : retained, it.key(), "read"};
+        else
+            supersedeOrdinaryPublication(it.key(), read);
         if (!read.revision.exists && !file.optional && cause != "preflight" && error.empty())
             error = {"required-file-missing", it.key(), "read"};
         if (!error.empty()) {
