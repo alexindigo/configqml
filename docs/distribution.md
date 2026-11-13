@@ -1,6 +1,6 @@
 # Installation and compatibility
 
-configqml 0.4.0 targets C++17 and Qt 6.12 on Linux. The initial verified platform
+configqml 0.5.0 targets C++17 and Qt 6.12 on Linux. The initial verified platform
 is x86_64 Arch Linux. Before 1.0 the API/ABI may change; rebuild consumers when
 upgrading. CMake package version matching uses SameMinorVersion. Before 1.0 each
 minor release has its own SONAME `so.0.<minor>`; consumers rebuild on minor bumps.
@@ -11,10 +11,10 @@ claim that the library has reached stable version 1.0.
 ## Installed targets
 
 ```cmake
-find_package(configqml 0.4.0 REQUIRED COMPONENTS Core)
+find_package(configqml 0.5.0 REQUIRED COMPONENTS Core)
 target_link_libraries(headless PRIVATE configqml::core)
 # For native QML integration instead:
-find_package(configqml 0.4.0 REQUIRED COMPONENTS Qml)
+find_package(configqml 0.5.0 REQUIRED COMPONENTS Qml)
 target_link_libraries(declarative PRIVATE configqml::configqml)
 ```
 
@@ -63,8 +63,14 @@ even when another configqml is installed alongside system Qt.
 
 ## Qt rebuild contract
 
-Only `confignamespace.cpp` uses QtCore private API (QMetaObjectBuilder). CMake
-requires exact Core/CorePrivate/Qml **6.12.0** and installs the recorded build
+Only `confignamespace.cpp` uses QtCore private API: `QMetaObjectBuilder` for
+dynamic namespace properties, plus `QtCore/private/qproperty_p.h` and the
+compatibility-bindable internals of `Q_OBJECT_COMPAT_PROPERTY` for checked
+binding writes. Its patched `QBindableInterface` relies on
+`_qt_property_m_value_offset()` layout. The exact-Qt pin covers both private
+surfaces, not just dynamic metadata; a Qt bump must revalidate namespace
+construction, binding setters and preparation/notification order together.
+CMake requires exact Core/CorePrivate/Qml **6.12.0** and installs the recorded build
 identity in `${CMAKE_INSTALL_DATADIR}/configqml/configqml-qt-build.txt`. Rebuild on Qt minor bumps;
 for a new Qt version first update and verify the exact adapter gate, rather than
 pretending a binary built for an old private ABI is compatible. A distribution's

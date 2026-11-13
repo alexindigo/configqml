@@ -63,16 +63,16 @@ timeout 1800 cmake --build core-consumer --parallel 2
 timeout 60 core-consumer/configqml-native
 ```
 
-Require `CONFIGQML_NATIVE_OK 0.4.0`, exit 0, no QtQml imported target or dependency.
+Require `CONFIGQML_NATIVE_OK 0.5.0`, exit 0, no QtQml imported target or dependency.
 BUILD_TESTING defaults off; packaging must not require Qt Test or Quick.
 
 ## Gate 3 — Arch package
 
-The host transport creates `qt6-configqml-0.4.0.tar.gz` from the release commit:
+The host transport creates `qt6-configqml-0.5.0.tar.gz` from the release commit:
 
 ```sh
-git archive --format=tar.gz --prefix=configqml-0.4.0/ \
-  --output=qt6-configqml-0.4.0.tar.gz <release-commit>
+git archive --format=tar.gz --prefix=configqml-0.5.0/ \
+  --output=qt6-configqml-0.5.0.tar.gz <release-commit>
 ```
 
 Archiving/delivery is read/copy work only. It delivers that archive and the
@@ -84,8 +84,8 @@ without a network fetch. In that guest directory:
 timeout 60 makepkg --printsrcinfo > generated.SRCINFO
 timeout 60 diff -u .SRCINFO generated.SRCINFO
 timeout 1800 makepkg --cleanbuild --noconfirm
-timeout 120 sudo pacman -U --noconfirm qt6-configqml-0.4.0-1-x86_64.pkg.tar.zst
-timeout 60 namcap PKGBUILD qt6-configqml-0.4.0-1-x86_64.pkg.tar.zst
+timeout 120 sudo pacman -U --noconfirm qt6-configqml-0.5.0-1-x86_64.pkg.tar.zst
+timeout 60 namcap PKGBUILD qt6-configqml-0.5.0-1-x86_64.pkg.tar.zst
 timeout 60 pacman -Qkk qt6-configqml
 env -u QML_IMPORT_PATH -u QML2_IMPORT_PATH -u LD_LIBRARY_PATH QT_FORCE_STDERR_LOGGING=1 \
   timeout 60 /usr/lib/qt6/bin/qml -a core ../source/examples/qml/Settings.qml
@@ -97,7 +97,7 @@ timeout 60 ldd ../package-native/configqml-native
 ```
 
 Require clean namcap output, 0 altered package files, `CONFIGQML_QML_OK` and
-`CONFIGQML_NATIVE_OK 0.4.0`, exit 0, with native libraries from `/usr/lib`.
+`CONFIGQML_NATIVE_OK 0.5.0`, exit 0, with native libraries from `/usr/lib`.
 Check package headers,
 CMake exports, libraries, QML metadata/plugin and both license texts. The external
 packaging checkout needs the published archive's real checksum before submission.
