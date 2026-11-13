@@ -3,10 +3,21 @@
 #include "configworker_p.h"
 #include "configshutdown_p.h"
 #include "configchange_p.h"
+#include "configrevision_p.h"
 
 namespace configqml {
 class ConfigStoreTestAccess {
 public:
+    static std::weak_ptr<ConfigFileDescriptor> pendingParentLease(const ConfigWorker &worker,
+                                                                  const QString &source,
+                                                                  const QString &group = {}) {
+        const auto witness =
+            (group.isEmpty() ? worker.m_pendingRevisions.value(source)
+                             : worker.m_groups.value(group).revisions.value(source))
+                .witness;
+        return witness && !witness->ownedParents.isEmpty() ? witness->ownedParents.first()
+                                                           : std::weak_ptr<ConfigFileDescriptor>{};
+    }
     static void observeOverlayPreparation(ConfigOverlayEditor &editor, QObject *context,
                                           ConfigChangePublisher::Callback callback) {
         editor.m_changes->add(context, std::move(callback));

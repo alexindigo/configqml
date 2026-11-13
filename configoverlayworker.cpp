@@ -75,6 +75,14 @@ QList<ConfigPath> ConfigWorker::commandPaths(const ConfigCommand &command) const
             paths.append(command.input->path);
         for (auto it = command.input->edits.cbegin(); it != command.input->edits.cend(); ++it)
             paths.append(it.key());
+        // Group preflight reads complete intersecting sources, including selected
+        // leaves with no edit. Reserve those reads before bypassing a live lease.
+        for (auto it = command.input->fences.cbegin(); it != command.input->fences.cend(); ++it) {
+            paths.append(it.key());
+            for (const auto &route : m_fileRoutes)
+                if (overlaps(it.key(), route.prefix))
+                    paths.append(route.prefix);
+        }
         return paths;
     }
     if (command.operation == "updateRecordListPolicy")
@@ -292,6 +300,7 @@ void ConfigWorker::overlayCommand(const ConfigCommand &command) {
         if (m_overlayCaptures.contains(command.editorId)) {
             t->original = m_overlayCaptures.value(command.editorId);
             t->selection = t->original->selection;
+            t->error = t->original->terminalError;
         } else
             t->error = "overlay-owner";
     }
@@ -431,6 +440,8 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
             p.conflicted = true;
             if (t->selection.mode != ConfigOverlayMode::Editor)
                 p.error = t->error;
+            if (t->selection.mode == ConfigOverlayMode::Live)
+                m_overlayCaptures[t->editorId].terminalError = t->error;
             m_overlayPackets.append(p);
         }
         release(t);
@@ -638,6 +649,8 @@ void ConfigWorker::overlayChanged(const QString &id, bool ownerChange) {
     if (!m_overlayCaptures.contains(id))
         return;
     const auto capture = m_overlayCaptures.value(id);
+    if (!capture.terminalError.isEmpty())
+        return;
     if (capture.selection.mode != ConfigOverlayMode::Editor) {
         ConfigCommand command;
         command.operation = "overlayView";

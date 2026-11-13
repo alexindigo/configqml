@@ -26,12 +26,18 @@ This is cooperative locking and identity checking, not universal filesystem CAS.
 
 Within one save, sibling strict routes may share newly created parent directories.
 The backend records only its own successful directory creations, with exact
-device/inode identities and open descriptors retained until that save settles.
+device/inode identities and open descriptors.
 Those witnesses can extend an earlier missing-parent chain for another route in
-the same save, including retained-group routes. A directory created by another
-writer, an existing directory, a replacement inode or a configured symlink change
-does not qualify. The allowance ends with the save; it is not a lifetime exemption
-for other captures or later requests. Both strict publication policies use this
+the same save, including retained-group routes. Before a failed save ends, only
+its attempted ordinary/frozen owner or retained group adopts those proven parent
+identities. Their immutable witnesses keep the corresponding descriptors alive
+through Retry, preventing inode recycling; settlement or group release reclaims
+them. A directory created by another writer, an existing directory, a replacement
+inode or a configured symlink change does not qualify. The creation allowance
+ends with the save; later requests must match their captured parent chain, not a
+store-lifetime exemption. Unattempted owners, even on the same file, receive no
+extension from a failed sibling attempt. Confirmed own publication can still
+advance their causal capture normally. Both strict publication policies use this
 same parent-identity owner; each file still locks, publishes and reads back on its
 own route, with truthful partial failure if a foreign parent change is detected.
 

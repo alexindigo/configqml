@@ -45,8 +45,13 @@ void ConfigWorker::checkApplyCaptures() {
         ++it;
     }
 }
-void ConfigWorker::prepareApplyConfirmation(const QString &source) {
-    const auto prefix = m_routes.value(source).prefix;
+void ConfigWorker::prepareApplyConfirmation(const QString &source,
+                                            const ConfigSourcePreimage *preflight) {
+    const auto route = m_routes.value(source);
+    const auto prefix = route.prefix;
+    const auto disk = m_diskLayers->source(route.layerId, source);
+    const auto fresh =
+        preflight ? ConfigJsonCodec().decode(preflight->bytes, source).raw : QVariantMap{};
     for (auto &capture : m_applyCaptures) {
         const auto witness = capture.witness.lock();
         if (!witness || !witness->valid)
@@ -54,10 +59,17 @@ void ConfigWorker::prepareApplyConfirmation(const QString &source) {
         for (auto it = capture.fences.cbegin(); it != capture.fences.cend(); ++it) {
             if (!startsWith(it.key(), prefix))
                 continue;
+            const auto relative = it.key().mid(prefix.size());
+            const auto before = disk ? valueAt(disk->raw, relative) : std::nullopt;
+            const auto after = valueAt(fresh, relative);
+            const bool samePreflight =
+                !preflight ||
+                (bool(before) == bool(after) &&
+                 (!before || encodeJsonValue(*before).bytes == encodeJsonValue(*after).bytes));
             if (m_pathIntents.value(it.key()) == it->intentRevision &&
                 m_pathGenerations.value(it.key()) == it->pathGeneration &&
                 m_contentRevisions.value(it.key()) == it->contentRevision &&
-                applySourceFacts(it.key()) == capture.sourceFacts.value(it.key()))
+                applySourceFacts(it.key()) == capture.sourceFacts.value(it.key()) && samePreflight)
                 capture.ownConfirmation.insert(it.key());
             else
                 witness->valid = false;

@@ -43,7 +43,7 @@ bool overlayPlacementMoved(const QVariant &before, const QVariant &after,
             const auto a = old.toList(), b = current.toList();
             const auto index = selector.index;
             if (index >= a.size() || index >= b.size())
-                return true;
+                return (index < a.size()) != (index < b.size());
             const auto tail = address.mid(depth + 1);
             const auto previous = withoutOverride(a[index], tail);
             const auto selected = withoutOverride(b[index], tail);

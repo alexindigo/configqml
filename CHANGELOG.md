@@ -39,6 +39,13 @@
 
 ### Fixed
 
+- Keep draft confirmation, whole-source preflight leases and terminal Live handles
+  from laundering foreign or replacement selections. Mixed ordinary/group uncertain
+  Retry retains causal roots; failed first saves retain their own parent identities,
+  and reload migrations use the freshly acquired full revision.
+- Keep absent-placement tokens stable and sanitize absolute override paths without
+  scope prefixes. Test probes retain asynchronous result storage, and permission
+  fault cases check whether DAC restrictions can actually be enforced.
 - Replace expanded public revision and projection-run identities with compact
   digests, preserving equality, ordering counters and deduplication semantics.
 - Materialize QML signal/callback metadata only when its fields are read, rather

@@ -138,13 +138,14 @@ private:
     QMap<QString, ConfigApplyCapture> m_applyCaptures;
     QVariantList applySourceFacts(const ConfigPath &path) const;
     void checkApplyCaptures();
-    void prepareApplyConfirmation(const QString &source);
+    void prepareApplyConfirmation(const QString &source,
+                                  const ConfigSourcePreimage *preflight = nullptr);
     ConfigApplyCapture *applyCapture(const ConfigCommand &command);
     void rememberApply(const ConfigCommand &command, const QList<ConfigPath> &paths,
                        const QMap<ConfigPath, std::optional<QVariant>> &edits);
     void reconcileApplyRejection(const ConfigCommand &command);
     struct OwnPublication {
-        ConfigSourcePreimage output, predecessor;
+        ConfigSourcePreimage output, predecessor, recoveryBase;
         ConfigCommand origin;
         QSet<quint64> intents;
     };
@@ -157,6 +158,8 @@ private:
                                                  const ConfigBackendResult &read) const;
     bool samePublicationBase(const QString &source, const ConfigSourcePreimage &a,
                              const ConfigSourcePreimage &b) const;
+    bool causalPublicationBase(const QString &source, const ConfigSourcePreimage &a,
+                               const ConfigSourcePreimage &b) const;
     bool savePredecessor(const QString &source, const ConfigSourcePreimage &preimage) const;
     void advanceOwnPublications(const QString &source, const ConfigBackendResult &outcome,
                                 const QSet<quint64> &confirmedIntents);
@@ -225,7 +228,7 @@ private:
     QList<ConfigOverlayPresentation> m_overlayPackets;
     QList<ConfigPath> m_reloadSelection;
     void profile(const ConfigCommand &command);
-    bool migrateSources();
+    bool migrateSources(QMap<QString, ConfigRevision> *sourceRevisions = nullptr);
     ConfigJsonBackend::Canonicalizer canonicalizer(const QString &id,
                                                    const std::optional<ConfigCommand> &command = {},
                                                    ConfigResult *result = nullptr);
@@ -252,7 +255,8 @@ private:
                                                const ConfigCommand &command) const;
     bool reserved(const ConfigPath &path) const;
     QStringList unresolvedGroups(quint64 prefix) const;
-    void confirmed(const QString &id, const QVariantMap &raw, const ConfigBackendResult &outcome);
+    void confirmed(const QString &id, const QVariantMap &raw, const ConfigBackendResult &outcome,
+                   const ConfigSourcePreimage *preflight = nullptr);
     void refreshDirty(const QString &id);
     void describeGroup(ConfigResult &result, const ConfigGroupInfo &info) const;
     bool recoverOwnPublication(const QString &source, const ConfigBackendResult &read);

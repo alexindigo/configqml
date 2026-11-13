@@ -63,6 +63,72 @@ struct DeploymentInput : QObject {
 class SourceEventsTest : public QObject {
     Q_OBJECT
 private slots:
+    void mixedUncertainPublicationOwners_data() {
+        QTest::addColumn<int>("policy");
+        QTest::addColumn<bool>("groupFirst");
+        for (int policy = 0; policy < 3; ++policy)
+            for (bool groupFirst : {false, true})
+                QTest::newRow(
+                    qPrintable(QString("policy-%1-groupFirst-%2").arg(policy).arg(groupFirst)))
+                    << policy << groupFirst;
+    }
+    void mixedUncertainPublicationOwners() {
+        QFETCH(int, policy);
+        QFETCH(bool, groupFirst);
+        QTemporaryDir dir;
+        compat::put(dir.filePath("user.json"), "{\"n\":0,\"other\":0}");
+        auto o = options(dir.path());
+        o.schema = ConfigSchema(
+            D::group({{"n", D::leaf(T::SafeInteger, 0)}, {"other", D::leaf(T::SafeInteger, 0)}}));
+        o.evidenceDirectory = dir.filePath("evidence");
+        o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy(policy);
+        auto faults = std::make_shared<std::atomic_int>(2);
+        o.fileFault = [faults](const QString &phase, const QString &) {
+            return phase == "readback" && faults->fetch_sub(phase == "readback" ? 1 : 0) > 0
+                       ? QString("readback-fault")
+                       : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QString token;
+        if (groupFirst) {
+            token = compat::request(store, [&] {
+                        return store.retainGroup({"mixed", {{"n"}}, {{{"n"}, true, 1}}, {}});
+                    }).groupToken;
+        } else
+            QVERIFY(store.setUser({"n"}, 1).accepted);
+        const auto first = compat::request(
+            store, [&] { return groupFirst ? store.saveGroup(token) : store.save(); });
+        QCOMPARE(first.error.code, QString("readback-fault"));
+        if (groupFirst)
+            QVERIFY(store.setUser({"other"}, 2).accepted);
+        else
+            token = compat::request(store, [&] {
+                        return store.retainGroup({"mixed", {{"n"}}, {{{"n"}, true, 2}}, {}});
+                    }).groupToken;
+        const auto second = compat::request(
+            store, [&] { return groupFirst ? store.save() : store.saveGroup(token); });
+        QCOMPARE(second.error.code, QString("readback-fault"));
+        QCOMPARE(store.groupInfo(token).state, QString("stopped"));
+        const auto retry = compat::request(store, [&] { return store.retryGroup(token); });
+        QCOMPARE(retry.status, QString("saved"));
+        QCOMPARE(store.groupInfo(token).state, QString("succeeded"));
+        QCOMPARE(compat::request(store, [&] { return store.releaseGroup(token); }).status,
+                 QString("released"));
+        const auto saved = compat::request(store, [&] { return store.save(); });
+        QVERIFY2(saved.status != "failed", qPrintable(saved.error.code));
+        bool ordinary = true;
+        control(store, [&](auto &worker) {
+            ordinary = ConfigStoreTestAccess::ordinaryOwnPublication(worker, "user");
+        });
+        QVERIFY(!ordinary);
+        auto clean = o;
+        clean.fileFault = {};
+        ConfigStore reopened(clean);
+        QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);
+        QCOMPARE(reopened.value({"n"}).toInt(), groupFirst ? 1 : 2);
+        QCOMPARE(reopened.value({"other"}).toInt(), groupFirst ? 2 : 0);
+    }
     void foreignSupersedesOrdinaryPathIntentRecovery_data() {
         QTest::addColumn<int>("policy");
         QTest::addColumn<bool>("retained");

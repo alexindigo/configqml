@@ -304,8 +304,9 @@ void ConfigWorker::recordPersistent(const ConfigInput &input, const ConfigLayers
                     input.kind == ConfigInput::Kind::Initialize, input.sequence, before);
 }
 void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
-                             const ConfigBackendResult &outcome) {
-    prepareApplyConfirmation(id);
+                             const ConfigBackendResult &outcome,
+                             const ConfigSourcePreimage *preflight) {
+    prepareApplyConfirmation(id, preflight);
     const auto route = m_routes.value(id);
     QMap<ConfigPath, QList<ConfigContribution>> before;
     for (const auto &path : m_options.schema.leaves())
@@ -381,11 +382,14 @@ bool ConfigWorker::recoverOwnPublication(const QString &source, const ConfigBack
     const ConfigSourcePreimage capture{m_saveRevisions.value(source), m_saveBytes.value(source)};
     const ConfigSourcePreimage observation{read.revision, read.bytes};
     const auto publications = m_ownPublications.value(source);
+    bool causal = false;
+    for (const auto &publication : publications)
+        causal |= causalPublicationBase(source, capture, publication.predecessor) ||
+                  causalPublicationBase(source, capture, publication.recoveryBase) ||
+                  causalPublicationBase(source, capture, publication.output);
     for (auto it = publications.cbegin(); it != publications.cend(); ++it) {
         const bool exactOwn =
             read.success && it->output.revision == read.revision && it->output.bytes == read.bytes;
-        const bool causal = samePublicationBase(source, capture, it->predecessor) ||
-                            samePublicationBase(source, capture, it->output);
         // Ordinary strict work also retains its existing exact-preimage restoration path.
         const bool restored =
             it.key().isEmpty() && read.success && samePublicationBase(source, capture, observation);

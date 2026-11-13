@@ -10,6 +10,7 @@
 #include <QSaveFile>
 #include <QElapsedTimer>
 #include <QScopeGuard>
+#include <QTemporaryFile>
 using namespace configqml;
 namespace {
 // A directory cannot be opened as an O_RDWR regular lock file, even with DAC override.
@@ -241,6 +242,9 @@ private slots:
                         !root->property("failure").toString().isEmpty());
             QCOMPARE(root->property("failure").toString(), QString());
             QVERIFY(QFile::setPermissions(dir.path(), QFile::ReadOwner | QFile::ExeOwner));
+            QTemporaryFile writable(dir.filePath("write-probe-XXXXXX"));
+            if (writable.open())
+                QSKIP("DAC override makes the directory permission fault unenforceable");
             QVERIFY(QMetaObject::invokeMethod(root.get(), "faultReady"));
             QTRY_VERIFY(root->property("action").toString() == "repair" ||
                         !root->property("failure").toString().isEmpty());

@@ -43,6 +43,7 @@ struct ConfigOverlayPresentation {
 };
 struct ConfigOverlayCapture {
     ConfigOverlaySelection selection;
+    QString terminalError;
     ConfigSchema schema{ConfigDescriptor::group({})};
     QVariantMap baseValues, overrides;
     QVariant ownerValue;

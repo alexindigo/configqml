@@ -1082,7 +1082,11 @@ void ConfigWorker::continueSave() {
                 m_saveRevisions[m_activeSource] = transaction.preflightBase->revision;
                 m_saveBytes[m_activeSource] = transaction.preflightBase->bytes;
             }
-            confirmed(m_activeSource, transaction.raw, outcome);
+            auto confirmationBase = transaction.preflightBase;
+            if (m_recoveryPreimages.contains(m_activeSource))
+                confirmationBase = m_recoveryPreimages.value(m_activeSource);
+            confirmed(m_activeSource, transaction.raw, outcome,
+                      confirmationBase ? &*confirmationBase : nullptr);
             const auto retention = observeSource(m_activeSource, outcome, {}, false);
             if (!retention.isEmpty()) {
                 m_saveResult.status = "failed";
@@ -1137,7 +1141,37 @@ void ConfigWorker::finalizePublicationState(ConfigResult &result) {
         result.publicationState = "partial";
 }
 void ConfigWorker::finishSave() {
+    // Transfer only this save's proven mkdir identities into the pending owners
+    // that need Retry. Their immutable witnesses retain the directory descriptors,
+    // not a backend-wide exemption for unrelated future captures.
+    const auto retainParents = [&](const QString &id, ConfigRevision &revision) {
+        if (m_saveIntents.contains(id) && m_files.contains(id) && m_json->m_saveDirectories)
+            revision = m_json->withOwnParents(revision, id, *m_json->m_saveDirectories);
+    };
+    if (m_save.groupToken.isEmpty()) {
+        for (auto it = m_pendingRevisions.begin(); it != m_pendingRevisions.end(); ++it)
+            retainParents(it.key(), it.value());
+        for (auto source = m_intents.begin(); source != m_intents.end(); ++source)
+            for (auto &intent : source.value())
+                if (intent.frozen)
+                    for (const auto &attempted : m_saveIntents.value(source.key()))
+                        if (attempted.id == intent.id)
+                            retainParents(source.key(), intent.frozen->revision);
+    }
+    for (auto &capture : m_groups)
+        if (capture.info.groupToken == m_save.groupToken)
+            for (auto it = capture.revisions.begin(); it != capture.revisions.end(); ++it)
+                retainParents(it.key(), it.value());
+    for (auto source = m_ownPublications.begin(); source != m_ownPublications.end(); ++source)
+        if (source->contains(m_save.groupToken)) {
+            auto &publication = (*source)[m_save.groupToken];
+            retainParents(source.key(), publication.predecessor.revision);
+            retainParents(source.key(), publication.recoveryBase.revision);
+        }
     m_json->endPublication();
+    m_saveRevisions.clear();
+    m_recoveryPreimages.clear();
+    m_saveIntents.clear();
     if (m_saveResult.status.isEmpty())
         m_saveResult.status = m_savePublished ? "saved" : "nothing_to_save";
     if (m_saveResult.status != "failed" && m_save.groupToken.isEmpty() &&
@@ -1344,6 +1378,7 @@ ConfigError ConfigWorker::acceptFileObservations(const QMap<QString, ConfigBacke
     QList<ConfigError> errors = acquisitionErrors;
     QMap<QString, QList<ConfigSource>> replacements, diskReplacements;
     QMap<QString, ConfigSource> admitted;
+    QMap<QString, ConfigRevision> admittedRevisions;
     bool changed = false;
     bool ownObserved = false;
     for (auto it = reads.cbegin(); it != reads.cend(); ++it) {
@@ -1395,6 +1430,7 @@ ConfigError ConfigWorker::acceptFileObservations(const QMap<QString, ConfigBacke
             continue;
         }
         auto source = *current;
+        QMap<QString, ConfigRevision> sourceRevisions{{it.key(), read.revision}};
         source.raw = decoded.raw;
         source.bytes = read.bytes;
         source.revision = read.revision.token;
@@ -1419,7 +1455,7 @@ ConfigError ConfigWorker::acceptFileObservations(const QMap<QString, ConfigBacke
                                      ConfigAdmissionPolicy::FieldFallback,
                                      {source},
                                      m_routes.contains(it.key())}};
-                const bool migrated = migrateSources();
+                const bool migrated = migrateSources(&sourceRevisions);
                 if (migrated)
                     source = m_options.layers.first().sources.first();
                 else
@@ -1432,6 +1468,7 @@ ConfigError ConfigWorker::acceptFileObservations(const QMap<QString, ConfigBacke
             }
         }
         admitted[it.key()] = source;
+        admittedRevisions[it.key()] = sourceRevisions.value(it.key());
         diskReplacements[route.layerId].append(source);
         for (const auto &edit : pendingEdits(it.key()))
             applyFileEdit(source.raw, edit);
@@ -1481,7 +1518,7 @@ ConfigError ConfigWorker::acceptFileObservations(const QMap<QString, ConfigBacke
             *m_layers = std::move(*candidate);
         }
         for (auto it = admitted.cbegin(); it != admitted.cend(); ++it) {
-            const auto revision = reads.value(it.key()).revision;
+            const auto revision = admittedRevisions.value(it.key());
             m_json->confirm(it.key(), revision);
             if (!m_dirty.contains(it.key()))
                 m_baselines[it.key()] = it->raw;

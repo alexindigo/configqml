@@ -110,6 +110,15 @@ foreign sources without exposing uncertain own output as an external fact.
 Retry validates the causal capture, then executes normal publication/readback;
 only successful confirmation advances waiting own descendants and covers intent.
 
+When ordinary and retained attempts share a source, causally witnessed uncertain
+descendants move their pending-owner records to one exact output frontier. The
+records retain both the actual predecessor and verified recovery base. Recovery
+requires every unsettled owner to agree with the acquired output and a verified
+link from the retry capture; matching just one divergent owner is insufficient.
+This bookkeeping never settles a stopped group or covers an ordinary intent.
+Successful confirmation advances eligible frozen captures and retires an ordinary
+witness once its actual pending intent IDs are gone, including group confirmation.
+
 For ordinary JSON PathIntent work, a successfully retained different observation
 supersedes the uncertain-output witness. Watch, reload and save-time recovery
 share that classification. Intent and its original per-path baseline remain:

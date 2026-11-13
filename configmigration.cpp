@@ -4,13 +4,14 @@
 #include <QCryptographicHash>
 
 namespace configqml {
-bool ConfigWorker::migrateSources() {
+bool ConfigWorker::migrateSources(QMap<QString, ConfigRevision> *sourceRevisions) {
     if (!m_options.schema.valid() || !m_initializationError.isEmpty() ||
         m_options.schema.version() == 0)
         return m_initializationError.isEmpty();
     struct Migration {
         QString layer;
         ConfigSource original;
+        ConfigSourcePreimage preimage;
         QVariantMap transformed;
         int fromVersion;
     };
@@ -78,7 +79,13 @@ bool ConfigWorker::migrateSources() {
                 raw.remove("_configqmlVersion");
             }
             raw["_configqmlVersion"] = m_options.schema.version();
-            planned.append({layer.id, source, raw, version});
+            planned.append({layer.id,
+                            source,
+                            {sourceRevisions ? sourceRevisions->value(source.id)
+                                             : m_revisions.value(source.id),
+                             source.bytes},
+                            raw,
+                            version});
         }
     }
     // Backups retain exact original bytes and never overwrite conflicting evidence.
@@ -101,8 +108,7 @@ bool ConfigWorker::migrateSources() {
                 return finish(capacity, updated.id);
             const auto transaction = m_json->reconcile(
                 updated.id, migration.original.raw, {{{}, migration.transformed, false}},
-                ConfigSourcePreimage{m_revisions.value(updated.id), migration.original.bytes},
-                canonicalizer(updated.id, {}, &result));
+                migration.preimage, canonicalizer(updated.id, {}, &result));
             if (transaction.published)
                 m_unknownWarnings.append(transaction.warnings);
             for (const auto &observation : transaction.observations) {
@@ -125,6 +131,8 @@ bool ConfigWorker::migrateSources() {
             updated.revision = outcome.revision.token;
             m_baselines[updated.id] = transaction.raw;
             m_revisions[updated.id] = outcome.revision;
+            if (sourceRevisions)
+                (*sourceRevisions)[updated.id] = outcome.revision;
             m_sourceBytes[updated.id] = outcome.bytes;
         } else {
             // The memory backend's seed below is its initial confirmed publication.

@@ -97,17 +97,26 @@ ConfigRevision ConfigJsonBackend::withOwnParents(const ConfigRevision &revision,
     if (!witness || !target.error.empty() || witness->target != target.path)
         return result;
     const auto original = witness->parents.split(';');
+    auto parents = witness->ownedParents;
     QByteArray unowned;
     for (const auto &component : target.identity.split(';')) {
         if (component.isEmpty())
             continue;
-        if (!original.contains(component) && owned.directories.contains(component))
+        if (!original.contains(component) && owned.directories.contains(component)) {
+            parents.append(owned.directories.value(component));
             continue;
+        }
         unowned += component + ';';
     }
-    if (unowned == witness->parents)
+    if (unowned == witness->parents && target.identity != witness->parents) {
         result = fileRevision(revision.exists, witness->target, witness->stamp, witness->digest,
                               target.identity);
+        auto retained = std::make_shared<ConfigRevisionWitness>(*result.witness);
+        retained->ownedParents = std::move(parents);
+        retained->ownedParentBase =
+            witness->ownedParents.isEmpty() ? witness->parents : witness->ownedParentBase;
+        result.witness = std::move(retained);
+    }
     return result;
 }
 bool applyFileEdit(QVariantMap &raw, const ConfigFileEdit &edit) {

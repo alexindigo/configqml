@@ -1112,6 +1112,9 @@ private slots:
         result.publications.append(publication);
         QCOMPARE(schema.diagnostics().sanitize(result).publications[0].overriddenPaths,
                  (QList<ConfigPath>{{"private", "<redacted>"}}));
+        QCOMPARE(
+            schema.diagnostics().at({"private"}).sanitize(result).publications[0].overriddenPaths,
+            (QList<ConfigPath>{{"private", "<redacted>"}}));
     }
     void foreignDeletionAndStrictEmpty() {
         QFETCH(int, mode);

@@ -81,6 +81,84 @@ static ConfigStoreOptions options(const QString &directory = {}) {
 class EditorsTest : public QObject {
     Q_OBJECT
 private slots:
+    void reloadMigrationUsesFreshRevision_data() {
+        QTest::addColumn<int>("policy");
+        QTest::addColumn<bool>("fault");
+        for (int policy = 0; policy < 3; ++policy)
+            for (bool fault : {false, true})
+                QTest::newRow(qPrintable(QString("policy-%1-fault-%2").arg(policy).arg(fault)))
+                    << policy << fault;
+    }
+    void reloadMigrationUsesFreshRevision() {
+        QFETCH(int, policy);
+        QFETCH(bool, fault);
+        QTemporaryDir dir;
+        auto o = options(dir.path());
+        o.evidenceDirectory = dir.filePath("evidence");
+        for (auto &file : o.jsonFiles)
+            file.conflictPolicy = ConfigConflictPolicy(policy);
+        o.schema =
+            ConfigSchema(*o.schema.descriptor({}), 1, {{0, [](const QVariantMap &input) {
+                                                            auto raw = input;
+                                                            if (raw.contains("old"))
+                                                                raw["n"] = raw.take("old");
+                                                            return ConfigValueResult{raw, {}};
+                                                        }}});
+        auto fail = std::make_shared<std::atomic_bool>(fault);
+        o.fileFault = [fail](const QString &phase, const QString &) {
+            return phase == "write" && fail->exchange(false) ? QString("migration-fault")
+                                                             : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const QByteArray original = "{\"old\":9}";
+        writeFile(dir.filePath("b.json"), original);
+        if (fault) {
+            QCOMPARE(request(store, [&] { return store.reload(); }).status, QString("failed"));
+            QCOMPARE(store.value({"b", "n"}).toInt(), 0);
+            QCOMPARE(readFile(dir.filePath("b.json")), original);
+        }
+        QCOMPARE(request(store, [&] { return store.reload(); }).status, QString("reloaded"));
+        QCOMPARE(store.value({"b", "n"}).toInt(), 9);
+        QCOMPARE(readFile(dir.filePath("b.json.configqml-v0.bak")), original);
+        QVERIFY(readFile(dir.filePath("b.json")).contains("_configqmlVersion"));
+        QVERIFY(store.setUser({"b", "n"}, 11).accepted);
+        QCOMPARE(request(store, [&] { return store.save(); }).status, QString("saved"));
+        ConfigStore reopened(o);
+        QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);
+        QCOMPARE(reopened.value({"b", "n"}).toInt(), 11);
+    }
+    void foreignSelectedPathDuringPartialApply() {
+        QTemporaryDir dir;
+        writeFile(dir.filePath("a.json"), "{\"n\":1,\"local\":\"before\"}");
+        writeFile(dir.filePath("b.json"), "{\"n\":1}");
+        auto o = options(dir.path());
+        auto armed = std::make_shared<std::atomic_bool>(false);
+        o.fileFault = [armed](const QString &phase, const QString &file) {
+            if (phase != "parent-preflight")
+                return QString();
+            if (file.endsWith("/a.json") && armed->exchange(false))
+                writeFile(file, "{\"n\":9,\"local\":\"before\"}");
+            return file.endsWith("/b.json") ? QString("b-fault") : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *draft = store.draft({{"a", "n"}, {"a", "local"}, {"b", "n"}});
+        QVERIFY(draft->setValue({"a", "local"}, QString("edited")).accepted);
+        QVERIFY(draft->setValue({"b", "n"}, 2).accepted);
+        armed->store(true);
+        const auto partial = request(store, [&] { return draft->apply(); });
+        QCOMPARE(partial.error.code, QString("b-fault"));
+        QCOMPARE(store.value({"a", "n"}).toInt(), 9);
+        QVERIFY(draft->setValue({"a", "n"}, 77).accepted);
+        const auto retry = request(store, [&] { return draft->apply(); });
+        QCOMPARE(retry.error.code, QString("draft-conflict"));
+        QCOMPARE(store.value({"a", "n"}).toInt(), 9);
+        QVERIFY(draft->dirty());
+        ConfigStore reopened(options(dir.path()));
+        QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);
+        QCOMPARE(reopened.value({"a", "n"}).toInt(), 9);
+    }
     void openNumericDraftUsesDeclaredDomain() {
         QTemporaryDir dir;
         auto o = options(dir.path());
