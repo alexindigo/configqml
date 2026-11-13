@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configqmlstore.h"
 #include "configqmlvalue.h"
+#include "configqmlevent_p.h"
 #include "configconsumer_p.h"
 #include "configstorehandle.h"
 #include "configchange_p.h"
@@ -36,7 +37,7 @@ void ConfigQmlStore::initializeHandle(ConfigStore *core, const ConfigPath &prefi
         connect(core, &ConfigStore::valuesChanged, this, &ConfigQmlStore::settingValuesChanged);
     connect(core, &ConfigStore::statusChanged, this, &ConfigQmlStore::statusChanged);
     connect(core, &ConfigStore::completed, this, [this](const ConfigResult &result) {
-        ConfigConsumerGuard(this).invoke([&] { emit completed(qmlResult(result, m_diagnostics)); });
+        ConfigConsumerGuard(this).invoke([&] { emit completed(resultMap(result)); });
     });
     const auto schema = preview ? draft->previewSchema() : core->schema();
     m_values = createConfigNamespace(this, *schema.descriptor(prefix), prefix, this);

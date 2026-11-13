@@ -154,8 +154,9 @@ when startup reading is off.
 Publication uses a unique 0600 staging file beside the resolved target, a complete-write
 loop, fsync, fresh identity check, atomic rename, parent-directory fsync and
 exact byte readback. Existing permission mode is preserved. New files stay 0600.
-The confirmed revision records the resolved target path, device/inode/size,
-nanosecond mtime/ctime and SHA256. Configured paths may contain symlinked files
+The confirmed revision's separate structural witness records the resolved target
+path, device/inode/size, nanosecond mtime/ctime and SHA256. Its public token is a
+compact opaque identity; see [events](events.md). Configured paths may contain symlinked files
 and parent directories, including relative links and absent final targets. The
 backend resolves the complete chain (bounded at 40 links), and staging, locking,
 rename and readback all use the same pinned resolved target. Publication leaves

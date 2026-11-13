@@ -22,7 +22,7 @@ add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp
     confignumber.cpp confignumber.h configdiagnostic.cpp
     configlayers.cpp configlayers.h configscope.cpp configscope.h
     configenvironment.cpp configenvironment.h configbackend.h configcodec.h
-    configmemorybackend.cpp configmemorybackend.h
+    configmemorybackend.cpp configmemorybackend.h configrevision.cpp configrevision_p.h
     configjsoncodec.cpp configjsoncodec.h configjsonbackend.cpp configjsonbackend.h
     configconsumer_p.h configresult.h configstore.h configstore.cpp configworker_p.h configworker.cpp
     configshutdown_p.h configshutdown.cpp)
@@ -65,7 +65,8 @@ if(CONFIGQML_BUILD_QML)
             configqmlstore.h configqmlstore.cpp configqmlvalue.h configqmlvalue.cpp
             confignamespace.cpp configfacade.h configfacade.cpp)
     target_sources(configqml PRIVATE configqmlmodel.h configqmlmigration.cpp configqmlhandles.cpp
-        configqmlcompat.cpp configqmlgroups.cpp configqmloverlay.h configqmloverlay.cpp)
+        configqmlcompat.cpp configqmlgroups.cpp configqmloverlay.h configqmloverlay.cpp
+        configqmlevent_p.h configqmlevent.cpp)
     add_library(configqml::configqml ALIAS configqml)
     target_link_libraries(configqml PUBLIC configqml::core Qt6::Qml PRIVATE Qt6::CorePrivate)
     target_include_directories(configqml PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -127,7 +128,7 @@ option(BUILD_TESTING "Build the configqml tests" OFF)
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 6.12 REQUIRED COMPONENTS Test Gui)
-    foreach(suite projections fallback_layers startup_policy record_list_policy record_list_containers unknown_data source_events retained_groups strict_conflicts pending_rebase evidence_backlog empty_shards overlay_editor string_pattern)
+    foreach(suite compact_events projections fallback_layers startup_policy record_list_policy record_list_containers unknown_data source_events retained_groups strict_conflicts pending_rebase evidence_backlog empty_shards overlay_editor string_pattern)
         add_executable(test_${suite} tests/test_${suite}.cpp)
         target_link_libraries(test_${suite} PRIVATE configqml::core Qt6::Test)
         add_test(NAME ${suite} COMMAND test_${suite})
@@ -173,6 +174,12 @@ if(BUILD_TESTING)
     add_test(NAME consumer_lifetime COMMAND test_consumer_lifetime)
     if(CONFIGQML_BUILD_QML)
         find_package(Qt6 6.12 REQUIRED COMPONENTS Quick)
+        find_package(Qt6QmlPrivate ${CONFIGQML_PRIVATE_QT_VERSION} EXACT REQUIRED)
+        add_executable(test_qml_compact_events tests/test_qml_compact_events.cpp)
+        add_dependencies(test_qml_compact_events configqmlplugin)
+        target_link_libraries(test_qml_compact_events PRIVATE configqml::configqml Qt6::Test Qt6::QmlPrivate)
+        target_compile_definitions(test_qml_compact_events PRIVATE QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}")
+        add_test(NAME qml_compact_events COMMAND test_qml_compact_events)
         add_executable(test_projection_bridge tests/test_projection_bridge.cpp)
         target_link_libraries(test_projection_bridge PRIVATE configqml::configqml Qt6::Test)
         add_test(NAME projection_bridge COMMAND test_projection_bridge)

@@ -63,6 +63,11 @@ std::optional<ConfigEvidenceReference> retainEvidence(const QString &root,
                                     {"role", o.role}});
     if (ok && o.bytesState == "available")
         ok = artifact(directory, "bytes", o.bytes);
+    const auto witness = o.revision.details();
+    if (ok && !witness.isEmpty()) {
+        const auto detail = encodeJsonValue(witness);
+        ok = detail.ok() && artifact(directory, "revision.json", detail.bytes);
+    }
     if (ok)
         ok = encoded.ok() && artifact(directory, "metadata.json", encoded.bytes);
     if (ok)

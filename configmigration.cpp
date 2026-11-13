@@ -101,10 +101,7 @@ bool ConfigWorker::migrateSources() {
                 return finish(capacity, updated.id);
             const auto transaction = m_json->reconcile(
                 updated.id, migration.original.raw, {{{}, migration.transformed, false}},
-                ConfigSourcePreimage{
-                    {migration.original.diskExists.value_or(migration.original.exists),
-                     migration.original.revision},
-                    migration.original.bytes},
+                ConfigSourcePreimage{m_revisions.value(updated.id), migration.original.bytes},
                 canonicalizer(updated.id, {}, &result));
             if (transaction.published)
                 m_unknownWarnings.append(transaction.warnings);

@@ -2,6 +2,7 @@
 #include "configqmlstore.h"
 #include "configqmloverlay.h"
 #include "configqmlvalue.h"
+#include "configqmlevent_p.h"
 #include "configstorehandle.h"
 #include "configconsumer_p.h"
 #include "configoverlay_p.h"
@@ -11,10 +12,11 @@
 #include <cmath>
 
 namespace configqml {
-QVariantMap ConfigQmlStore::resultMap(const ConfigResult &result) const {
-    auto map = qmlResult(result, m_diagnostics);
-    if (result.status == "opened" && m_overlayHandles.value(result.editorId))
-        map["editor"] = QVariant::fromValue<QObject *>(m_overlayHandles.value(result.editorId));
+QJSValue ConfigQmlStore::resultMap(const ConfigResult &result) const {
+    auto map = qmlResultEvent(scriptEngine(), result, m_diagnostics);
+    if (scriptEngine() && result.status == "opened" && m_overlayHandles.value(result.editorId))
+        map.setProperty("editor",
+                        scriptEngine()->newQObject(m_overlayHandles.value(result.editorId)));
     return map;
 }
 void ConfigQmlStore::initializeOverlaySignals() {

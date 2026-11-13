@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configqmlstore.h"
 #include "configqmlvalue.h"
+#include "configqmlevent_p.h"
 #include "configconsumer_p.h"
 #include <cmath>
 
@@ -97,46 +98,12 @@ void ConfigQmlStore::initializeCompatibilitySignals() {
     connect(m_core, &ConfigStore::sourceStatesChanged, this,
             [this] { ConfigConsumerGuard(this).invoke([&] { emit sourceStatesChanged(); }); });
     connect(m_core, &ConfigStore::sourceAccepted, this, [this](const ConfigSourceAccepted &event) {
-        QVariantList sources, paths, facts;
-        for (const auto &source : event.sources)
-            sources.append(QVariantMap{{"sourceId", source.first},
-                                       {"revision", QString::fromLatin1(source.second.token)}});
-        for (const auto &path : event.changedPaths)
-            paths.append(QVariant(path));
-        const auto schema = m_core->schema();
-        for (const auto &fact : event.facts) {
-            QVariantMap record{{"path", fact.path},
-                               {"present", fact.present},
-                               {"sourceId", fact.sourceId},
-                               {"revision", QString::fromLatin1(fact.revision.token)}};
-            if (fact.present)
-                record["value"] = qmlValue(*schema.descriptor(fact.path), fact.value);
-            facts.append(record);
-        }
-        const QVariantMap value{
-            {"eventId", event.eventId},
-            {"publicationGeneration", QString::number(event.publicationGeneration)},
-            {"inputPrefix", QString::number(event.inputPrefix)},
-            {"sources", sources},
-            {"changedPaths", paths},
-            {"origin", event.origin},
-            {"cause", event.cause},
-            {"facts", facts}};
+        const auto value = qmlAcceptedEvent(scriptEngine(), event, m_core->schema());
         ConfigConsumerGuard(this).invoke([&] { emit sourceAccepted(value); });
     });
     connect(m_core, &ConfigStore::projectionEffects, this,
             [this](const ConfigProjectionEffectsEvent &event) {
-                QVariantList effects;
-                for (const auto &effect : event.effects)
-                    effects.append(QVariantMap{{"effectId", effect.effectId},
-                                               {"version", double(effect.version)},
-                                               {"action", effect.action},
-                                               {"arguments", effect.arguments}});
-                const QVariantMap value{{"runId", event.runId},
-                                        {"projectionId", event.projectionId},
-                                        {"sourceId", event.sourceId},
-                                        {"revision", event.revision},
-                                        {"effects", effects}};
+                const auto value = qmlProjectionEvent(scriptEngine(), event);
                 ConfigConsumerGuard(this).invoke([&] { emit projectionEffects(value); });
             });
 }

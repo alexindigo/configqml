@@ -2,10 +2,12 @@
 #pragma once
 #include <QByteArray>
 #include <QMetaType>
+#include <QVariantMap>
 #include <QString>
 #include <QStringList>
 #include <QtGlobal>
 #include <optional>
+#include <memory>
 
 namespace configqml {
 struct ConfigEvidenceReference {
@@ -36,9 +38,12 @@ struct ConfigBackendCapabilities {
     enum class Affinity { SingleOwner };
     Affinity affinity = Affinity::SingleOwner;
 };
+struct ConfigRevisionWitness;
 struct ConfigRevision {
     bool exists = false;
-    QByteArray token;
+    QByteArray token; // Opaque identity only, never a serialized filesystem witness.
+    std::shared_ptr<const ConfigRevisionWitness> witness = {};
+    QVariantMap details() const; // Explicit inspection; empty for non-filesystem revisions.
     bool operator==(const ConfigRevision &other) const {
         return exists == other.exists && token == other.token;
     }

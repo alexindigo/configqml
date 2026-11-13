@@ -2,6 +2,7 @@
 #include "configlayers.h"
 #include "configjsoncodec.h"
 #include "configsourceprojection_p.h"
+#include "configrevision_p.h"
 #include <QSet>
 #include <QCryptographicHash>
 #include <QScopeGuard>
@@ -244,7 +245,7 @@ QList<ConfigDiagnostic> ConfigLayers::projectSources(const QList<LayerState> *pr
                 input.source = {original.id, layer.descriptor.id, original.prefix,
                                 original.diskExists.value_or(original.exists) ? "present"
                                                                               : "absent",
-                                QString::fromLatin1(original.revision.toHex())};
+                                QString::fromLatin1(compactIdentity(original.revision))};
                 input.schemaVersion = m_schema.version();
                 input.defaults =
                     valueAt(m_schema.defaults(), original.prefix).value_or(QVariantMap{}).toMap();
@@ -321,9 +322,9 @@ QList<ConfigDiagnostic> ConfigLayers::projectSources(const QList<LayerState> *pr
                     input.values = values.value.toMap();
                     input.compatibilityRaw = compatibility.value.toMap();
                     const auto run = QString::fromLatin1(
-                        encodeJsonValue(
-                            QVariantList{spec.projectionId, original.id, input.source.revision})
-                            .bytes.toHex());
+                        compactIdentity(encodeJsonValue(QVariantList{spec.projectionId, original.id,
+                                                                     input.source.revision})
+                                            .bytes));
                     if (!m_effectRuns.contains(run))
                         events.append({run, spec.projectionId, original.id, input.source.revision,
                                        output.effects});

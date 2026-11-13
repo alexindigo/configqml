@@ -90,6 +90,9 @@ success remains failed, with each route's actual state. Later saves, including
 autosave, attempt remaining source work against its capture without recapturing it;
 resolved publication failures do not poison later prefixes. Prior receipts remain
 evidence. Retained-group retries still require the explicit group API.
+QML event fields materialize lazily from immutable native snapshots; see
+[compact events](events.md) for identities, explicit metadata access and the
+0.5.0 development-build native ABI change.
 Rejected input receipts remain in failure history, but cannot mark later
 publishing saves failed. Only terminal worker loss propagates to queued saves.
 

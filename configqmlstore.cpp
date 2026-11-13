@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configqmlstore.h"
 #include "configqmlvalue.h"
+#include "configqmlevent_p.h"
 #include "configconsumer_p.h"
 #include "configqmlmodel.h"
 #include "configstorehandle.h"
@@ -203,35 +204,20 @@ void ConfigQmlStore::componentComplete() {
         ConfigConsumerGuard(this).invoke([&] { emit completed(resultMap(result)); });
     });
     connect(m_core, &ConfigStore::autoSaved, this, [this](const auto &result) {
-        ConfigConsumerGuard(this).invoke([&] { emit autoSaved(qmlResult(result, m_diagnostics)); });
+        ConfigConsumerGuard(this).invoke([&] { emit autoSaved(resultMap(result)); });
     });
     connect(m_core, &ConfigStore::sourceError, this, [this](const auto &input) {
         const auto error = m_diagnostics.sanitize(input);
-        const QVariantMap value{{"code", error.code},       {"sourceId", error.sourceId},
-                                {"phase", error.operation}, {"file", error.file},
-                                {"path", error.path},       {"line", error.line}};
+        const auto value = qmlErrorEvent(scriptEngine(), error);
         ConfigConsumerGuard(this).invoke([&] { emit sourceError(value); });
     });
     connect(m_core, &ConfigStore::sourceWarning, this, [this](const auto &input) {
         const auto warning = m_diagnostics.sanitize(input);
-        QVariantList evidence;
-        for (const auto &ref : warning.evidence)
-            evidence.append(
-                QVariantMap{{"evidenceId", ref.evidenceId},
-                            {"directory", ref.directory},
-                            {"sourceId", ref.sourceId},
-                            {"phase", ref.phase},
-                            {"role", ref.role},
-                            {"observationOrder", QString::number(ref.observationOrder)}});
-        const QVariantMap value{{"code", warning.code},       {"sourceId", warning.sourceId},
-                                {"phase", warning.operation}, {"file", warning.file},
-                                {"path", warning.path},       {"line", warning.line},
-                                {"evidence", evidence}};
+        const auto value = qmlErrorEvent(scriptEngine(), warning);
         ConfigConsumerGuard(this).invoke([&] { emit sourceWarning(value); });
     });
     connect(m_core, &ConfigStore::migrationCompleted, this, [this](const auto &result) {
-        ConfigConsumerGuard(this).invoke(
-            [&] { emit migrationCompleted(qmlResult(result, m_diagnostics)); });
+        ConfigConsumerGuard(this).invoke([&] { emit migrationCompleted(resultMap(result)); });
     });
     connect(m_core, &ConfigStore::inputRejected, this, [this](const auto &path, const auto &code) {
         ConfigConsumerGuard(this).invoke([&] { emit inputRejected(path, code); });
@@ -262,9 +248,7 @@ ConfigStore::Callback ConfigQmlStore::callback(const QJSValue &function) {
         if (auto *engine = guard->scriptEngine()) {
             ConfigConsumerGuard boundary(guard, engine);
             QJSValue returned;
-            if (!boundary.invoke([&] {
-                    returned = function.call({engine->toScriptValue(guard->resultMap(result))});
-                }))
+            if (!boundary.invoke([&] { returned = function.call({guard->resultMap(result)}); }))
                 return;
             if (returned.isError())
                 qWarning("configqml: completion callback threw");

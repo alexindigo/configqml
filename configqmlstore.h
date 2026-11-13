@@ -117,17 +117,17 @@ signals:
     void schemaChanged();
     void valuesChanged();
     void statusChanged();
-    void completed(const QVariantMap &result);
-    void autoSaved(const QVariantMap &result);
-    void sourceError(const QVariantMap &error);
-    void sourceWarning(const QVariantMap &warning);
+    void completed(const QJSValue &result);
+    void autoSaved(const QJSValue &result);
+    void sourceError(const QJSValue &error);
+    void sourceWarning(const QJSValue &warning);
     void inputRejected(const QStringList &path, const QString &code);
     void settingValuesChanged(const QList<configqml::ConfigPath> &paths);
     void draftStateChanged();
-    void migrationCompleted(const QVariantMap &result);
+    void migrationCompleted(const QJSValue &result);
     void sourceStatesChanged();
-    void sourceAccepted(const QVariantMap &event);
-    void projectionEffects(const QVariantMap &event);
+    void sourceAccepted(const QJSValue &event);
+    void projectionEffects(const QJSValue &event);
 
 private:
     friend class ConfigQmlOverlay;
@@ -140,7 +140,7 @@ private:
     void initializeNotifications();
     void registerNotifications(ConfigChangePublisher *publisher);
     void prepareState();
-    QVariantMap resultMap(const ConfigResult &result) const;
+    QJSValue resultMap(const ConfigResult &result) const;
     QList<ConfigPath> selectedPaths(const QVariantList &paths, bool *ok);
     void initializeHandle(ConfigStore *core, const ConfigPath &prefix, bool writable,
                           ConfigDraft *draft = nullptr, bool preview = false);

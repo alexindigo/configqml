@@ -48,7 +48,7 @@ public:
     Q_INVOKABLE void detach();
 signals:
     void stateChanged();
-    void completed(const QVariantMap &result);
+    void completed(const QJSValue &result);
     void inputRejected(const QStringList &path, const QString &code);
 
 private:

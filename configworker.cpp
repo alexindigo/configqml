@@ -1481,7 +1481,7 @@ ConfigError ConfigWorker::acceptFileObservations(const QMap<QString, ConfigBacke
             *m_layers = std::move(*candidate);
         }
         for (auto it = admitted.cbegin(); it != admitted.cend(); ++it) {
-            const ConfigRevision revision{it->exists, it->revision};
+            const auto revision = reads.value(it.key()).revision;
             m_json->confirm(it.key(), revision);
             if (!m_dirty.contains(it.key()))
                 m_baselines[it.key()] = it->raw;
