@@ -177,6 +177,7 @@ void ConfigWorker::overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransac
         reloadFiles(ConfigCommand{0, m_prefix, "reload", {}}, &t->preflightEvidence);
     m_reloadSelection.clear();
     if (!preflight) {
+        t->preflightFailed = true;
         t->error = "overlay-conflict";
         advance(t);
         return;
@@ -435,12 +436,20 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         result.status = "failed";
         result.error = {t->error, {}, command.operation};
         if (t->original && t->error != "overlay-busy" && t->error != "overlay-readonly") {
-            p = {};
+            const bool acquisitionFailed = t->preflightFailed && t->error == "overlay-conflict";
+            if (acquisitionFailed && liveWrite) {
+                // A refused write settles its own local preview, not newer input.
+                // The failed read supplied no replacement selection to retire.
+                p = presentation(t->editorId, *t->original);
+                p.refreshed = true;
+                p.coveredSequence = command.input->sequence;
+            } else
+                p = {};
             p.editorId = t->editorId;
             p.conflicted = true;
-            if (t->selection.mode != ConfigOverlayMode::Editor)
+            if (!acquisitionFailed && t->selection.mode != ConfigOverlayMode::Editor)
                 p.error = t->error;
-            if (t->selection.mode == ConfigOverlayMode::Live)
+            if (!acquisitionFailed && t->selection.mode == ConfigOverlayMode::Live)
                 m_overlayCaptures[t->editorId].terminalError = t->error;
             m_overlayPackets.append(p);
         }

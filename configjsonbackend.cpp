@@ -339,6 +339,11 @@ ConfigBackendResult ConfigJsonBackend::read(const QString &id, const QString &ex
     }
     r.bytes = bytes;
     r.bytesAvailable = true;
+    const auto injected = fault("read-validate", name);
+    if (!injected.isEmpty()) {
+        r.error = {injected, id, "read", name};
+        return r;
+    }
     const auto afterTarget = resolve(id);
     if (::fstat(fd.fd, &after) < 0) {
         r.error = {"concurrent-read", id, "read", name};

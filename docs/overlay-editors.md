@@ -91,6 +91,14 @@ but ordinary `.__proto__` lookup accesses the wrapper's JavaScript prototype.
 | 2 | `mode: "editor"` | Frozen base and unnormalized owning-leaf capture. Equal intent, ABA, raw invalid/masked input, inode/provenance change, reorder or list-policy remapping invalidates its fences. Dirty preview is retained on conflict. `save`/`flush` refuse `overlay-mode`; use Apply. |
 | 3 | `mode: "live"` | Writable live namespace. Declared-leaf assignments and `unset` queue through owning-leaf admission without `overlay-busy`. Base/owner changes refresh like view mode. Missing/replaced placement gives Error/`overlay-identity`; scope/owner closure gives Error/`overlay-owner`. An errored live handle cannot retarget or resume. Apply/reset/discard refuse `overlay-mode`. |
 
+A failed preflight read is not evidence that the selected placement or owner
+lifetime ended. View and live handles retain their last admitted presentation;
+the source error and failed write receipt remain visible, and a later accepted
+source publication can refresh the same selection. A failed Live write settles
+only its own local input sequence, preserving newer queued values. This does not
+relax identity/owner checks or allow an errored Live handle to resume: actual
+selection/lifetime loss remains terminal.
+
 Confirmed own save/readback alone does not invalidate an unchanged captured
 owner generation or frozen owner/base selection. Provenance still updates; real
 foreign/other-writer content, raw/mapping and metadata changes keep their fences.

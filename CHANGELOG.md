@@ -39,6 +39,9 @@
 
 ### Fixed
 
+- Failed overlay preflight reads no longer retire a still-living view or Live
+  selection. A later valid base/owner publication refreshes the last-good view;
+  rejected Live writes settle only their own sequence without erasing newer input.
 - Keep draft confirmation, whole-source preflight leases and terminal Live handles
   from laundering foreign or replacement selections. Mixed ordinary/group uncertain
   Retry retains causal roots; failed first saves retain their own parent identities,
