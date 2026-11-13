@@ -75,6 +75,74 @@ E copy(ConfigStore &store, const QString &name) {
 class ContainersTest : public QObject {
     Q_OBJECT
 private slots:
+    void addressedCommandsAfterOwnSave_data() {
+        QTest::addColumn<QString>("operation");
+        QTest::addColumn<bool>("foreign");
+        for (const auto *operation : {"ensure", "copy", "at", "transfer"})
+            for (bool foreign : {false, true})
+                QTest::newRow(qPrintable(QString("%1-foreign-%2").arg(operation).arg(foreign)))
+                    << QString::fromLatin1(operation) << foreign;
+    }
+    void addressedCommandsAfterOwnSave() {
+        QFETCH(QString, operation);
+        QFETCH(bool, foreign);
+        QTemporaryDir dir;
+        const auto file = dir.filePath("user.json");
+        compat::put(file, "{\"screens\":[{\"name\":\"DP-1\"}],\"global\":[{\"id\":\"clock\","
+                          "\"wide\":18446744073709551615}],\"wide\":18446744073709551615}");
+        ConfigStore store(options(dir.path()));
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        for (const auto &path : {ConfigPath{"screens"}, ConfigPath{"global"}})
+            QCOMPARE(compat::request(
+                         store, [&] { return store.setUser(path, store.value(path)).requestId; })
+                         .status,
+                     QString("accepted"));
+        auto source = endpoint(store, "global");
+        auto destination = endpoint(store, "left", address("new"), true);
+        E edit = insert();
+        QString policy = "left";
+        ConfigRecordListEditOptions edits{
+            destination.generation, destination.listAddress, {}, true};
+        if (operation == "copy" || operation == "transfer") {
+            policy = "global";
+            edit.op = operation == "copy" ? E::Op::Copy : E::Op::Transfer;
+            edit.from = source;
+            edit.destination = destination;
+            edits = {source.generation, {}, {}, false};
+        } else if (operation == "at") {
+            policy = "global";
+            edit.at = destination;
+            edits = {source.generation, {}, {}, false};
+        }
+        edits.edits = {edit};
+        QCOMPARE(compat::request(store, [&] { return store.save(); }).status, QString("saved"));
+        QCOMPARE(store.info({"screens"}).publicationGeneration, destination.generation);
+        QCOMPARE(store.info({"global"}).publicationGeneration, source.generation);
+        if (foreign) {
+            compat::put(file, "{\"screens\":[{\"name\":\"DP-2\"}],\"global\":[{\"id\":\"clock\","
+                              "\"wide\":18446744073709551615}],\"wide\":18446744073709551615}");
+            QCOMPARE(compat::request(store, [&] { return store.reload(); }).status,
+                     QString("reloaded"));
+        }
+        const auto result =
+            compat::request(store, [&] { return store.editRecordList(policy, edits); });
+        if (foreign) {
+            QCOMPARE(result.error.code, QString("list-edit-conflict"));
+            QCOMPARE(store.value({"screens"}).toList().size(), 1);
+        } else {
+            QCOMPARE(result.status, QString("admitted"));
+            const auto screens = store.value({"screens"}).toList();
+            QCOMPARE(screens.size(), 2);
+            QCOMPARE(screens.last().toMap().value("name").toString(), QString("new"));
+            QCOMPARE(screens.last().toMap().value("widgets").toMap().value("left").toList().size(),
+                     1);
+            QCOMPARE(compat::request(store, [&] { return store.save(); }).status, QString("saved"));
+            const auto raw = ConfigJsonCodec().decode(compat::bytes(file), "user").raw;
+            QCOMPARE(raw.value("wide").value<ConfigNumber>().token(),
+                     QString("18446744073709551615"));
+            QCOMPARE(raw.value("screens").toList().size(), 2);
+        }
+    }
     void matchAddressOwnsBorrowedStrings() {
         ConfigStore store(options());
         QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);

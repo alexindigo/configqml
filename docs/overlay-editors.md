@@ -32,15 +32,22 @@ main.openOverlay({
 ```
 
 The options are exactly the ten shown members; only `mode` is optional, default
-`"editor"`. Mode may also be `"view"`. The base must be a living scoped handle
+`"editor"`. Mode may also be `"view"` or `"live"`. The base must be a living scoped handle
 over a declared group. `ownerPath` selects an atomic List/Record/Map leaf and
-must be writable in editor mode. `entryPath` selects a record inside that leaf;
+must be writable in editor and live modes. `entryPath` selects a record inside that leaf;
 `identityPath` is nonempty and relative to the record, selecting a typed scalar.
 `overrideKey` is one nonempty opaque field name, including a permitted unknown
 record member. Unknown options or policies fail `overlay-options`; invalid
 scope/schema selection fails `overlay-selection`, mismatched identity
 `overlay-identity`. Conversion errors throw synchronously with `inputRejected`;
 semantic refusals complete asynchronously with a normal request ID/result.
+
+In view and live modes, `base` may also be `draft.previewScope(path)`. The worker
+combines current effective base values with that draft's checked edits before
+merging placement overrides. Editor mode rejects preview scopes. Successful
+draft Apply/discard or destruction closes existing preview scopes and produces
+Error/`overlay-owner`, never implicit retargeting. See
+[editors-profiles.md](editors-profiles.md#live-preview-views-050).
 
 Value paths are arrays of exactly `{key: string}` or `{index: integer}` segments.
 Indices are nonnegative safe integers; policy-only `{each:true}` is not an edit
@@ -76,12 +83,50 @@ data property explicitly, e.g. `Object.getOwnPropertyDescriptor(values.keyMap,
 "__proto__").value`. Qt's attached QVariantMap reference preserves that own key
 but ordinary `.__proto__` lookup accesses the wrapper's JavaScript prototype.
 
-## Live view versus frozen editor
+## Live namespaces versus frozen editor
 
 | # | Surface | Behavior |
 |---|---|---|
-| 1 | `mode: "view"` | Read-only live namespace. Worker subscriptions refresh the current checked displayed address after base/owner changes. Missing/replaced placement gives Error/`overlay-identity`; base scope/owner closure gives Error/`overlay-owner`. Writes/unset/apply/reset/discard refuse `overlay-readonly`. |
-| 2 | `mode: "editor"` | Frozen base and unnormalized owning-leaf capture. Equal intent, ABA, raw invalid/masked input, inode/provenance change, reorder or list-policy remapping invalidates its fences. Dirty preview is retained on conflict. |
+| 1 | `mode: "view"` | Read-only live namespace. Worker subscriptions refresh the current checked displayed address after base/owner changes. Missing/replaced placement gives Error/`overlay-identity`; base scope/owner closure gives Error/`overlay-owner`. Writes/unset/apply/reset/discard/save/flush refuse `overlay-readonly`. |
+| 2 | `mode: "editor"` | Frozen base and unnormalized owning-leaf capture. Equal intent, ABA, raw invalid/masked input, inode/provenance change, reorder or list-policy remapping invalidates its fences. Dirty preview is retained on conflict. `save`/`flush` refuse `overlay-mode`; use Apply. |
+| 3 | `mode: "live"` | Writable live namespace. Declared-leaf assignments and `unset` queue through owning-leaf admission without `overlay-busy`. Base/owner changes refresh like view mode. Missing/replaced placement gives Error/`overlay-identity`; scope/owner closure gives Error/`overlay-owner`. An errored live handle cannot retarget or resume. Apply/reset/discard refuse `overlay-mode`. |
+
+Confirmed own save/readback alone does not invalidate an unchanged captured
+owner generation or frozen owner/base selection. Provenance still updates; real
+foreign/other-writer content, raw/mapping and metadata changes keep their fences.
+An own save cannot make a previously stale open or Apply selection current.
+
+### Runtime live writers (0.5.0)
+
+Open with the same ten options, choosing `mode: "live"`. The existing namespace
+supports runtime writers without a GUI proxy or a second merge/diff owner:
+
+```qml
+const runtime = opened.editor;
+runtime.values.lastResult = result;
+runtime.save(function(receipt) {
+    // saved | nothing_to_save | failed, with normal route/evidence fields
+});
+```
+
+Setters run synchronous schema checks and read back the accepted local value
+immediately. Each write has its own input sequence; older worker refreshes cannot
+erase newer local values. Admission rejection restores the effective value and
+completes that write with `failed`. Repeated writes, including writes while a save
+is in flight, stay in worker order and never use the editor's busy fence.
+
+The worker merges the current base/override and applies `top_level_omit_equal`
+on admission. Equal-to-base top-level values remain omitted; unknown existing
+top-level overrides and opaque owner siblings survive. `unset(relativeLeafPath)`
+removes that leaf's override and reads the inherited base value (or absence).
+It returns a Boolean ingress result. Groups cannot be assigned or unset.
+
+`save()` and `flush()` use the owner's normal persistence path, cover earlier
+queued inputs, and return the normal save receipt. They never save the base.
+Autosave follows the owning store's policy. `dirty` includes pending local
+inputs and pending work on the selected owner source; `busy` stays false.
+Apply/reset/discard remain editor operations and refuse `overlay-mode` on a live handle.
+Detach closes delivery as before; admitted writes are ordinary store intent.
 
 Open settles/preflights selected owner/base paths on their workers. The displayed
 generation and normalization maps resolve placement back to the unnormalized
@@ -105,7 +150,36 @@ Handles expose read-only `editorId`, `values`, `ready`, `dirty`, `conflicted`,
 `busy`, `status` (`Loading | Ready | Error | Closed`), `error`, `stateChanged` and
 `completed(result)`. Operations return request IDs immediately and complete in the
 main store's existing order, after eligible cache installation, signal before
-detached callback. While busy, edits/apply/reset/discard refuse `overlay-busy`.
+detached callback. In editor mode, busy edits/apply/reset/discard refuse `overlay-busy`.
+
+Overlay publications are deltas. Unchanged token/dirty metadata and duplicate
+presentations do not prepare bindings or emit `stateChanged`. Refreshes notify
+only changed effective leaves; actual value, token, dirty, status, error or
+conflict changes still notify, as do busy transitions around editor operations.
+All overlays in a packet install before any binding or public handler runs.
+Unsupported mode operations complete with their error without introducing busy
+or conflict state. Completion delivery is independent of change notification.
+
+Create each base `scope` or `previewScope` once and keep the handle for that
+lifetime. Repeated calls allocate distinct parent-owned handles and register
+distinct publication consumers; do not call them in a reevaluating binding.
+See [scoped handles](editors-profiles.md#scoped-handles).
+
+`editorId` identifies the handle and stays constant. Read-only `placementToken`
+is a worker-owned, handle-local observation token for the selected raw row mapping
+in every mode, including a frozen/conflicted editor. It changes on observable
+replacement, identity-value change, move/reorder (including same-ID reorder),
+removal and insertion that shifts the selected row. Override edits and edits of
+the row's other members keep the token. Normalization is resolved back to the raw
+address before tracking it. Compare a saved token with the same handle's current
+token before projecting retained preview state; do not persist it or compare it
+across handles/processes. Token updates use `stateChanged` and do not thaw editors.
+
+There are no persistent row IDs. A same-ID whole-row replacement whose raw
+before/after transition is indistinguishable from a member edit keeps the token:
+`{id:"x", label:"a"}` becoming `{id:"x", label:"b"}` carries no evidence of which
+operation produced it. Likewise, byte-identical rows supply no observable reorder
+identity. The token fences observable mapping changes, not hidden object creation.
 
 `apply` and `resetOverrides` return exactly `saved | nothing_to_save | failed`,
 the normal route/mask/coverage/evidence fields, `editorId`, and `refreshState`:
@@ -115,6 +189,15 @@ the normal route/mask/coverage/evidence fields, `editorId`, and `refreshState`:
 | 1 | `current` | Confirmed main state and compatible base recaptured; dirty/conflicted clear. |
 | 2 | `stale` | Publication still has its truthful save status, but later owner/base ingress prevents refresh. Preview remains dirty/conflicted and must not be silently closed or discarded. |
 | 3 | `not_refreshed` | Failed admission/publication; preview and failure evidence remain. |
+
+After admitted publication failure, the same frozen editor can Apply or repeat
+resetOverrides to retry unchanged work without a new owning-leaf input or intent.
+It shares the draft's worker-owned admission recovery boundary. Confirmed own
+publication may advance owner fences; selected foreign/other-writer changes,
+placement/identity changes and frozen base changes still conflict. Pending values
+cannot hide a foreign raw owner edit. New editor edits are a new checked atomic
+owning-leaf choice, not a duplicate admission of an unchanged Retry. Success still
+requires conditional refresh; failed/stale outcomes retain preview and history.
 
 `discard` asynchronously recaptures current base/placement, returning
 `discarded | failed`; only success drops the preview/conflict. The application
@@ -130,11 +213,12 @@ with the same field names and typed mode/merge/difference enums, and call
 through `overlayOpened(requestId, ConfigOverlayEditor*)`, emitted after handle
 installation and before the normal `completed(opened)` result; native results
 contain `editorId`, not a QObject payload. `value`, `setValue` and `unset` use
-relative ConfigPaths, and Apply/reset/discard use normal native callbacks.
+relative ConfigPaths. `ConfigOverlayMode::Live` adds `save`/`flush` with normal
+native callbacks; live `setValue` returns its request ID and input sequence.
 
 ## Strict owner records (0.4.0)
 
-Editor-mode open rejects an undeclared `overrideKey` in a closed Record owned by
+Editor- and live-mode open reject an undeclared `overrideKey` in a closed Record owned by
 a Strict source with `undeclared-member`. Declare the member or mark the Record
 `open` to permit it. Apply still uses the common owner write check; view mode
 does not create overrides. Preserve behavior is unchanged.

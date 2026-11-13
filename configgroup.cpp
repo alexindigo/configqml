@@ -13,17 +13,28 @@
 namespace configqml {
 quint64 ConfigStore::applyGroup(const QMap<ConfigPath, std::optional<QVariant>> &edits,
                                 const QMap<ConfigPath, ConfigPathState> &fences, QObject *context,
-                                Callback callback) {
+                                Callback callback,
+                                const std::shared_ptr<ConfigApplyAttempt> &attempt,
+                                const QMap<ConfigPath, std::optional<QVariant>> &admittedEdits) {
     const auto id = registerRequest(context, std::move(callback));
     ConfigInput input;
     input.kind = ConfigInput::Kind::Group;
     input.sequence = m_sequence + 1;
     input.edits = edits; // Private callers supply already-owned, schema-checked values.
+    if (attempt && attempt->expected)
+        for (auto it = input.edits.begin(); it != input.edits.end();)
+            if (admittedEdits.contains(it.key()) && admittedEdits.value(it.key()) == it.value())
+                it = input.edits.erase(it);
+            else
+                ++it;
     input.fences = fences;
-    for (auto it = edits.cbegin(); it != edits.cend(); ++it)
+    for (auto it = input.edits.cbegin(); it != input.edits.cend(); ++it)
         input.pathGenerations[it.key()] = m_cache.information.value(it.key()).pathGeneration + 1;
-    if (!m_accepting || m_status != Status::Ready ||
-        !m_owner->dispatch({id, input.sequence, "apply", input})) {
+    const bool retry = attempt && attempt->expected && input.edits.isEmpty();
+    ConfigCommand command{id, retry ? m_sequence : input.sequence, "apply",
+                          retry ? std::nullopt : std::optional<ConfigInput>(input)};
+    command.applyAttempt = attempt;
+    if (!m_accepting || m_status != Status::Ready || !m_owner->dispatch(command)) {
         ConfigResult result;
         result.requestId = id;
         result.storeId = m_storeId;
@@ -34,6 +45,8 @@ quint64 ConfigStore::applyGroup(const QMap<ConfigPath, std::optional<QVariant>> 
             this, [this, result] { receiveResult(result); }, Qt::QueuedConnection);
         return id;
     }
+    if (retry)
+        return id;
     m_sequence = input.sequence;
     for (auto it = input.pathGenerations.cbegin(); it != input.pathGenerations.cend(); ++it) {
         auto &state = m_cache.information[it.key()];
@@ -74,18 +87,48 @@ quint64 ConfigStore::importProfile(const QString &file, const QList<ConfigPath> 
                                    QObject *context, Callback callback) {
     return profileRequest("importProfile", {}, file, paths, context, std::move(callback));
 }
-void ConfigWorker::processGroup(const ConfigCommand &command) {
-    const auto &input = *command.input;
+void ConfigWorker::processGroup(const ConfigCommand &inputCommand) {
+    auto command = inputCommand;
+    const auto input = command.input.value_or(ConfigInput{});
+    const bool retry = command.applyAttempt && command.applyAttempt->expected;
+    auto fences = input.fences;
+    auto acceptedEdits = input.edits;
+    if (retry) {
+        const auto capture = applyCapture(command);
+        if (capture)
+            fences = capture->fences;
+    }
     QString error;
-    if (!input.fences.isEmpty() && !m_files.isEmpty() &&
-        !reloadFiles(ConfigCommand{0, m_prefix, "reload", {}}))
-        error = "draft-refresh";
-    for (auto it = input.fences.cbegin(); it != input.fences.cend(); ++it)
+    if (!fences.isEmpty() && !m_files.isEmpty()) {
+        m_reloadSelection = fences.keys();
+        const bool fresh =
+            reloadFiles(ConfigCommand{0, m_prefix, "reload", {}}, &command.preflightEvidence);
+        m_reloadSelection.clear();
+        if (!fresh)
+            error = "draft-refresh";
+    }
+    if (retry) {
+        const auto capture = applyCapture(command);
+        if (!capture)
+            error = "draft-conflict";
+        else {
+            fences = capture->fences;
+            acceptedEdits = capture->edits;
+            for (auto it = input.edits.cbegin(); it != input.edits.cend(); ++it)
+                acceptedEdits[it.key()] = it.value();
+        }
+    }
+    for (auto it = fences.cbegin(); it != fences.cend(); ++it)
         if (m_pathIntents.value(it.key()) != it->intentRevision ||
             m_contentRevisions.value(it.key()) != it->contentRevision ||
             m_pathGenerations.value(it.key()) != it->pathGeneration)
             error = "draft-conflict";
     coverInput(command); // Rejection also settles its path generations.
+    if (error.isEmpty() && !command.input) {
+        command.applyAttempt->admitted = command.applyAttempt->expected;
+        beginSave(command);
+        return;
+    }
     auto candidate = *m_layers;
     const auto before = *m_layers;
     for (auto it = input.edits.cbegin(); error.isEmpty() && it != input.edits.cend(); ++it) {
@@ -112,12 +155,17 @@ void ConfigWorker::processGroup(const ConfigCommand &command) {
         result.status = "failed";
         result.error = {error, {}, "apply"};
         result.rejectedPathGenerations = input.pathGenerations;
+        reconcileApplyRejection(command);
         post(publish(result));
         return;
     }
     *m_layers = std::move(candidate);
     acceptIntent(input);
     recordPersistent(input, before);
+    if (command.applyAttempt) {
+        post(publish());
+        rememberApply(command, fences.keys(), acceptedEdits);
+    }
     beginSave(command);
 }
 static std::optional<QVariant> portableValue(const ConfigDescriptor &descriptor,

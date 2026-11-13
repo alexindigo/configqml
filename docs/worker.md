@@ -24,6 +24,17 @@ newer pending local write; settlement of that latest write restores the last
 authoritative value. Failed intent/evidence is retained separately from getters.
 Topology, input, path-generation and publication-generation fences stay active.
 
+Per-path `publicationGeneration` fences selection freshness, not delivery of
+provenance metadata. Confirmed own save/readback keeps that fence when displayed
+and raw content, intent/ingress and list metadata/mapping are unchanged. Exact
+before/after contribution transitions establish own confirmation; a receipt alone
+does not. Native numeric storage becoming its identical JSON token is not new
+content, without rounding or rewriting exact atoms. Confirmation still delivers
+fresh provenance in independently ordered snapshot packets; delayed equal-fence
+metadata cannot roll it back. Foreign observations, other-writer intent, hidden
+raw changes, remapping and metadata updates retain their stale-selection fences,
+including foreign preflight before an otherwise successful own save.
+
 Grouped publications install all eligible caches before notification. One shared
 `ConfigConsumerGuard` governs synchronous consumer emissions/callbacks: it holds
 QPointer lifetime checks on the stack and callers stop continuation if an emitter
@@ -32,13 +43,28 @@ precede callbacks; request completion order is preserved. A consumer destroying
 the store during notification cancels further store-owned delivery. Queued native
 callbacks guard their independently supplied living context.
 
+Packets distinguish complete state from absent state. Retained-group info and
+lifecycle generations travel together in an optional, publication-stamped
+snapshot: absent means unchanged; present and empty is authoritative. The facade
+installs a newer complete group view before any notification, independently of
+pending ingress claims. Diagnostic, warning, effects, metadata, readiness and
+other partial packets cannot clear it; older full snapshots cannot roll it back.
+Held replies retain capture-time state rather than receiving a newer worker view
+when delivered. Source states remain optional snapshots; values/models/overlays
+are keyed deltas, and completion/status/diagnostic fields are explicit events.
+
 ## Requests, snapshots and lifetime
 
 `save`, `flush`, `close` capture the reported input prefix, never a facade graph.
 Save results are exactly `saved`, `nothing_to_save`, or `failed`, asynchronously.
 They name request/store/prefix, confirmed revisions, per-route publication facts,
-known/uncertain/partial state and value-free error codes. Failure propagation
-preserves original outcome evidence without silent retry or recapture. Memory
+known/uncertain/partial state and value-free error codes. Ordinary publication
+failures remain attached to pending source work, not every future save: unrelated
+routes still publish, and later saves, including autosave, can settle a resolved source
+against its original preimage. Old receipts remain in `failures()` as evidence.
+Rejected inputs have their own failed receipt and remain in `failures()`, but
+cannot make a later publishing save fail. Terminal worker loss still stops
+persistence and propagates its uncertainty to queued requests. Memory
 publication confirms readback bytes; it is not disk durability.
 
 Flush requests publication and waits for earlier work. Close seals ingress,
@@ -73,6 +99,32 @@ object thread.
 native/raw/environment paths. Existing Integer/UnsignedInteger descriptors keep
 their exact qint64/quint64 domains. Missing, nullable, finite Real and URL rules
 remain the native schema contract.
+
+Uncertain publication witnesses share one worker-owned provenance registry with
+watch/reload admission and Retry, for ordinary and retained work. A successful
+read of the exact witnessed revision AND bytes is retained as `own` under the
+original request/group/attempt correlation, not admitted as a new external disk
+choice. Watches remain active and failed work stays pending/stopped. Another
+revision, even with identical bytes, remains external. Mixed-source reads admit
+foreign sources without exposing uncertain own output as an external fact.
+Retry validates the causal capture, then executes normal publication/readback;
+only successful confirmation advances waiting own descendants and covers intent.
+
+When ordinary and retained attempts share a source, causally witnessed uncertain
+descendants move their pending-owner records to one exact output frontier. The
+records retain both the actual predecessor and verified recovery base. Recovery
+requires every unsettled owner to agree with the acquired output and a verified
+link from the retry capture; matching just one divergent owner is insufficient.
+This bookkeeping never settles a stopped group or covers an ordinary intent.
+Successful confirmation advances eligible frozen captures and retires an ordinary
+witness once its actual pending intent IDs are gone, including group confirmation.
+
+For ordinary JSON PathIntent work, a successfully retained different observation
+supersedes the uncertain-output witness. Watch, reload and save-time recovery
+share that classification. Intent and its original per-path baseline remain:
+normal saves merge disjoint foreign changes or report `path-conflict` on overlap,
+not a permanent strict-preimage refusal. The foreign observation does not cover
+unsaved intent. Strict policies and retained-group recovery stay unchanged.
 
 ## Verification
 

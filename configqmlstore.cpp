@@ -1,12 +1,51 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configqmlstore.h"
 #include "configqmlvalue.h"
+#include "configqmlevent_p.h"
 #include "configconsumer_p.h"
 #include "configqmlmodel.h"
+#include "configstorehandle.h"
+#include "configchange_p.h"
 #include <QQmlEngine>
 #include <QTimer>
 
 namespace configqml {
+ConfigQmlStore::ConfigQmlStore(QObject *parent) : QObject(parent) {}
+void ConfigQmlStore::prepareState() {
+    QScopedPropertyUpdateGroup group;
+    m_publishedStatus = status();
+    m_publishedReady = ready();
+    m_publishedError = error();
+    m_publishedDirty = dirty();
+    m_publishedConflicted = conflicted();
+    m_publishedBusy = busy();
+}
+void ConfigQmlStore::registerNotifications(ConfigChangePublisher *publisher) {
+    const auto invalidate = [this](const QList<ConfigPath> &paths) {
+        for (const auto &path : paths)
+            m_scriptPresentations.remove(path);
+    };
+    const auto notify = [this](const QList<ConfigPath> &paths) {
+        notifyConfigNamespace(m_values, paths);
+    };
+    const auto bindings = [this](const QList<ConfigPath> &paths) {
+        prepareState();
+        prepareConfigNamespace(m_values, paths);
+    };
+    publisher->add(this, invalidate, notify, bindings);
+}
+void ConfigQmlStore::initializeNotifications() {
+    prepareState();
+    auto *publisher = m_overlay     ? m_overlay->m_changes.get()
+                      : m_draft     ? m_draft->m_changes.get()
+                      : m_isPreview ? m_previewDraft->m_previewChanges.get()
+                                    : m_core->m_changes.get();
+    registerNotifications(publisher);
+    if (m_isPreview)
+        registerNotifications(m_core->m_changes.get());
+    else if (m_draft)
+        m_core->m_changes->add(this, {}, {}, [this](const auto &) { prepareState(); });
+}
 void ConfigQmlStore::setSchema(ConfigQmlSchema *schema) {
     if (m_complete) {
         reject({}, "schema-is-construction-only");
@@ -16,6 +55,8 @@ void ConfigQmlStore::setSchema(ConfigQmlSchema *schema) {
     ConfigConsumerGuard(this).invoke([&] { emit schemaChanged(); });
 }
 ConfigQmlStore::Status ConfigQmlStore::status() const {
+    if (m_isPreview && (!m_previewDraft || (m_nativeScope && !m_nativeScope->attached())))
+        return Closed;
     if (m_overlay) {
         switch (m_overlay->status()) {
         case ConfigOverlayEditor::Status::Loading:
@@ -144,8 +185,11 @@ void ConfigQmlStore::componentComplete() {
     }
     if (!errors.isEmpty()) {
         m_error = errors.first().code;
-        QTimer::singleShot(
-            0, this, [this] { ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); }); });
+        QTimer::singleShot(0, this, [this] {
+            ConfigConsumerGuard boundary(this);
+            if (boundary.invoke([&] { prepareState(); }))
+                boundary.invoke([&] { emit statusChanged(); });
+        });
         return;
     }
     m_core = new ConfigStore(options, this);
@@ -153,41 +197,27 @@ void ConfigQmlStore::componentComplete() {
     initializeOverlaySignals();
     connect(m_core, &ConfigStore::valuesChanged, this, &ConfigQmlStore::settingValuesChanged);
     m_values = createConfigNamespace(this, *m_core->schema().descriptor({}), {}, this);
+    initializeNotifications();
     connect(m_core, &ConfigStore::statusChanged, this,
             [this] { ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); }); });
     connect(m_core, &ConfigStore::completed, this, [this](const auto &result) {
         ConfigConsumerGuard(this).invoke([&] { emit completed(resultMap(result)); });
     });
     connect(m_core, &ConfigStore::autoSaved, this, [this](const auto &result) {
-        ConfigConsumerGuard(this).invoke([&] { emit autoSaved(qmlResult(result, m_diagnostics)); });
+        ConfigConsumerGuard(this).invoke([&] { emit autoSaved(resultMap(result)); });
     });
     connect(m_core, &ConfigStore::sourceError, this, [this](const auto &input) {
         const auto error = m_diagnostics.sanitize(input);
-        const QVariantMap value{{"code", error.code},       {"sourceId", error.sourceId},
-                                {"phase", error.operation}, {"file", error.file},
-                                {"path", error.path},       {"line", error.line}};
+        const auto value = qmlErrorEvent(scriptEngine(), error);
         ConfigConsumerGuard(this).invoke([&] { emit sourceError(value); });
     });
     connect(m_core, &ConfigStore::sourceWarning, this, [this](const auto &input) {
         const auto warning = m_diagnostics.sanitize(input);
-        QVariantList evidence;
-        for (const auto &ref : warning.evidence)
-            evidence.append(
-                QVariantMap{{"evidenceId", ref.evidenceId},
-                            {"directory", ref.directory},
-                            {"sourceId", ref.sourceId},
-                            {"phase", ref.phase},
-                            {"role", ref.role},
-                            {"observationOrder", QString::number(ref.observationOrder)}});
-        const QVariantMap value{{"code", warning.code},       {"sourceId", warning.sourceId},
-                                {"phase", warning.operation}, {"file", warning.file},
-                                {"path", warning.path},       {"line", warning.line},
-                                {"evidence", evidence}};
+        const auto value = qmlErrorEvent(scriptEngine(), warning);
         ConfigConsumerGuard(this).invoke([&] { emit sourceWarning(value); });
     });
     connect(m_core, &ConfigStore::migrationCompleted, this, [this](const auto &result) {
-        ConfigConsumerGuard(this).invoke(
-            [&] { emit migrationCompleted(qmlResult(result, m_diagnostics)); });
+        ConfigConsumerGuard(this).invoke([&] { emit migrationCompleted(resultMap(result)); });
     });
     connect(m_core, &ConfigStore::inputRejected, this, [this](const auto &path, const auto &code) {
         ConfigConsumerGuard(this).invoke([&] { emit inputRejected(path, code); });
@@ -218,9 +248,7 @@ ConfigStore::Callback ConfigQmlStore::callback(const QJSValue &function) {
         if (auto *engine = guard->scriptEngine()) {
             ConfigConsumerGuard boundary(guard, engine);
             QJSValue returned;
-            if (!boundary.invoke([&] {
-                    returned = function.call({engine->toScriptValue(guard->resultMap(result))});
-                }))
+            if (!boundary.invoke([&] { returned = function.call({guard->resultMap(result)}); }))
                 return;
             if (returned.isError())
                 qWarning("configqml: completion callback threw");
@@ -228,11 +256,41 @@ ConfigStore::Callback ConfigQmlStore::callback(const QJSValue &function) {
     };
 }
 QVariant ConfigQmlStore::read(const ConfigPath &path) const {
-    if (m_overlay)
-        return m_overlay->presentation(path);
-    if (!m_core)
+    if (m_isPreview && !ready())
         return {};
-    return m_draft ? m_draft->presentation(path) : m_core->presentation(path);
+    if (!m_core && !m_overlay)
+        return {};
+    const auto cached = m_scriptPresentations.constFind(path);
+    if (cached != m_scriptPresentations.cend())
+        return cached.value();
+    QVariant value;
+    if (m_isPreview)
+        value = m_previewDraft->previewPresentation(path);
+    else if (m_overlay)
+        value = m_overlay->presentation(path);
+    else if (m_core)
+        value = m_draft ? m_draft->presentation(path) : m_core->presentation(path);
+    auto *engine = scriptEngine();
+    if (!engine)
+        return value;
+    const auto presented = qmlPresentation(engine, value);
+    m_scriptPresentations.insert(ownPath(path), presented);
+    return presented;
+}
+QJSValue ConfigQmlStore::copyValue(const QJSValue &value) {
+    QPointer<QJSEngine> engine(scriptEngine());
+    if (!engine)
+        return {};
+    ConfigValueResult captured;
+    ConfigConsumerGuard boundary(this, engine);
+    if (!boundary.invoke(
+            [&] { captured = captureQmlValue(QVariant::fromValue(value), {}, m_diagnostics); }))
+        return {};
+    if (!captured.ok()) {
+        reject({}, captured.errors.first().code);
+        return {};
+    }
+    return detachedQmlValue(engine, captured.value);
 }
 ConfigRequestHandle ConfigQmlStore::write(const ConfigPath &path, const QVariant &value,
                                           const QJSValue &function) {
@@ -342,6 +400,8 @@ QVariantMap ConfigQmlStore::info(const QStringList &relative) const {
     const auto p = m_prefix + relative;
     if (!m_core)
         return {};
+    if (m_isPreview && (!ready() || !m_previewDraft->previewSchema().descriptor(p)))
+        return {};
     const auto info = m_core->info(p);
     return {{"declared", info.provenance.declared},
             {"present", info.provenance.present},
@@ -363,7 +423,7 @@ QVariantMap ConfigQmlStore::info(const QStringList &relative) const {
 }
 ConfigListModel *ConfigQmlStore::listModel(const QStringList &queryPath) {
     const auto path = ownPath(m_prefix + queryPath);
-    auto *source = m_core ? m_core->listModel(path) : nullptr;
+    auto *source = m_core && !m_isPreview ? m_core->listModel(path) : nullptr;
     if (!source) {
         reject(path, "not-a-list-setting");
         return nullptr;
@@ -371,6 +431,10 @@ ConfigListModel *ConfigQmlStore::listModel(const QStringList &queryPath) {
     if (m_models.value(path))
         return m_models.value(path);
     QQmlEngine::setObjectOwnership(source, QQmlEngine::CppOwnership);
+    const QPointer<QJSEngine> engine(scriptEngine());
+    source->m_presenter = [engine](const QVariant &value) {
+        return engine ? qmlPresentation(engine, value) : QVariant();
+    };
     m_models[path] = source;
     connect(source, &ConfigListModel::writeRejected, this,
             [this, path] { reject(path, "read-only-model"); });
@@ -378,12 +442,16 @@ ConfigListModel *ConfigQmlStore::listModel(const QStringList &queryPath) {
 }
 ConfigListModel *ConfigQmlStore::keyedModel(const QStringList &queryPath) {
     const auto path = ownPath(m_prefix + queryPath);
-    auto *source = m_core ? m_core->keyedModel(path) : nullptr;
+    auto *source = m_core && !m_isPreview ? m_core->keyedModel(path) : nullptr;
     if (!source) {
         reject(path, "not-a-map-setting");
         return nullptr;
     }
     if (!m_models.value(path)) {
+        const QPointer<QJSEngine> engine(scriptEngine());
+        source->m_presenter = [engine](const QVariant &value) {
+            return engine ? qmlPresentation(engine, value) : QVariant();
+        };
         QQmlEngine::setObjectOwnership(source, QQmlEngine::CppOwnership);
         m_models[path] = source;
         connect(source, &ConfigListModel::writeRejected, this,

@@ -45,6 +45,41 @@ static const ConfigPath number{"bar", "n"};
 class WorkerTest : public QObject {
     Q_OBJECT
 private slots:
+    void ownConfirmationMetadataRemainsOrdered() {
+        auto o = options();
+        o.autoSave = false;
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QSignalSpy completed(&store, &ConfigStore::completed);
+        QVERIFY(store.setUser(widgets, QVariantList{3, 1, 2, 4}).accepted);
+        QTRY_COMPARE(completed.size(), 1);
+        auto *model = store.listModel(widgets);
+        QCOMPARE(model->rowCount(), 4);
+        const auto captured = store.snapshot();
+        const auto pending = store.info(widgets);
+        const auto contribution = [](const ConfigPathState &state) {
+            for (const auto &item : state.provenance.contributions)
+                if (item.sourceId == "memory")
+                    return item;
+            return ConfigContribution{};
+        };
+        QVERIFY(contribution(pending).localIntentRevision > 0);
+        store.save();
+        QTRY_COMPARE(completed.size(), 2);
+        QCOMPARE(completed.last().first().value<ConfigResult>().status, QString("saved"));
+        const auto confirmed = store.info(widgets);
+        QCOMPARE(confirmed.publicationGeneration, pending.publicationGeneration);
+        QCOMPARE(confirmed.contentRevision, pending.contentRevision);
+        QCOMPARE(contribution(confirmed).localIntentRevision, quint64(0));
+        QVERIFY(contribution(confirmed).revision != contribution(pending).revision);
+        ConfigWorkerPacket older;
+        older.snapshot = captured;
+        Probe::inject(store, older); // Delayed metadata with the same command fence.
+        QCOMPARE(store.info(widgets).provenance.contributions, confirmed.provenance.contributions);
+        QCOMPARE(store.info(widgets).publicationGeneration, pending.publicationGeneration);
+        QCOMPARE(model->rowCount(), 4);
+        QCOMPARE(store.value(widgets), captured.values.value(widgets));
+    }
     void readYourWritesAndStaleReplies() {
         ConfigStore store(options());
         QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
@@ -115,7 +150,12 @@ private slots:
         QTRY_COMPARE(complete.size(), 3);
         const auto result = qvariant_cast<ConfigResult>(complete.last().first());
         QCOMPARE(result.requestId, save);
-        QCOMPARE(result.status, QString("failed"));
+        QCOMPARE(result.status, QString("saved"));
+        store.flush();
+        QTRY_COMPARE(complete.size(), 4);
+        QCOMPARE(qvariant_cast<ConfigResult>(complete.last().first()).status,
+                 QString("nothing_to_save"));
+        QCOMPARE(store.failures().first().error.code, QString("injected-rejection"));
     }
     void singleRejectionRollsBack() {
         auto o = options();
@@ -251,9 +291,22 @@ private slots:
         QCOMPARE(saved.inputPrefix, quint64(1));
         QCOMPARE(flushed.inputPrefix, quint64(2));
         QCOMPARE(saved.status, fault ? QString("failed") : QString("saved"));
-        QCOMPARE(flushed.status, fault ? QString("failed") : QString("saved"));
+        QCOMPARE(flushed.status, QString("saved"));
         QCOMPARE(saved.publicationState, fault > 1 ? QString("uncertain") : QString("known"));
-        QCOMPARE(flushed.publicationState, saved.publicationState);
+        QCOMPARE(flushed.publicationState, QString("known"));
+        QVERIFY(flushed.error.empty());
+        QVariantMap raw;
+        bool read = false;
+        Probe::run(
+            store,
+            [&](auto &w) {
+                const auto id =
+                    w.backend()->submit({ConfigBackendRequest::Operation::Read, "memory", {}, {}});
+                raw = decodeMemoryValue(w.backend()->take(id)->bytes);
+            },
+            this, [&] { read = true; });
+        QTRY_VERIFY(read);
+        QCOMPARE(valueAt(raw, number)->toLongLong(), 2);
         if (fault)
             QVERIFY(!store.failures().isEmpty());
     }
@@ -434,8 +487,10 @@ private slots:
         QTRY_COMPARE(complete.size(), 5);
         for (int i : {3, 4}) {
             const auto retained = qvariant_cast<ConfigResult>(complete[i][0]);
-            QCOMPARE(retained.publicationState, QString("partial"));
-            QCOMPARE(retained.publications.size(), 2);
+            QCOMPARE(retained.status, i == 3 ? QString("saved") : QString("nothing_to_save"));
+            QCOMPARE(retained.publicationState, QString("known"));
+            QCOMPARE(retained.publications.size(), i == 3 ? 1 : 0);
+            QVERIFY(retained.coveredRevisions.contains("b"));
         }
         auto *temporary = new ConfigStore(options());
         QTRY_COMPARE(temporary->status(), ConfigStore::Status::Ready);

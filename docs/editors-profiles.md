@@ -27,7 +27,7 @@ mutations. Unselected leaves are undefined/nonwritable. Explicit equal assignmen
 are dirty intent. A native draft exposes `value`, `setValue`, `presentation`,
 `dirty`, `conflicted`, `busy`, `apply` and `discard`.
 
-Apply queues **one grouped input** and combines its admission and persistence
+Initial Apply queues **one grouped input** and combines its admission and persistence
 into **one result**. The object thread passes already-owned checked values, not a
 second full-tree capture. The worker checks the selected per-path content revisions
 and ingress generations, stages all edits in a candidate layer owner, and accepts
@@ -53,6 +53,20 @@ apply again without discard. Foreign accepted intent (even equal values), change
 content and newer local ingress still conflict. An accepted group with a failed
 IO/partial receipt does not get this rejection settlement or erase failure history.
 
+After admitted IO, partial or uncertain failure, Apply on the same draft is an
+explicit Retry. A private worker-owned admission witness keeps the checked edits,
+selected source facts and causal fences. Unchanged Retry creates no new input,
+intent or path generation; it publishes the existing admitted work. Changing a
+draft edit admits only that delta. Successful Retry clears dirty state and closes
+preview scopes normally; a repeated failure retains both edits and failure history.
+Store reads stay read-after-write throughout.
+
+The worker freshly checks selected sources, including raw facts below pending
+value masking. A real foreign selected-path change or another accepted writer
+(even equal intent) still conflicts; unrelated source errors do not block this
+selected check. Only confirmed own publication can advance recovery fences.
+There is no recapture from the display, automatic overwrite or duplicate intent.
+
 Worker-accepted per-path **intent revisions** are distinct from object-thread
 ingress generations. Every accepted writer (direct commands, draft groups and
 worker-resolved profile imports, including equal/no-op intent) advances the same
@@ -69,6 +83,47 @@ layer; the ordinary masked getter remains effective, and provenance names its ma
 Successful apply refreshes the preview from the settled effective store. Apply's
 normal save covers the already-reported store prefix, including earlier accepted
 user writes. Autosave never sees un-applied draft edits.
+
+### Live preview views (0.5.0)
+
+`draft.values` retains its frozen baseline. `draft.preview` is a separate,
+read-only namespace over the same selected leaves: an edited leaf shows the
+draft edit, while an unedited leaf follows the store's current effective value.
+Edits to an atomic Record/List/Map replace that whole leaf in the preview.
+Unselected leaves are absent; assigning to preview properties fails visibly.
+Preview changes never write the store, advance its input/intent fences or trigger
+autosave. Foreign changes still conflict with Apply exactly as before.
+
+```qml
+const draft = shared.draft([["settings"]]);
+draft.values.settings.volume = 9;
+// draft.preview.settings.volume === 9; shared.values.settings.volume === 7
+const base = draft.previewScope(["settings"]);
+// Use base in the usual ten-option openOverlay call, mode "view" or "live".
+```
+
+`previewScope(path)` returns a read-only scoped handle usable as an overlay base
+in view and live modes; editor mode rejects it with `overlay-selection`. Overlays
+inherit checked preview edits merged with the placement override on the worker.
+Live instance writes still enter only the placement's owning leaf, never the
+preview or shared store. Unedited preview leaves and inherited overlays refresh
+after store publications, including foreign changes. Preview scopes can be
+nested with `scope(path)` but cannot upgrade to writable handles. They expose
+namespace values, not store list/keyed models.
+
+Successful Apply, successful discard and draft destruction close all existing
+preview scopes. Their overlays report Error/`overlay-owner`; they never silently
+retarget to the store. A failed Apply retains edits and leaves these scopes open.
+The reusable draft's `preview` namespace continues after Apply/discard; call
+`previewScope` again for a new lifetime, or reopen overlays on an ordinary store
+scope when shared preview is no longer wanted. Explicit scope detach closes only
+that scope. Destroying an editor still cannot cancel admitted persistence.
+
+Native `ConfigDraft` adds `previewValue(path)`, `previewPresentation(path)`,
+`previewSchema()`, `previewValuesChanged(paths)` and `previewScope(path, parent)`.
+Paths remain absolute, while the returned `ConfigStoreHandle` reads relative
+paths. Its `attached()` becomes false at the lifetime boundaries above. Preview
+schema/presentations are selected declared data; no store/raw mirror is created.
 
 ## Scoped handles
 
@@ -93,6 +148,14 @@ Native `store.scope(prefix)` returns a `ConfigStoreHandle` with relative value,
 info, listModel, setUser, save, draft, scope and detach. Native draft paths remain
 absolute store paths, including when created by a scoped handle. Handle QObject
 parentage determines lifetime, independently of shared persistence ownership.
+
+Call `scope()` and `previewScope()` once and keep the returned handle. This
+applies to store, nested-handle and draft factories in native code and QML.
+Every call allocates a distinct parent-owned handle with its own publication
+registration; calls are not cached. Do not create handles from reevaluating
+bindings or repeat the factory on each write. Reuse the living handle until
+detach/closure or parent destruction, then create a new one if needed. Preview
+handles still close at the Apply/discard/destruction boundaries described above.
 
 ## Named raw profiles
 

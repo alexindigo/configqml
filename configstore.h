@@ -12,9 +12,12 @@
 
 namespace configqml {
 class ConfigWorker;
+class ConfigChangePublisher;
+class ConfigQmlStore;
 class ConfigListModel;
 class ConfigWorkerOwner;
 struct ConfigWorkerPacket;
+struct ConfigApplyAttempt;
 class ConfigStoreTestAccess;
 class ConfigDraft;
 class ConfigStoreHandle;
@@ -51,6 +54,7 @@ public:
     QString error() const { return m_error; }
     QVariant value(const ConfigPath &path) const;
     QVariant presentation(const ConfigPath &path) const;
+    ConfigValueResult copyValue(const QVariant &value) const;
     ConfigPathState info(const ConfigPath &path) const;
     ConfigSnapshot snapshot() const {
         return m_admittedSnapshot ? *m_admittedSnapshot : ConfigSnapshot{};
@@ -124,17 +128,22 @@ signals:
     void overlayOpened(quint64 requestId, configqml::ConfigOverlayEditor *editor);
 
 private:
+    friend class ConfigQmlStore;
+    std::unique_ptr<ConfigChangePublisher> m_changes;
     friend class ConfigWorker;
     friend class ConfigStoreTestAccess;
     friend class ConfigDraft;
     friend class ConfigStoreHandle;
     friend class ConfigOverlayEditor;
     quint64 overlayRequest(ConfigOverlayEditor *editor, const QString &operation, QObject *context,
-                           Callback callback);
+                           Callback callback,
+                           const QMap<ConfigPath, std::optional<QVariant>> &edits = {},
+                           const std::shared_ptr<ConfigApplyAttempt> &attempt = {});
     void receiveOverlay(const ConfigOverlayPresentation &presentation);
     quint64 applyGroup(const QMap<ConfigPath, std::optional<QVariant>> &edits,
                        const QMap<ConfigPath, ConfigPathState> &fences, QObject *context,
-                       Callback callback);
+                       Callback callback, const std::shared_ptr<ConfigApplyAttempt> &attempt = {},
+                       const QMap<ConfigPath, std::optional<QVariant>> &admittedEdits = {});
     quint64 profileRequest(const QString &operation, const QString &name, const QString &file,
                            const QList<ConfigPath> &paths, QObject *context, Callback callback);
     ConfigRequestHandle write(ConfigInput::Kind kind, const ConfigPath &path, const QVariant &value,
@@ -166,9 +175,11 @@ private:
     QString m_userLayerId;
     QString m_storeId;
     ConfigSnapshot m_cache;
+    QMap<ConfigPath, quint64> m_cachePublications; // Metadata delivery order, not edit freshness.
     QList<ConfigSourceState> m_sourceStates;
     QMap<QString, ConfigPath> m_policyPaths;
     QMap<QString, ConfigGroupInfo> m_groups;
+    quint64 m_groupPublicationGeneration = 0;
     // Value-free ingress claims, including requests whose worker reply is pending.
     // Captures/bodies and semantic idempotency remain worker-owned.
     QMap<QString, quint64> m_retainedRequests;

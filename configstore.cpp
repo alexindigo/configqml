@@ -3,6 +3,7 @@
 #include "configworker_p.h"
 #include "configshutdown_p.h"
 #include "configconsumer_p.h"
+#include "configchange_p.h"
 #include "configlistmodel.h"
 #include <QThread>
 #include <QUuid>
@@ -10,9 +11,13 @@
 #include <QCoreApplication>
 
 namespace configqml {
+ConfigValueResult ConfigStore::copyValue(const QVariant &value) const {
+    return ownValue(value, {}, m_schema.diagnostics());
+}
 ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
     : QObject(parent), m_schema(options.schema),
       m_storeId(options.storeId.isEmpty() ? QUuid::createUuid().toString() : options.storeId) {
+    m_changes = std::make_unique<ConfigChangePublisher>();
     m_storeId = QString(m_storeId.constData(), m_storeId.size());
     qRegisterMetaType<ConfigResult>();
     qRegisterMetaType<ConfigInput>();
@@ -96,7 +101,8 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
                 m_pending.insert(command.requestId, {this, {}});
                 m_accepting = false;
                 m_status = Status::Closing;
-                ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); });
+                if (ConfigChangePublisher::prepare(this, {{m_changes.get(), {}}}))
+                    ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); });
             });
     m_owner->start();
 }
@@ -294,7 +300,7 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
             m_presentations.remove(path);
     }
     // Owned input, sequence, queueing and cache installation all precede consumer reentry.
-    if (changed)
+    if (changed && ConfigChangePublisher::prepare(this, {{m_changes.get(), {path}}}))
         boundary.invoke([&] { emit valuesChanged({path}); });
     return handle;
 }
@@ -352,7 +358,7 @@ quint64 ConfigStore::request(const QString &operation, QObject *context, Callbac
             m_accepting = false;
             m_status = Status::Closing;
         }
-        if (operation == "close")
+        if (operation == "close" && ConfigChangePublisher::prepare(this, {{m_changes.get(), {}}}))
             ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); });
     }
     return id;
@@ -389,8 +395,9 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
             if (it->workerCovered < state.latestInput ||
                 it->pathGeneration != state.pathGeneration ||
                 it->workerCovered < state.workerCovered ||
-                it->publicationGeneration <= state.publicationGeneration)
+                packet.snapshot.generation <= m_cachePublications.value(it.key()))
                 continue;
+            m_cachePublications[it.key()] = packet.snapshot.generation;
             const auto next = packet.snapshot.values.value(it.key());
             if (m_cache.values.value(it.key()) != next) {
                 changed.append(it.key());
@@ -422,16 +429,21 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
         statusChange = true;
     }
     // Complete generation is installed before the first property notification.
-    m_groups = packet.groups;
-    // Published display state is not ingress authority. Keep monotone worker
-    // observations separate from claims made before their replies can arrive.
-    for (auto it = packet.groups.cbegin(); it != packet.groups.cend(); ++it) {
-        auto &ingress = m_retainedIngress[it.key()];
-        const auto generation = packet.groupGenerations.value(it.key());
-        if (generation >= ingress.generation) {
-            ingress.generation = generation;
-            ingress.state = it->state;
-            ingress.capturePrefix = it->capturePrefix;
+    if (packet.retainedGroups &&
+        packet.retainedGroups->publicationGeneration > m_groupPublicationGeneration) {
+        const auto &groups = *packet.retainedGroups;
+        m_groupPublicationGeneration = groups.publicationGeneration;
+        m_groups = groups.groups;
+        // Published display state is not ingress authority. Keep monotone worker
+        // observations separate from claims made before their replies can arrive.
+        for (auto it = groups.groups.cbegin(); it != groups.groups.cend(); ++it) {
+            auto &ingress = m_retainedIngress[it.key()];
+            const auto generation = groups.generations.value(it.key());
+            if (generation >= ingress.generation) {
+                ingress.generation = generation;
+                ingress.state = it->state;
+                ingress.capturePrefix = it->capturePrefix;
+            }
         }
     }
     if (packet.result)
@@ -441,15 +453,34 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
                 ingress.pendingState.clear();
             }
     ConfigConsumerGuard boundary(this);
+    QList<QPair<QPointer<ConfigOverlayEditor>, ConfigOverlayEditor::InstalledChange>>
+        overlayNotifications;
+    QList<ConfigChangePublisher::Change> preparations{{m_changes.get(), changed}};
     for (const auto &p : packet.overlays) {
         if (packet.result && packet.result->operation == "openOverlay" &&
-            packet.result->status == "opened")
+            packet.result->status == "opened" && p.editorId == packet.result->editorId &&
+            p.refreshed)
             m_overlayPresentations[packet.result->requestId] =
                 std::make_shared<ConfigOverlayPresentation>(p);
-        else if (!boundary.invoke([&] { receiveOverlay(p); }))
-            return;
+        else if (auto editor = m_overlays.value(p.editorId)) {
+            const auto change = editor->install(p, false);
+            if (!change.empty()) {
+                overlayNotifications.append({editor, change});
+                preparations.append({editor->m_changes.get(), change.paths});
+            }
+        }
     }
+    if (packet.sourceStates)
+        m_sourceStates = *packet.sourceStates;
+    // Preparation invokes bindings and property handlers too. A nested event
+    // loop must not install a newer model plan before this packet's plan.
     m_publishingModels = true;
+    if (!ConfigChangePublisher::prepare(this, preparations))
+        return;
+    for (const auto &notification : overlayNotifications)
+        if (notification.first &&
+            !boundary.invoke([&] { notification.first->notifyInstalled(notification.second); }))
+            return;
     QMap<ConfigPath, quint64> acknowledgements;
     qint64 modelNotifications = 0;
     for (auto it = modelPlans.cbegin(); it != modelPlans.cend(); ++it) {
@@ -468,7 +499,6 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
     if (!changed.isEmpty() && !boundary.invoke([&] { emit valuesChanged(changed); }))
         return;
     if (packet.sourceStates) {
-        m_sourceStates = *packet.sourceStates;
         if (!boundary.invoke([&] { emit sourceStatesChanged(); }))
             return;
     }
@@ -546,7 +576,8 @@ void ConfigStore::deliver() {
         if (result.operation == "close") {
             m_status = Status::Closed;
             m_worker = nullptr;
-            if (!boundary.invoke([&] { emit statusChanged(); }))
+            if (!ConfigChangePublisher::prepare(this, {{m_changes.get(), {}}}) ||
+                !boundary.invoke([&] { emit statusChanged(); }))
                 return;
         }
         if (!boundary.invoke([&] { emit completed(result); }))

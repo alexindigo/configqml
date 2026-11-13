@@ -5,6 +5,9 @@
 #include "configmemorybackend.h"
 #include "configprojection_p.h"
 #include "configoverlay_p.h"
+#include "configdraft_p.h"
+#include "configevidence_p.h"
+#include "configapply_p.h"
 #include <QQueue>
 #include <QTimer>
 #include <QFileSystemWatcher>
@@ -13,6 +16,11 @@
 namespace configqml {
 QByteArray encodeMemoryValue(const QVariantMap &raw);
 QVariantMap decodeMemoryValue(const QByteArray &bytes);
+struct ConfigGroupSnapshot {
+    quint64 publicationGeneration = 0;
+    QMap<QString, ConfigGroupInfo> groups;
+    QMap<QString, quint64> generations;
+};
 struct ConfigWorkerPacket {
     ConfigSnapshot snapshot;
     std::shared_ptr<const ConfigSnapshot> admitted;
@@ -27,8 +35,8 @@ struct ConfigWorkerPacket {
     std::optional<ConfigSourceAccepted> sourceAccepted;
     QList<ConfigProjectionEffectsEvent> projectionEffects;
     QList<ConfigError> projectionDiagnostics;
-    QMap<QString, ConfigGroupInfo> groups;
-    QMap<QString, quint64> groupGenerations;
+    // Absent means unchanged; an engaged empty snapshot is authoritative.
+    std::optional<ConfigGroupSnapshot> retainedGroups;
     QList<ConfigOverlayPresentation> overlays;
     QMap<ConfigPath, QMap<quint64, ConfigModelPlan>> models;
     qint64 planningNanos = 0;
@@ -53,17 +61,25 @@ struct ConfigCommand {
     std::optional<ConfigRetainedGroupOptions> retainedGroup;
     bool retainedLookup = false;
     QString groupToken, groupState;
+    QString evidenceAttemptId; // Immutable provenance snapshot for a prior publication.
     // Object-thread snapshot, including earlier pending lifecycle claims.
     QMap<QString, quint64> groupGenerations;
     std::shared_ptr<ConfigOverlayTransaction> overlay;
     QString editorId;
     QMap<ConfigPath, std::optional<QVariant>> overlayEdits;
+    std::shared_ptr<const ConfigDraftPreview> preview;
+    std::shared_ptr<ConfigApplyAttempt> applyAttempt;
+    QList<ConfigEvidenceReference> preflightEvidence;
 };
 struct ConfigPendingIntent {
     quint64 id = 0, input = 0;
     ConfigPath path;
     ConfigFileEdit edit;
     QString reservation;
+    std::optional<ConfigSourcePreimage> frozen = std::nullopt;
+    QVariantMap frozenBase = {};
+    std::optional<ConfigRevision> frozenRebasedOnto = std::nullopt;
+    QList<ConfigPath> frozenOverrides = {};
 };
 struct ConfigRetainedCapture {
     ConfigGroupInfo info;
@@ -73,8 +89,6 @@ struct ConfigRetainedCapture {
     QMap<QString, QSet<quint64>> intents;
     QMap<QString, QVariantMap> bases;
     QMap<QString, ConfigRevision> revisions;
-    QMap<QString, ConfigRevision> uncertain;
-    QMap<QString, QByteArray> uncertainBytes;
     QMap<QString, QVariantMap> originalBases;
     QMap<QString, ConfigRevision> originalRevisions;
     QMap<QString, QByteArray> bytes, originalBytes;
@@ -106,9 +120,10 @@ public:
     void overlayLease(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
     void overlayRelease(const QString &token);
     void overlayContinue(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
-    void overlayChanged(const QString &editorId);
+    void overlayChanged(const QString &editorId, bool ownerChange = false);
     void overlayDetach(const QString &editorId);
     void overlayScopeClosed(const std::shared_ptr<std::atomic_bool> &lifetime);
+    void draftPreview(const std::shared_ptr<const ConfigDraftPreview> &preview);
     void overlayControl(const std::function<void(ConfigWorker &)> &message);
     void holdOverlayLeases(bool hold);
     qsizetype heldOverlayLeases() const { return m_overlayPaused.size(); }
@@ -119,6 +134,49 @@ signals:
     void packetReady(const configqml::ConfigWorkerPacket &packet);
 
 private:
+    friend class ConfigStoreTestAccess;
+    QMap<QString, ConfigApplyCapture> m_applyCaptures;
+    QVariantList applySourceFacts(const ConfigPath &path) const;
+    void checkApplyCaptures();
+    void prepareApplyConfirmation(const QString &source,
+                                  const ConfigSourcePreimage *preflight = nullptr);
+    ConfigApplyCapture *applyCapture(const ConfigCommand &command);
+    void rememberApply(const ConfigCommand &command, const QList<ConfigPath> &paths,
+                       const QMap<ConfigPath, std::optional<QVariant>> &edits);
+    void reconcileApplyRejection(const ConfigCommand &command);
+    struct OwnPublication {
+        ConfigSourcePreimage output, predecessor, recoveryBase;
+        ConfigCommand origin;
+        QSet<quint64> intents;
+    };
+    QMap<QString, QMap<QString, OwnPublication>> m_ownPublications;
+    QMap<QString, ConfigSourcePreimage> m_recoveryPreimages;
+    ConfigCommand publicationOrigin() const;
+    void rememberOwnPublication(const QString &source, const ConfigBackendResult &outcome,
+                                const QByteArray &bytes, const ConfigSourcePreimage &predecessor);
+    std::optional<OwnPublication> ownPublication(const QString &source,
+                                                 const ConfigBackendResult &read) const;
+    bool samePublicationBase(const QString &source, const ConfigSourcePreimage &a,
+                             const ConfigSourcePreimage &b) const;
+    bool causalPublicationBase(const QString &source, const ConfigSourcePreimage &a,
+                               const ConfigSourcePreimage &b) const;
+    bool savePredecessor(const QString &source, const ConfigSourcePreimage &preimage) const;
+    void advanceOwnPublications(const QString &source, const ConfigBackendResult &outcome,
+                                const QSet<quint64> &confirmedIntents);
+    void supersedeOrdinaryPublication(const QString &source, const ConfigBackendResult &read);
+    static constexpr qsizetype EvidenceBacklogLimit = 64;
+    static constexpr qsizetype EvidencePublicationReserve = 8;
+    struct PendingEvidence {
+        ConfigEvidenceObservation observation;
+        QByteArray attemptKey;
+    };
+    QMap<QString, QQueue<PendingEvidence>> m_pendingEvidence;
+    QSet<QString> m_evidenceBlocked;
+    QString drainEvidence(const QString &source, ConfigResult *result);
+    QString prepareEvidence(const QString &source, qsizetype required,
+                            ConfigResult *result = nullptr);
+    void attachEvidence(const PendingEvidence &pending, const ConfigEvidenceReference &reference,
+                        ConfigResult *result);
     void drain();
     void process(const ConfigCommand &command);
     void coverInput(const ConfigCommand &command);
@@ -134,7 +192,14 @@ private:
     static void recordPublication(ConfigResult &result, const QString &source,
                                   const ConfigBackendResult &outcome, bool published = true);
     static void finalizePublicationState(ConfigResult &result);
-    bool reloadFiles(const std::optional<ConfigCommand> &command = {});
+    bool reloadFiles(const std::optional<ConfigCommand> &command = {},
+                     QList<ConfigEvidenceReference> *evidence = nullptr);
+    ConfigError acceptFileObservations(const QMap<QString, ConfigBackendResult> &reads,
+                                       const std::optional<ConfigCommand> &command,
+                                       ConfigResult *result, const QString &phase,
+                                       const QString &cause,
+                                       const QList<ConfigError> &acquisitionErrors = {});
+    void freezeOrdinary(const QString &id, const ConfigJsonTransaction &transaction);
     void armWatches();
     void scheduleAutoSave();
     void processGroup(const ConfigCommand &command);
@@ -154,18 +219,23 @@ private:
     QMap<QString, std::shared_ptr<ConfigOverlayTransaction>> m_overlayTransactions;
     QMap<QString, ConfigCommand> m_overlayCommands;
     QMap<QString, ConfigOverlayCapture> m_overlayCaptures;
+    QMap<QString, QPair<QString, bool>> m_overlayDelivered;
+    QMap<QString, ConfigOverlayPlacement> m_overlayPlacements;
+    QString overlayPlacementToken(const QString &id, const ConfigOverlaySelection &selection);
+    QMap<QString, std::shared_ptr<const ConfigDraftPreview>> m_draftPreviews;
     QMap<QString, ConfigOverlaySubscription> m_overlaySubscriptions;
     QMap<QString, ConfigResult> m_overlayReceipts;
     QList<ConfigOverlayPresentation> m_overlayPackets;
     QList<ConfigPath> m_reloadSelection;
     void profile(const ConfigCommand &command);
-    bool migrateSources();
+    bool migrateSources(QMap<QString, ConfigRevision> *sourceRevisions = nullptr);
     ConfigJsonBackend::Canonicalizer canonicalizer(const QString &id,
                                                    const std::optional<ConfigCommand> &command = {},
                                                    ConfigResult *result = nullptr);
     QVariantMap canonicalMemory(const QString &id, const QVariantMap &raw, bool migration = false);
     QMap<QString, ConfigPath> m_strictSources;
     QList<ConfigError> m_unknownWarnings;
+    QMap<QByteArray, ConfigEvidenceReference> m_attemptEvidence;
     QMap<QByteArray, QList<ConfigEvidenceReference>> m_unknownEvidence;
     void recordListCommand(const ConfigCommand &command);
     QString quarantined(const ConfigPath &path) const;
@@ -185,7 +255,8 @@ private:
                                                const ConfigCommand &command) const;
     bool reserved(const ConfigPath &path) const;
     QStringList unresolvedGroups(quint64 prefix) const;
-    void confirmed(const QString &id, const QVariantMap &raw, const ConfigBackendResult &outcome);
+    void confirmed(const QString &id, const QVariantMap &raw, const ConfigBackendResult &outcome,
+                   const ConfigSourcePreimage *preflight = nullptr);
     void refreshDirty(const QString &id);
     void describeGroup(ConfigResult &result, const ConfigGroupInfo &info) const;
     bool recoverOwnPublication(const QString &source, const ConfigBackendResult &read);
@@ -217,6 +288,8 @@ private:
     QMap<QString, QList<ConfigPendingIntent>> m_saveIntents;
     QMap<QString, QVariantMap> m_saveBases;
     QMap<QString, ConfigRevision> m_saveRevisions;
+    QSet<QString> m_saveRebase;
+    bool m_savePublished = false;
     QVariantMap m_activeRaw;
     bool m_unresolvedSave = false;
     bool m_recoveryRead = false;
@@ -240,15 +313,17 @@ private:
     QMap<ConfigPath, quint64> m_pathIntents;
     QMap<ConfigPath, QVariantList> m_content;
     QMap<ConfigPath, quint64> m_contentRevisions;
+    // Exact provenance transitions from confirmed own IO, consumed by publish().
+    QMap<ConfigPath, QPair<QList<ConfigContribution>, QList<ConfigContribution>>>
+        m_ownConfirmations;
     ConfigSnapshot m_previous;
     QMap<ConfigPath, QMap<quint64, QList<ConfigModelRow>>> m_modelVersions;
     QMap<QString, ConfigRoute> m_routes;
     QMap<QString, ConfigRevision> m_revisions;
     QMap<QString, quint64> m_dirty;
-    QList<ConfigResult> m_failures;
+    QList<ConfigResult> m_failures; // Terminal loss only; request failures live in facade history.
     ConfigCommand m_save;
     ConfigResult m_saveResult;
-    bool m_saveRetainedFailure = false;
     QStringList m_saveSources;
     QString m_activeSource;
     QByteArray m_activeBytes;

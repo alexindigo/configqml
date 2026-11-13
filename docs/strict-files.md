@@ -9,8 +9,12 @@ None implies either of the others. Unknown-data removals retain role
 `ConfigJsonFile::conflictPolicy` / `JsonFileSource.conflictPolicy` defaults to
 `PathIntent`: the existing cooperative writer protocol merges disjoint foreign
 path edits. Select `StrictSourcePreimage` when a save must refuse *any* foreign
-change to the original source, including unknown keys, formatting, inode, configured
-file/parent links or directory identity. Declaration metadata compiles once.
+content change to the original source, including unknown keys and formatting,
+or changes to configured file/parent links or directory identity. Declaration
+metadata compiles once. A final file's inode/timestamps alone do not conflict:
+exact original bytes and presence under the lock resolve frozen ordinary work
+and retained-group retries. Semantically equal JSON with different bytes still
+conflicts. Evidence keeps both observations and their distinct revisions.
 
 Strict stores require an absolute clean `evidenceDirectory`. Pending intent and
 retained groups capture original presence, exact bytes and the resolved revision.
@@ -19,6 +23,109 @@ preimage. The JSON worker compares it again under the resolved target's sidecar
 lock. Only correlated own confirmed publications advance causal descendants.
 Strict conflict is `source-preimage-conflict`; the original intent remains unsaved.
 This is cooperative locking and identity checking, not universal filesystem CAS.
+
+Within one save, sibling strict routes may share newly created parent directories.
+The backend records only its own successful directory creations, with exact
+device/inode identities and open descriptors.
+Those witnesses can extend an earlier missing-parent chain for another route in
+the same save, including retained-group routes. Before a failed save ends, only
+its attempted ordinary/frozen owner or retained group adopts those proven parent
+identities. Their immutable witnesses keep the corresponding descriptors alive
+through Retry, preventing inode recycling; settlement or group release reclaims
+them. A directory created by another writer, an existing directory, a replacement
+inode or a configured symlink change does not qualify. The creation allowance
+ends with the save; later requests must match their captured parent chain, not a
+store-lifetime exemption. Unattempted owners, even on the same file, receive no
+extension from a failed sibling attempt. Confirmed own publication can still
+advance their causal capture normally. Both strict publication policies use this
+same parent-identity owner; each file still locks, publishes and reads back on its
+own route, with truthful partial failure if a foreign parent change is detected.
+
+## Pending rebase (0.5.0)
+
+`ConfigConflictPolicy::StrictPendingRebase` / `JsonFileSource.StrictPendingRebase`
+is an additive, opt-in policy requiring `evidenceDirectory`. Ordinary pending
+intents inside a save's input prefix may rebase while their source is unfrozen,
+as defined below. Reserved work and retained captures never rebase. Watch
+and explicit reload observations update presentation, not the pending preimage.
+
+Rebase occurs under the resolved target's sidecar lock against the fresh file.
+Its link and parent chain must still match the capture; a final inode/mtime
+change is allowed, including exact-byte ABA. Changed bytes must be decoded,
+retained as `foreign`, admitted to the disk layer and published as an `external`
+source generation with pending intent overlaid. Locked preflight uses the same
+acceptance owner as reload; it posts that generation before `own_save`. Evidence
+or admission failure prevents publication. A changed file discovered only at
+preflight receives the same treatment as an earlier accepted watch/reload.
+
+The candidate starts from that fresh raw file. Each ordinary edit is compared
+at its fence against the original dirty baseline. Disjoint edits preserve all
+foreign siblings. At the same leaf, local intent wins over a foreign addition,
+change or deletion, including atomic lists, records and maps with opaque/open
+members. Missing object ancestors are recreated only along the local path;
+foreign sibling deletions stay deleted. A changed non-object ancestor refuses
+with `path-conflict`. Namespace reset fragments still fence the entire subtree:
+any foreign change inside it refuses rather than partially resetting it.
+
+Conditional initialization uses fresh presence, and cleanup removes only empty
+namespace scaffolding. A foreign deletion is honored: a write recreates only
+its applied leaves, while a reset against an absent file is `nothing_to_save`.
+After a real rebase, an exact candidate already on disk is covered without
+writing. Unknown-data closure and `deleteWhenEmpty` run after applying the
+eligible edits as usual.
+These rebase-only no-write shortcuts require F to differ from P. When F equals P,
+publication follows StrictSourcePreimage byte for byte, including explicit
+equal-value rewrites and resets against an unchanged absent file when
+`deleteWhenEmpty` is false. A required (`optional: false`) file
+still enforces startup/reload presence, but its foreign deletion at pending-rebase
+preflight is honored: a local write recreates only its leaves, and reset can leave
+it absent. Required presence is not a publication deletion veto.
+
+A failed attempt before a successful locked fresh read (for example lock failure,
+target validation or failure to retain original evidence) does not freeze ordinary
+work. Once a fresh file has been read, a refusal with no publication effect keeps
+the original capture P and baseline B, including parse/admission and structural
+conflicts. Restoring P resolves that work through the strict content path. Only
+an actual or uncertain publication effect freezes against its computed preflight
+base F and retains that attempt's overlap classification. This no-effect pin rule
+refines the original pending-rebase proposal so refused work can be resolved.
+
+While a source has frozen ordinary work, all eligible ordinary edits to that same
+file, including newer never-attempted edits, use that frozen preimage strictly.
+They cannot publish around it by rebasing; other sources remain independent.
+Later saves, including autosave, may retry the strict capture. Exact-byte
+restoration resolves it despite a changed final inode/mtime. After an uncertain
+effect, both ordinary and retained work can recover the exact own publication
+revision AND bytes through their captured causal predecessor. Retry still runs
+publication, sync and readback before success; an own watcher read never settles
+failed work. Ordinary exact-preimage restoration remains supported. Nothing is
+recaptured from the facade or discarded.
+
+Every attempt retains `original`, fresh `foreign`, `published` and `readback`
+observations where available. Evidence metadata keys are unchanged. A route fact
+adds optional native `rebasedOnto` (QML revision string, empty when absent) and
+`overriddenPaths` (absolute schema paths, sanitized like unknown-data paths).
+They describe an ordinary rebase or its frozen retry. Covered no-write rebases
+can carry a route fact while the aggregate remains `nothing_to_save`.
+After an actual publication effect, each overridden leaf emits `sourceWarning`
+with phase `rebase`, code `foreign-value-overridden` and foreign evidence.
+Delivery is capped at 64 paths plus `foreign-value-overridden-truncated`.
+An overlap is reported only when the final candidate actually differs from F
+at that leaf; a matching foreign value or matching absence is not overridden.
+Known failures before publication emit no override warning; uncertain effects
+still report their actual publication facts. An exact-candidate no-op has no
+overridden paths or override warning.
+
+Retained/stopped groups, frozen ordinary attempts, changed non-object ancestors,
+namespace overlaps, retargets, parent replacement, hard links, lock failures,
+parse errors and evidence failures still refuse. Writes after preflight are
+checked by publication identity validation and readback, with known or uncertain
+failure as appropriate. The protocol remains cooperative, not filesystem CAS.
+In a multi-source save, confirmed earlier own routes publish their own source
+generation before a later source's foreign preflight observation is admitted.
+Unchanged already-accepted preflights do not create an extra generation or a
+no-op migration receipt. Identical foreign observations within one attempt share
+one retained reference; different attempts and roles keep independent evidence.
 
 ## Retained observations
 
@@ -40,6 +147,34 @@ This also applies to versioned migrations: an underlying publication or conflict
 error remains in its route entry while the overall error is `evidence-retention`.
 Only confirmed readback contributes covered revisions; uncertain routes stay
 uncertain even when earlier shards succeeded and the aggregate result is partial.
+
+Failed evidence writes leave complete observations in a worker-owned FIFO for
+that source, including exact bytes/revision and original role, phase, request,
+group/attempt and observation order. A later attempt drains old observations
+through the same synced artifact writer before or with its own publication;
+recovered references appear in source state and that attempt's receipt, but the
+artifact metadata keeps its original correlation. Restoring a preference file
+cannot erase a foreign witness acquired before the restoration. Read/parse
+failures, pending preflight, published output, readback and late observations
+share this ownership path, including retained groups and migrations.
+
+Each source's FIFO is bounded to 64 complete observations, not payload bytes;
+there is no new settings-file size limit. Reads reserve one slot and publication
+transactions reserve eight before acquisition. If that reservation cannot fit,
+`evidence-backlog` blocks further reads/reload admission and publication for the
+affected source until its FIFO fully drains. No acquired entry is evicted.
+Other sources still admit/publish; a mixed save reports the blocked source's
+failure and the other sources' actual route outcomes. Successful saves cannot
+hide unretained evidence obligations of that save, even if no dirty setting
+intent remains after a confirmed publication. The pending FIFO is in memory;
+it is not crash-durable before the evidence write succeeds.
+
+Enqueue enforces the same 64-entry bound in Release even if an acquisition caller
+misses its reservation: it marks the source blocked and reports `evidence-backlog`
+without adding entry65. Existing queued observations are never evicted. Draft
+and overlay Retry receipts also carry references drained by their internal
+selected-source refresh, with the original observation metadata and ordering;
+those references are not lost in a temporary reload result.
 
 ## Opt-in deletion
 

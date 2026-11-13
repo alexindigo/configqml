@@ -140,7 +140,7 @@ public:
     Q_ENUM(WatchMode)
     enum StartupErrorPolicy { FailReady, SkipProjectionRetainError };
     Q_ENUM(StartupErrorPolicy)
-    enum ConflictPolicy { PathIntent, StrictSourcePreimage };
+    enum ConflictPolicy { PathIntent, StrictSourcePreimage, StrictPendingRebase };
     Q_ENUM(ConflictPolicy)
     explicit ConfigJsonFileSource(QObject *parent = nullptr) : ConfigMemorySource(parent) {
         sourceId = "json";

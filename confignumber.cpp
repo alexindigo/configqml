@@ -7,6 +7,50 @@
 #include <limits>
 
 namespace configqml {
+namespace {
+QString normalizedDecimal(QString text) {
+    const bool negative = text.startsWith('-');
+    if (negative)
+        text.remove(0, 1);
+    qint64 exponent = 0;
+    const auto at = text.indexOf('e', 0, Qt::CaseInsensitive);
+    if (at >= 0) {
+        const auto exp = text.mid(at + 1);
+        const auto bound = qint64(text.size()) + 2048;
+        for (const auto digit : exp)
+            if (digit.isDigit())
+                exponent = qMin(bound, exponent * 10 + digit.digitValue());
+        if (exp.startsWith('-'))
+            exponent = -exponent;
+        text.truncate(at);
+    }
+    const auto point = text.indexOf('.');
+    if (point >= 0) {
+        exponent -= text.size() - point - 1;
+        text.remove(point, 1);
+    }
+    qsizetype first = 0, end = text.size();
+    while (first < end && text[first] == '0')
+        ++first;
+    if (first == end)
+        return negative ? "-0" : "0";
+    while (end > first && text[end - 1] == '0') {
+        --end;
+        ++exponent;
+    }
+    return (negative ? "-" : "") + text.mid(first, end - first) + ':' + QString::number(exponent);
+}
+} // namespace
+std::optional<double> ConfigNumber::exactPresentation() const {
+    const auto checked = real();
+    if (!checked.ok())
+        return std::nullopt;
+    const auto number = checked.value.toDouble();
+    const auto encoded =
+        number == 0 && std::signbit(number) ? QString("-0.0") : QString::number(number, 'g', 17);
+    return normalizedDecimal(m_token) == normalizedDecimal(encoded) ? std::optional<double>(number)
+                                                                    : std::nullopt;
+}
 std::optional<ConfigNumber> ConfigNumber::fromJson(const QString &token) {
     static const QRegularExpression grammar(
         "\\A-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\\z");

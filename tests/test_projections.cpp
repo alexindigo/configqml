@@ -11,6 +11,38 @@ using T = D::Type;
 class ProjectionTest : public QObject {
     Q_OBJECT
 private slots:
+    void openNumberProjectionUsesDeclaredDomain() {
+        auto open = D::leaf(T::Record, QVariantMap{});
+        open.open = true;
+        const auto captured = open.validate(
+            QVariantMap{{"n", 17}, {"wide", decodeJsonValue("18446744073709551615").value}});
+        QVERIFY(captured.ok());
+        const auto raw = captured.value.toMap();
+        const ConfigSchema schema(D::group({{"n", D::leaf(T::Real, 0.0)}}));
+        ConfigProjectionSpec projection{
+            "number", {"user"}, {}, [](const ConfigProjectionInput &input) {
+                return ConfigProjectionResult{
+                    input.raw.value("open").toMap(), input.compatibilityRaw, {}, {}};
+            }};
+        ConfigSource source{"user", {}, {{"open", raw}}};
+        ConfigLayers layers(
+            schema,
+            {{"user", ConfigLayerKind::File, ConfigAdmissionPolicy::FieldFallback, {source}, true}},
+            {projection});
+        QVERIFY(layers.valid());
+        QCOMPARE(layers.value({"n"})->metaType().id(), QMetaType::Double);
+        QCOMPARE(layers.value({"n"})->toDouble(), 17.0);
+        QCOMPARE(layers.source("user", "user")->raw.value("open"), QVariant(raw));
+        source.raw["open"] = decodeJsonValue("{\"n\":18,\"wide\":18446744073709551615}").value;
+        source.revision = "reload";
+        QVERIFY(layers.replaceSource("user", source).accepted);
+        QCOMPARE(layers.value({"n"})->toDouble(), 18.0);
+        source.raw["open"] = QVariantMap{{"n", QString("17")}};
+        source.revision = "wrong";
+        QVERIFY(layers.replaceSource("user", source).accepted);
+        QCOMPARE(layers.value({"n"})->toDouble(), 0.0); // Invalid contribution falls back.
+        QVERIFY(!layers.diagnostics("user", "user").isEmpty());
+    }
     void rejectedLocalProjectionNeverReportsAcceptance_data() {
         QTest::addColumn<int>("operation");
         QTest::newRow("set") << 0;

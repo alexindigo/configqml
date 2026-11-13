@@ -2,10 +2,59 @@
 #pragma once
 #include "configworker_p.h"
 #include "configshutdown_p.h"
+#include "configchange_p.h"
+#include "configrevision_p.h"
 
 namespace configqml {
 class ConfigStoreTestAccess {
 public:
+    static std::weak_ptr<ConfigFileDescriptor> pendingParentLease(const ConfigWorker &worker,
+                                                                  const QString &source,
+                                                                  const QString &group = {}) {
+        const auto witness =
+            (group.isEmpty() ? worker.m_pendingRevisions.value(source)
+                             : worker.m_groups.value(group).revisions.value(source))
+                .witness;
+        return witness && !witness->ownedParents.isEmpty() ? witness->ownedParents.first()
+                                                           : std::weak_ptr<ConfigFileDescriptor>{};
+    }
+    static void observeOverlayPreparation(ConfigOverlayEditor &editor, QObject *context,
+                                          ConfigChangePublisher::Callback callback) {
+        editor.m_changes->add(context, std::move(callback));
+    }
+    static void post(ConfigWorker &worker, const ConfigWorkerPacket &packet) {
+        worker.post(packet);
+    }
+    static ConfigWorkerPacket publication(ConfigWorker &worker) { return worker.publish(); }
+    static qsizetype evidenceBacklogLimit() { return ConfigWorker::EvidenceBacklogLimit; }
+    static bool ordinaryOwnPublication(const ConfigWorker &worker, const QString &source) {
+        return worker.m_ownPublications.value(source).contains(QString());
+    }
+    static QString acquireEvidence(ConfigWorker &worker, const QString &source) {
+        const auto capacity = worker.prepareEvidence(source, 1);
+        if (!capacity.isEmpty())
+            return capacity;
+        auto *backend = worker.jsonBackend();
+        const auto id = backend->submit({ConfigBackendRequest::Operation::Read, source, {}, {}});
+        return worker.retainObservation(source, *backend->take(id), "read", "foreign");
+    }
+    static QString retainUnreservedEvidence(ConfigWorker &worker, const QString &source,
+                                            const ConfigBackendResult &read) {
+        return worker.retainObservation(source, read, "read", "foreign");
+    }
+    static qsizetype frozenIntents(const ConfigWorker &worker, const QString &source) {
+        qsizetype count = 0;
+        for (const auto &intent : worker.m_intents.value(source))
+            count += bool(intent.frozen);
+        return count;
+    }
+    static QList<ConfigEvidenceObservation> pendingEvidence(const ConfigWorker &worker,
+                                                            const QString &source) {
+        QList<ConfigEvidenceObservation> result;
+        for (const auto &pending : worker.m_pendingEvidence.value(source))
+            result.append(pending.observation);
+        return result;
+    }
     static quint64 endpointRevision(const ConfigStore &store, const ConfigPath &path) {
         return store.m_owner->overlayEndpoint()->revision(path);
     }

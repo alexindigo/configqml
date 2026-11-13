@@ -24,6 +24,25 @@ ConfigStoreHandle::ConfigStoreHandle(ConfigStore *store, ConfigPath prefix, bool
             ConfigConsumerGuard(this).invoke([&] { emit valuesChanged(relative); });
     });
 }
+ConfigStoreHandle::ConfigStoreHandle(ConfigDraft *draft, ConfigPath prefix, QObject *parent)
+    : ConfigStoreHandle(draft->m_store, prefix, false, parent) {
+    m_previewDraft = draft;
+    m_previewId = draft->m_previewId;
+    m_previewLifetime = draft->m_previewLifetime;
+    disconnect(m_store, &ConfigStore::valuesChanged, this, nullptr);
+    connect(draft, &ConfigDraft::previewValuesChanged, this, [this](const auto &paths) {
+        if (!attached())
+            return;
+        QList<ConfigPath> relative;
+        for (const auto &path : paths)
+            if (startsWith(path, m_prefix))
+                relative.append(path.mid(m_prefix.size()));
+        if (!relative.isEmpty())
+            ConfigConsumerGuard(this).invoke([&] { emit valuesChanged(relative); });
+    });
+    connect(draft, &ConfigDraft::previewScopesClosed, this, &ConfigStoreHandle::detached);
+    connect(draft, &QObject::destroyed, this, &ConfigStoreHandle::detached);
+}
 ConfigStoreHandle::~ConfigStoreHandle() { invalidateLifetime(); }
 void ConfigStoreHandle::invalidateLifetime() {
     if (!m_lifetime->exchange(false))
@@ -40,20 +59,35 @@ void ConfigStoreHandle::detach() {
     ConfigConsumerGuard(this).invoke([&] { emit detached(); });
 }
 ConfigStoreHandle *ConfigStoreHandle::scope(const ConfigPath &relative, bool writable) {
+    if (m_previewLifetime) {
+        if (!attached())
+            return nullptr;
+        const auto descriptor = m_previewDraft->previewSchema().descriptor(m_prefix + relative);
+        return descriptor && descriptor->type == ConfigDescriptor::Type::Group
+                   ? new ConfigStoreHandle(m_previewDraft, m_prefix + relative, this)
+                   : nullptr;
+    }
     auto *child = new ConfigStoreHandle(m_store, m_prefix + relative, writable && m_writable, this);
     child->m_diagnostics = m_diagnostics;
     return child;
 }
 QVariant ConfigStoreHandle::value(const ConfigPath &relative) const {
+    if (m_previewLifetime)
+        return attached() ? m_previewDraft->previewValue(m_prefix + relative) : QVariant();
     return m_store ? m_store->value(m_prefix + relative) : QVariant();
 }
 ConfigPathState ConfigStoreHandle::info(const ConfigPath &relative) const {
+    if (m_previewLifetime &&
+        (!attached() || !m_previewDraft->previewSchema().descriptor(m_prefix + relative)))
+        return {};
     auto result = m_store ? m_store->info(m_prefix + relative) : ConfigPathState{};
     if (!m_writable)
         result.provenance.route = {};
     return result;
 }
 ConfigListModel *ConfigStoreHandle::listModel(const ConfigPath &relative) const {
+    if (m_previewLifetime)
+        return nullptr;
     return m_store ? m_store->listModel(m_prefix + relative) : nullptr;
 }
 ConfigRequestHandle ConfigStoreHandle::setUser(const ConfigPath &relative, const QVariant &value,

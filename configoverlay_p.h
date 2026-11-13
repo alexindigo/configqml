@@ -21,6 +21,8 @@ struct ConfigOverlaySelection {
     ConfigOverlayMode mode = ConfigOverlayMode::Editor;
     std::shared_ptr<ConfigOverlayEndpoint> owner, base;
     std::shared_ptr<std::atomic_bool> baseLifetime;
+    QString previewId;
+    std::shared_ptr<std::atomic_bool> previewLifetime;
     ConfigPath basePath, ownerPath;
     quint64 ownerGeneration = 0;
     QList<ConfigValueSelector> entryPath, identityPath;
@@ -29,14 +31,19 @@ struct ConfigOverlaySelection {
 };
 struct ConfigOverlayPresentation {
     QString editorId, error;
+    QString placementToken;
     ConfigOverlayMode mode = ConfigOverlayMode::Editor;
     ConfigSchema schema{ConfigDescriptor::group({})};
     QMap<ConfigPath, QVariant> values;
+    QMap<ConfigPath, QVariant> baseValues;
+    quint64 coveredSequence = 0;
+    bool dirtyKnown = false, dirty = false;
     ConfigPath ownerPath;
     bool conflicted = false, refreshed = false;
 };
 struct ConfigOverlayCapture {
     ConfigOverlaySelection selection;
+    QString terminalError;
     ConfigSchema schema{ConfigDescriptor::group({})};
     QVariantMap baseValues, overrides;
     QVariant ownerValue;
@@ -45,6 +52,13 @@ struct ConfigOverlayCapture {
     ConfigPathState ownerFence;
     QMap<ConfigPath, quint64> baseIngress;
     quint64 ownerIngress = 0;
+};
+struct ConfigOverlayPlacement {
+    QVariant ownerValue;
+    QList<ConfigValueSelector> rawEntryPath;
+    QVariant identity;
+    bool present = false;
+    quint64 revision = 0;
 };
 struct ConfigOverlayTransaction {
     // The ordered lease messages pass one continuation baton. Only its holder
@@ -57,6 +71,7 @@ struct ConfigOverlayTransaction {
     ConfigOverlayCapture captured;
     QMap<ConfigPath, std::optional<QVariant>> edits;
     QString error;
+    QList<ConfigEvidenceReference> preflightEvidence;
     QList<std::shared_ptr<ConfigOverlayEndpoint>> order;
     qsizetype acquired = 0;
     std::atomic_bool cancelled{false};
@@ -67,11 +82,15 @@ struct ConfigOverlaySubscription {
     QList<ConfigPath> paths;
     QMap<ConfigPath, quint64> revisions;
     std::shared_ptr<std::atomic_bool> lifetime;
+    QString previewId;
+    std::shared_ptr<std::atomic_bool> previewLifetime;
 };
 void overlayRemoveDependency(const std::shared_ptr<ConfigOverlayEndpoint> &endpoint,
                              const QString &id);
 // Pure worker-side declared policy. Schema values and opaque raw remain distinct.
 QVariant overlayMerge(const QVariant &base, const QVariant &overrides);
+bool overlayPlacementMoved(const QVariant &before, const QVariant &after,
+                           const QList<ConfigValueSelector> &address, const QString &overrideKey);
 QVariantMap overlayDifference(const ConfigSchema &schema, const QVariantMap &base,
                               const QVariantMap &edited, const QVariantMap &original);
 std::optional<QVariant> overlayAt(const QVariant &value, const QList<ConfigValueSelector> &path);

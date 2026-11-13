@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configmemorybackend.h"
+#include "configrevision_p.h"
 
 namespace configqml {
 static QByteArray copy(const QByteArray &bytes) {
@@ -19,9 +20,9 @@ bool ConfigMemoryBackend::schedule(const Schedule &schedule) {
 bool ConfigMemoryBackend::seed(const QString &sourceId, const QByteArray &bytes, bool exists) {
     if (!onOwner() || sourceId.isEmpty())
         return false;
-    m_entries.insert(
-        QString(sourceId.constData(), sourceId.size()),
-        {exists ? copy(bytes) : QByteArray(), {exists, QByteArray::number(++m_nextRevision)}});
+    m_entries.insert(QString(sourceId.constData(), sourceId.size()),
+                     {exists ? copy(bytes) : QByteArray(),
+                      {exists, compactIdentity("memory:" + QByteArray::number(++m_nextRevision))}});
     return true;
 }
 quint64 ConfigMemoryBackend::submit(const ConfigBackendRequest &input) {
@@ -79,7 +80,8 @@ ConfigBackendResult ConfigMemoryBackend::execute(quint64 id, const Pending &pend
     }
     if (request.expected != entry.revision)
         return fail("revision-conflict");
-    entry = {copy(request.bytes), {true, QByteArray::number(++m_nextRevision)}};
+    entry = {copy(request.bytes),
+             {true, compactIdentity("memory:" + QByteArray::number(++m_nextRevision))}};
     m_entries.insert(request.sourceId, entry);
     result.publicationWitness = entry.revision;
     if (pending.schedule.fault == Fault::AfterPublication ||

@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 #include "configvalue.h"
+#include <QObject>
 
 namespace configqml {
 // Owned JSON decimal syntax, before any binary floating-point conversion.
 // Keep this value in raw layers; schema admission chooses the numeric domain.
 class ConfigNumber {
+    Q_GADGET
+    Q_PROPERTY(QString decimal READ token CONSTANT)
 public:
     ConfigNumber() = default;
     static std::optional<ConfigNumber> fromJson(const QString &token);
     QString token() const { return m_token; }
+    std::optional<double> exactPresentation() const;
     ConfigValueResult integer(bool unsignedType, const ConfigPath &path = {},
                               const ConfigDiagnosticBuilder &diagnostics = {}) const;
     ConfigValueResult real(const ConfigPath &path = {},

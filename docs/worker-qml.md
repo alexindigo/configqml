@@ -44,6 +44,16 @@ are installed before the first notification. Rejection of the latest write
 restores authoritative effective values before failure signal/callback delivery.
 Publications never enter ingress as new persistent events.
 
+Public change delivery has a private preparation boundary. Every affected
+native and QML presentation cache is invalidated, then existing namespace and
+bound consumers are refreshed across sibling scopes, drafts, previews and all
+packet-installed overlays before public value/model/state notifications.
+Readiness guards are prepared too, including preview closure and detach.
+This does not depend on connection order or create a new input event. Namespace
+input bindings still use checked setters; explicit assignment removes the binding.
+Qt model about-to-change signals retain their required old row structure, while
+namespace getters are already current; final model signals expose the new rows.
+
 Every command settlement, including terminal-worker refusal, covers the input's
 sequence and path generation. An outstanding latest local write therefore rolls
 back to authoritative state before its failure callback; stale failures still
@@ -76,8 +86,23 @@ Save/flush/close results have exactly three statuses:
 Results include request/store identity, operation, input prefix, confirmed covered
 revisions, per-source publication outcomes, known/uncertain/partial state and a
 structured value-free error. An uncertain route is never called saved. Partial
-success remains failed, with each route's actual state. Later save/flush cannot
-silently retry or erase a retained rejection or failed attempt.
+success remains failed, with each route's actual state. Later saves, including
+autosave, attempt remaining source work against its capture without recapturing it;
+resolved publication failures do not poison later prefixes. Prior receipts remain
+evidence. Retained-group retries still require the explicit group API.
+QML event fields materialize lazily from immutable native snapshots; see
+[compact events](events.md) for identities, explicit metadata access and the
+0.5.0 development-build native ABI change.
+Rejected input receipts remain in failure history, but cannot mark later
+publishing saves failed. Only terminal worker loss propagates to queued saves.
+
+With `StrictPendingRebase`, route outcomes additionally expose `rebasedOnto`
+(the foreign revision string, empty if absent) and `overriddenPaths` (an array of
+sanitized segment-array paths). A covered no-write rebase can include a route
+fact while returning `nothing_to_save`. Nonfatal local-wins notices use
+`sourceWarning` with phase `rebase`, code `foreign-value-overridden`, path and
+foreign evidence references; at most 64 plus one truncation notice. Preflight
+discovery publishes an `external` source generation before the save's own one.
 
 `save()` captures the reported sequence prefix, never the facade graph. A→B→A
 across save boundaries produces three ordered captures/publications, not one
@@ -88,7 +113,7 @@ delivered in request order. The callback is detached before consumer reentry.
 ingress at that prefix, flushes it, then releases the worker after ordered
 completion. Later writes fail visibly. Read-only stores never write on these
 requests. `x=1; close()` publishes x=1; empty flush returns nothing-to-save; flush
-after a failed save returns failed and retains evidence. Memory backend delays
+after an unresolved failed save returns failed and retains evidence. Memory backend delays
 hold the request queue without blocking the GUI. Unexpected worker exceptions or
 protocol failure stop persistence visibly; the owner is never recreated/replayed.
 
@@ -133,6 +158,25 @@ convenience for a list of strings. No application schema plugin is needed.
 M1 native `Integer` remains exact signed 64-bit; native callers select
 `SafeInteger` for the safe-number domain. JSON numeric tokens retain exact syntax
 until schema admission. Memory transport is separate from the JSON/file codec.
+
+### Unknown numeric members (0.5.0)
+
+Unknown members of preserved/open records and nested maps/lists use one recursive
+presentation contract across namespaces, models, drafts, previews, overlays and
+record-list publications. A decimal that round-trips numerically through the
+normal lossless JSON double encoder is a JS number (`123`, `1.25`). Otherwise it
+is an immutable, frozen native numeric atom with a read-only `.decimal` string
+(`18446744073709551615`, `1e400`, or an over-precision fraction). Overflow and
+underflow are not silently rounded. Declared Int64/UInt64 fields remain decimal
+strings, unchanged.
+
+Assign the actual atom back to retain its exact original numeric token. Reading
+`.decimal` is inspection, not a conversion request; an authored `{decimal:...}`
+object is an ordinary record and cannot forge a numeric atom. Presentation never
+changes raw/native storage. Numeric atoms stay native metatype values beneath
+their frozen QML wrappers; no engine value enters the worker. Namespace
+presentations are cached per changed leaf, and model nodes use the same scalar
+presentation at their QML boundary. Core-only clients retain native values.
 
 Persistent write capability is compiled from immutable source prefixes. A leaf
 without a writable user route is a nonwritable dynamic meta-property. Direct QML
@@ -191,6 +235,30 @@ Unknown dynamic JS properties are not admitted settings; explicit path APIs
 reject undeclared keys. Runtime schema leaves cannot all appear in static
 qmltypes, so dynamic consumers use a var handle; native facades supply static
 metadata. The test fixture's eval is intentional driver code, not production.
+
+### Explicit detached copies (0.5.0)
+
+`store.copyValue(value)` (also available on scoped/draft facades) returns a
+detached, JS-mutable deep copy. Maps/records become null-prototype dictionaries;
+lists become independent JS arrays. Own `__proto__`, `constructor` and `prototype`
+keys survive, including nested keys. Exact numeric atoms stay frozen and retain
+their native numeric domain. Mutating the copy does not call a namespace setter,
+advance input sequence or alter the original; assign the completed atomic value
+back once to admit it. Normal cycle/depth/engine-bound-value refusals are visible.
+
+```qml
+const map = store.copyValue(store.values.monitors);
+const record = store.copyValue(map["__proto__"]);
+record.label = "edited";
+map["__proto__"] = record;
+store.values.monitors = map;
+store.save(callback);
+```
+
+Native `ConfigStore::copyValue(value)` returns an owned `ConfigValueResult` with
+the same native atoms/keys. The QML operation captures once through the owning
+value traversal, then creates detached JS containers; it does not serialize via
+JSON, recursively coerce opaque numbers or copy attached setter references.
 
 ## Verification lanes
 

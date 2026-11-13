@@ -4,6 +4,7 @@
 #include <QAbstractListModel>
 #include <QPointer>
 #include <memory>
+#include <functional>
 
 namespace configqml {
 struct ConfigModelPlan;
@@ -29,10 +30,13 @@ public:
 private:
     friend class ConfigListModel;
     // Only producers of already-owned, admitted snapshots may use this path.
-    ConfigNode(ConfigDescriptor descriptor, QVariant value, bool qmlNumbers = false);
+    ConfigNode(ConfigDescriptor descriptor, QVariant value, bool qmlNumbers = false,
+               std::function<QVariant(const QVariant &)> presenter = {}, bool unknown = false);
     ConfigDescriptor m_descriptor;
     QVariant m_value;
     bool m_qmlNumbers = false;
+    std::function<QVariant(const QVariant &)> m_presenter;
+    bool m_unknown = false;
 };
 class ConfigListModel : public QAbstractListModel {
     Q_OBJECT
@@ -55,6 +59,7 @@ signals:
 private:
     friend class ConfigStore;
     friend class ConfigStoreTestAccess;
+    friend class ConfigQmlStore;
     ConfigListModel(ConfigDescriptor descriptor, Numbers numbers);
     bool apply(const ConfigModelPlan &plan, QObject *owner);
     ConfigDescriptor m_descriptor;
@@ -63,6 +68,7 @@ private:
     std::unique_ptr<Rows> m_rows;
     quint64 m_generation = 0;
     Numbers m_numbers;
+    std::function<QVariant(const QVariant &)> m_presenter;
     QHash<QString, int> m_rowIndices;
     bool m_applying = false;
     qint64 m_lastLibraryNanos = 0;

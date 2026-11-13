@@ -36,6 +36,12 @@ prefixes and attempt numbers are strings. No bytes, command body or raw settings
 are returned by groupInfo. Cache installation precedes completed and its detached
 callback, using the normal consumer guard and request ordering.
 
+Unrelated source errors, reload diagnostics and every other partial worker packet
+leave that view unchanged. Only a present newer complete group snapshot replaces
+it, including an explicitly empty snapshot. Older full snapshots cannot restore
+stopped state over success/release or remove newer groups. Diagnostic delivery
+never changes a capture, consumes a Retry, or clears its ingress lifecycle claim.
+
 `saveGroup` accepts retained state; `retryGroup` accepts stopped state. Every
 attempt has a fresh request/attempt ID and increments attemptNumber. Both produce
 the ordinary `saved | nothing_to_save | failed` persistence receipt with the
@@ -83,6 +89,17 @@ identity and exact candidate bytes; explicit recovery reads must match both befo
 a new attempt can publish. Foreign or unfamiliar output fails rather than rebasing.
 Recovery reads use asynchronous backend scheduling; there is no GUI lock or nested
 worker wait. A publication witness is not a successful durability receipt.
+
+On `StrictPendingRebase` sources, groups still capture at retain time and never
+rebase on `saveGroup` or `retryGroup`. An ordinary rebased publication carries
+the fresh foreign value on reserved paths. It advances another capture's source
+witness only if its locked preflight base equals that capture's presence, exact
+bytes, resolved name and link/parent chain; final-file inode/mtime alone is not
+a difference. Otherwise the capture stays pinned and its later save conflicts. An
+ordinary rebase cannot launder foreign changes into a retained group. Shared
+cleanup fragments captured by an unresolved group stay with that capture rather
+than entering an ordinary rebase. Exact content restoration can resolve strict
+group retries despite a new final inode/mtime; link/parent fencing remains.
 
 Namespace resets retain their original namespace conflict fence while fragmenting
 their pending effects along declared leaves/unknown members. This lets a selected

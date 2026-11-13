@@ -32,6 +32,20 @@ plus opt-in per-source Strict unknown-data closure and open Records. Preserve is
 the default. See [compatibility views](docs/compatibility-views.md) and
 [source modes](docs/json-files.md#per-source-unknown-data-mode-040).
 
+Version 0.5.0 adds opt-in `StrictPendingRebase`: unfrozen ordinary pending
+edits follow accepted foreign files with local-wins leaf intent, retained
+evidence and override notices. Retained groups stay frozen. Ordinary publication
+failures no longer poison unrelated saves, and exact-byte restoration resolves
+strict captures despite a new file inode/mtime. See [strict files](docs/strict-files.md).
+
+Runtime instance writers use [live overlays](docs/overlay-editors.md#runtime-live-writers-050).
+Shared edits feed [draft preview views](docs/editors-profiles.md#live-preview-views-050).
+Overlay [placementToken](docs/overlay-editors.md#handles-receipts-and-lifetime) tracks observable row moves.
+[`copyValue`](docs/worker-qml.md#explicit-detached-copies-050) provides detached mutable copies without losing exact numeric atoms.
+BINDABLE state and checked namespace bindings share coherent
+[notification preparation](docs/worker.md#input-and-authoritative-settlement).
+Bounded [evidence backlogs](docs/strict-files.md) retain acquired bytes across failures.
+
 ## Install
 
 Arch Linux package: `qt6-configqml` (AUR; publication follows the first release).
@@ -57,7 +71,7 @@ Use C++17 and Qt **6.12** on Linux. The production target links only Qt Core;
 Qt Test is used by the test executables. With an installed package:
 
 ```cmake
-find_package(configqml 0.4.0 REQUIRED COMPONENTS Core)
+find_package(configqml 0.5.0 REQUIRED COMPONENTS Core)
 target_link_libraries(myapp PRIVATE configqml::core)
 ```
 

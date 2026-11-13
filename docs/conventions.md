@@ -39,7 +39,7 @@ engine-bound objects are not supported configuration values.
 |---|---|---|
 | 1 | Boolean | Actual bool, not a truthiness conversion. |
 | 2 | Integer / UnsignedInteger | Native int/qint64 and uint/quint64 normalize to signed/unsigned 64-bit domains, with no conversion through double. |
-| 3 | Real | Finite float/double normalized to double; NaN/infinity are rejected. |
+| 3 | Real | Finite float/double and native signed/unsigned integers normalize to double in the declared destination domain; NaN/infinity are rejected. |
 | 4 | String / Url | Owned QString or valid QUrl. Native strings are not silently parsed as URLs or numbers. |
 | 5 | List / Record / Map | Owned QVariantList/QVariantMap; QStringList is normalized to a list. Membership types are checked recursively. Unknown record fields remain owned value data, not namespace properties. |
 | 6 | Missing | `std::nullopt` for presence queries. Invalid QVariant is undefined/unsupported input, not a persisted value. |
@@ -64,6 +64,15 @@ value snapshots. `ConfigLayers` is a synchronous single-owner engine: the caller
 serializes access, and snapshots can be passed as immutable values. ConfigStore owns
 this engine on the ordered worker and publishes separate facade caches; do not put
 this engine's merge work in a GUI setter.
+
+Values captured in open/undeclared positions retain their numeric representation.
+Later validation against a declared descriptor selects that destination's domain,
+in native and QML paths alike. An admitted integral value is valid Real in overlays,
+drafts, record-list edits and projections, including nested members. Real selects
+binary-double semantics (and its normal rounding), as for JSON numeric atoms;
+this does not convert the retained raw value or parse numeric strings. Integer
+domains, SafeInteger bounds, QML decimal-string Int64 input and exact-atom
+presentation retain their existing safeguards.
 
 ## Layers, raw data and merge
 

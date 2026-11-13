@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configqmlstore.h"
 #include "configfacade.h"
+#include "configstorehandle.h"
 #include "storeprobe.h"
 #include <QQmlComponent>
 #include <QQmlEngine>
@@ -83,6 +84,143 @@ struct Fixture {
 class QmlTest : public QObject {
     Q_OBJECT
 private slots:
+    void previewClosurePrecedesDestructionObservers() {
+        Fixture f;
+        QVERIFY(f.root);
+        QTRY_VERIFY(f.store->ready());
+        QVariantList selection;
+        selection.append(QVariant::fromValue(QVariantList{QString("bar")}));
+        auto *draft = f.store->draft(selection);
+        QVERIFY(draft);
+        auto *native = draft->findChild<ConfigDraft *>();
+        QVERIFY(native);
+        connect(native, &QObject::destroyed, this, [&] {
+            QCOMPARE(f.root->property("siblingN").toInt(), -1);
+            QCOMPARE(f.root->property("siblingCount").toInt(), -1);
+        });
+        f.root->setProperty("sibling",
+                            QVariant::fromValue<QObject *>(draft->previewScope({"bar"})));
+        QCOMPARE(f.root->property("siblingN").toInt(), 0);
+        QCOMPARE(f.root->property("siblingCount").toInt(), 3);
+        delete native;
+        QCOMPARE(f.root->property("siblingN").toInt(), -1);
+    }
+    void earlyNativeObserversRollbackAndGroupedPublication() {
+        Fixture f;
+        QVERIFY(f.root);
+        QTRY_VERIFY(f.store->ready());
+        auto *core = f.store->core();
+        int nativeSignals = 0, publications = 0, modelSignals = 0;
+        const auto current = [&] {
+            QCOMPARE(f.root->property("observedN").toInt(), core->value({"bar", "n"}).toInt());
+            QCOMPARE(f.root->property("siblingN").toInt(), core->value({"bar", "n"}).toInt());
+            QCOMPARE(f.count(), core->value(widgets).toList().size());
+            QCOMPARE(f.root->property("siblingCount").toInt(),
+                     core->value(widgets).toList().size());
+        };
+        // Install native observers before sibling adapters/bindings exist.
+        connect(core, &ConfigStore::valuesChanged, this, [&](const auto &) {
+            ++nativeSignals;
+            current();
+        });
+        connect(core, &ConfigStore::published, this, [&] {
+            ++publications;
+            current();
+        });
+        auto *handle = core->scope({"bar"});
+        connect(handle, &ConfigStoreHandle::valuesChanged, this, [&](const auto &) {
+            current();
+            QCOMPARE(handle->value({"n"}), core->value({"bar", "n"}));
+        });
+        f.root->setProperty("sibling",
+                            QVariant::fromValue<QObject *>(f.store->scope({"bar"}, false)));
+        auto *model = core->listModel(widgets);
+        connect(model, &QAbstractItemModel::rowsAboutToBeRemoved, this, [&] {
+            ++modelSignals;
+            current();
+        });
+        connect(model, &QAbstractItemModel::rowsRemoved, this, [&] {
+            ++modelSignals;
+            current();
+        });
+        connect(model, &QAbstractItemModel::rowsAboutToBeInserted, this, [&] {
+            ++modelSignals;
+            current();
+        });
+        connect(model, &QAbstractItemModel::rowsInserted, this, [&] {
+            ++modelSignals;
+            current();
+        });
+        connect(model, &QAbstractItemModel::dataChanged, this, [&] {
+            ++modelSignals;
+            current();
+        });
+        bool installed = false;
+        Probe::run(
+            *core,
+            [](ConfigWorker &worker) {
+                worker.setAdmission([](const ConfigInput &input) {
+                    return input.path == ConfigPath{"bar", "n"} && input.value.toInt() == 7
+                               ? QString("denied")
+                               : QString();
+                });
+            },
+            this, [&] { installed = true; });
+        QTRY_VERIFY(installed);
+        f.run("active.n = 7");
+        QCOMPARE(f.root->property("observedN").toInt(), 7);
+        QTRY_COMPARE(f.root->property("observedN").toInt(), 0);
+        f.run("active.n = 2; active.widgets = [1, 2]");
+        QTRY_COMPARE(core->info(widgets).workerCovered, core->info(widgets).latestInput);
+        f.run("cfg.bar.nChanged.connect(function(){notificationOrder.push([observedN,count,"
+              "siblingN,siblingCount])});"
+              "cfg.bar.widgetsChanged.connect(function(){notificationOrder.push([observedN,count,"
+              "siblingN,siblingCount])})");
+        const auto reset = core->reset({"bar"}, "user");
+        QVERIFY(reset.accepted);
+        QTRY_COMPARE(core->info(widgets).workerCovered, reset.inputSequence);
+        QCOMPARE(f.root->property("observedN").toInt(), 0);
+        QCOMPARE(f.count(), 3);
+        const auto observations =
+            f.root->property("notificationOrder").value<QJSValue>().toVariant().toList();
+        QVERIFY(observations.size() >= 2);
+        for (const auto &observation : observations)
+            QCOMPARE(observation.toList(), QVariantList({0, 3, 0, 3}));
+        QVERIFY(nativeSignals >= 5);
+        QVERIFY(publications >= 3);
+        QVERIFY(modelSignals >= 2);
+        f.run("sibling.detach()");
+        QCOMPARE(f.root->property("siblingN").toInt(), -1);
+        QCOMPARE(f.root->property("siblingCount").toInt(), -1);
+    }
+    void bindingWritesUseAdmissionAndPreparedNotifications() {
+        Fixture f;
+        QVERIFY(f.root);
+        QTRY_VERIFY(f.store->ready());
+        bool notified = false;
+        connect(f.store->core(), &ConfigStore::valuesChanged, this, [&](const auto &paths) {
+            if (paths.contains(ConfigPath{"bar", "n"})) {
+                notified = true;
+                QCOMPARE(f.root->property("observedN").toInt(),
+                         f.store->core()->value({"bar", "n"}).toInt());
+            }
+        });
+        f.run("active.n = Qt.binding(function() { return root.bindingInput; })");
+        QVERIFY(notified);
+        QCOMPARE(f.store->core()->value({"bar", "n"}).toInt(), 1);
+        QCOMPARE(f.store->core()->inputs().size(), 1);
+        QVERIFY(f.run("(function(){try{root.bindingInput=11;return false}catch(e){return true}})()")
+                    .toBool());
+        QCOMPARE(f.store->core()->value({"bar", "n"}).toInt(), 1);
+        QCOMPARE(f.store->core()->inputs().size(), 1);
+        f.root->setProperty("bindingInput", 2);
+        QCOMPARE(f.store->core()->value({"bar", "n"}).toInt(), 2);
+        QCOMPARE(f.store->core()->inputs().size(), 2);
+        f.run("active.n = 3");
+        f.root->setProperty("bindingInput", 4);
+        QCOMPARE(f.store->core()->value({"bar", "n"}).toInt(), 3);
+        QCOMPARE(f.store->core()->inputs().size(), 3);
+    }
     void facadeContract_data() {
         QTest::addColumn<bool>("native");
         QTest::newRow("dynamic") << false;
@@ -97,6 +235,11 @@ private slots:
         NativeBar facade(f.store->core());
         if (native)
             f.root->setProperty("nativeFacade", QVariant::fromValue<QObject *>(&facade));
+        connect(f.store->core(), &ConfigStore::valuesChanged, this, [&](const auto &) {
+            QCOMPARE(f.count(), f.store->core()->value(widgets).toList().size());
+        });
+        connect(f.store->core(), &ConfigStore::published, this,
+                [&] { QCOMPARE(f.count(), f.store->core()->value(widgets).toList().size()); });
         QCOMPARE(f.count(), 3);
         QSignalSpy completed(f.store->core(), &ConfigStore::completed);
         Probe::run(*f.store->core(), [](auto &w) { w.holdInputs(true); });

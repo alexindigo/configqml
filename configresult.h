@@ -30,6 +30,8 @@ struct ConfigPublication {
     ConfigRevision revision;
     QString state = "known";
     ConfigError error;
+    std::optional<ConfigRevision> rebasedOnto = std::nullopt;
+    QList<ConfigPath> overriddenPaths = {};
 };
 struct ConfigSourceState {
     QString sourceId;

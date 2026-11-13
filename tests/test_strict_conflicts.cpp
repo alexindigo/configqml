@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "compatfixture.h"
+#include "configdraft.h"
 #include "fileoptions.h"
 #include "storeprobe.h"
 #include <QTemporaryDir>
@@ -31,6 +32,206 @@ ConfigRetainedGroupOptions group() { return {"strict-head", {{"b"}}, {{{"b"}, tr
 class StrictConflictsTest : public QObject {
     Q_OBJECT
 private slots:
+    void firstSaveParentWitnessSurvivesRetry_data() {
+        QTest::addColumn<int>("policy");
+        QTest::addColumn<int>("producer");
+        QTest::addColumn<bool>("replaceParent");
+        for (int policy = 1; policy < 3; ++policy)
+            for (int producer = 0; producer < 3; ++producer)
+                for (bool replaceParent : {false, true})
+                    QTest::newRow(qPrintable(QString("policy-%1-producer-%2-replace-%3")
+                                                 .arg(policy)
+                                                 .arg(producer)
+                                                 .arg(replaceParent)))
+                        << policy << producer << replaceParent;
+    }
+    void firstSaveParentWitnessSurvivesRetry() {
+        QFETCH(int, policy);
+        QFETCH(int, producer);
+        QFETCH(bool, replaceParent);
+        QTemporaryDir dir;
+        const auto path = dir.filePath("new/deep/user.json");
+        auto o = strictOptions(dir.path(), path);
+        o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy(policy);
+        auto once = std::make_shared<std::atomic_bool>(true);
+        o.fileFault = [once](const QString &phase, const QString &) {
+            return phase == "write" && once->exchange(false) ? QString("first-write-fault")
+                                                             : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QString token;
+        ConfigDraft *draft = nullptr;
+        if (producer == 1)
+            token = compat::request(store, [&] { return store.retainGroup(group()); }).groupToken;
+        else if (producer == 2) {
+            draft = store.draft({{"b"}});
+            QVERIFY(draft->setValue({"b"}, 9).accepted);
+        } else
+            QVERIFY(store.setUser({"b"}, 9).accepted);
+        const auto save = [&] {
+            return producer == 1   ? store.saveGroup(token)
+                   : producer == 2 ? draft->apply()
+                                   : store.save();
+        };
+        QCOMPARE(compat::request(store, save).error.code, QString("first-write-fault"));
+        QVERIFY(QFileInfo::exists(dir.filePath("new/deep")));
+        QVERIFY(!QFileInfo::exists(path));
+        auto lease = std::make_shared<std::weak_ptr<ConfigFileDescriptor>>();
+        auto inspected = std::make_shared<std::atomic_bool>(false);
+        ConfigStoreTestAccess::run(store, [lease, inspected, token](auto &worker) {
+            *lease = ConfigStoreTestAccess::pendingParentLease(worker, "json", token);
+            inspected->store(true);
+        });
+        QTRY_VERIFY(inspected->load());
+        QVERIFY(!lease->expired());
+        const auto retry = [&] {
+            return producer == 1   ? store.retryGroup(token)
+                   : producer == 2 ? draft->apply()
+                                   : store.save();
+        };
+        if (replaceParent) {
+            QVERIFY(QDir().rename(dir.filePath("new"), dir.filePath("held")));
+            QVERIFY(QDir().mkpath(dir.filePath("new/deep")));
+            QCOMPARE(compat::request(store, retry).error.code, QString("source-preimage-conflict"));
+            QVERIFY(!QFileInfo::exists(path));
+            QVERIFY(QDir().rmdir(dir.filePath("new/deep")));
+            QVERIFY(QDir().rmdir(dir.filePath("new")));
+            QVERIFY(QDir().rename(dir.filePath("held"), dir.filePath("new")));
+        }
+        QCOMPARE(compat::request(store, retry).status, QString("saved"));
+        if (producer == 1)
+            QCOMPARE(compat::request(store, [&] { return store.releaseGroup(token); }).status,
+                     QString("released"));
+        QTRY_VERIFY(lease->expired());
+        ConfigStore reopened(o);
+        QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);
+        QCOMPARE(reopened.value({"b"}).toInt(), 9);
+    }
+    void parentRetryOwnershipDoesNotEscapeAttempt_data() {
+        QTest::addColumn<int>("policy");
+        QTest::newRow("strict") << 1;
+        QTest::newRow("pending-rebase") << 2;
+    }
+    void parentRetryOwnershipDoesNotEscapeAttempt() {
+        QFETCH(int, policy);
+        QTemporaryDir dir;
+        const auto path = dir.filePath("new/deep/user.json");
+        auto o = strictOptions(dir.path(), path);
+        o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy(policy);
+        auto once = std::make_shared<std::atomic_bool>(true);
+        o.fileFault = [once](const QString &phase, const QString &) {
+            return phase == "write" && once->exchange(false) ? QString("write-fault") : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto a = compat::request(store, [&] {
+                           return store.retainGroup({"a", {{"a"}}, {{{"a"}, true, 7}}, {}});
+                       }).groupToken;
+        const auto b = compat::request(store, [&] {
+                           return store.retainGroup({"b", {{"b"}}, {{{"b"}, true, 8}}, {}});
+                       }).groupToken;
+        QCOMPARE(compat::request(store, [&] { return store.saveGroup(a); }).error.code,
+                 QString("write-fault"));
+        // Even the same source's unattempted owner gets no failed-save allowance.
+        QCOMPARE(compat::request(store, [&] { return store.saveGroup(b); }).error.code,
+                 QString("source-preimage-conflict"));
+        QCOMPARE(compat::request(store, [&] { return store.retryGroup(a); }).status,
+                 QString("saved"));
+        // Confirmed own publication, unlike mkdir alone, may advance its sibling.
+        QCOMPARE(compat::request(store, [&] { return store.retryGroup(b); }).status,
+                 QString("saved"));
+        ConfigStore reopened(o);
+        QTRY_COMPARE(reopened.status(), ConfigStore::Status::Ready);
+        QCOMPARE(reopened.value({"a"}).toInt(), 7);
+        QCOMPARE(reopened.value({"b"}).toInt(), 8);
+    }
+    void pathIntentAutosaveRetriesResolvedWork() {
+        QTemporaryDir dir;
+        const auto path = dir.filePath("user.json");
+        compat::put(path, "{\"a\":1,\"b\":1}");
+        auto o = strictOptions(dir.path());
+        o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy::PathIntent;
+        o.autoSave = true;
+        o.autoSaveInterval = 0;
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        ConfigStoreTestAccess::run(store, [](auto &worker) { worker.holdInputs(true); });
+        QVERIFY(store.setUser({"b"}, 9).accepted);
+        replace(path, "{\"a\":1,\"b\":4}");
+        const auto failed = compat::request(store, [&] {
+            const auto id = store.save();
+            ConfigStoreTestAccess::run(store, [](auto &worker) { worker.holdInputs(false); });
+            return id;
+        });
+        QCOMPARE(failed.error.code, QString("path-conflict"));
+        QSignalSpy autosaved(&store, &ConfigStore::autoSaved);
+        replace(path, "{\"a\":7,\"b\":1}");
+        QVERIFY(store.setUser({"b"}, 9).accepted);
+        QTRY_COMPARE(autosaved.size(), 1);
+        QCOMPARE(qvariant_cast<ConfigResult>(autosaved[0][0]).status, QString("saved"));
+        ConfigStore restart(o);
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value({"a"}).toInt(), 7);
+        QCOMPARE(restart.value({"b"}).toInt(), 9);
+    }
+    void ordinaryFailureDoesNotPoisonOtherSources() {
+        QTemporaryDir dir;
+        const auto a = dir.filePath("a.json"), b = dir.filePath("b.json");
+        const QByteArray original = "{\"a\":1}";
+        compat::put(a, original);
+        compat::put(b, "{\"b\":1}");
+        auto o = strictOptions(dir.path(), a);
+        o.layers[0].sources = {{"a", {}, {}}, {"b", {}, {}}};
+        o.jsonFiles[0].sourceId = "a";
+        auto second = o.jsonFiles[0];
+        second.sourceId = "b";
+        second.path = b;
+        o.jsonFiles.append(second);
+        // Explicit routes keep these root-sharing shards disjoint.
+        o.layers[0].sources[0].prefix = {"left"};
+        o.layers[0].sources[1].prefix = {"right"};
+        using D = ConfigDescriptor;
+        o.schema = ConfigSchema(
+            D::group({{"left", D::group({{"a", D::leaf(D::Type::SafeInteger, 0)}})},
+                      {"right", D::group({{"b", D::leaf(D::Type::SafeInteger, 0)}})}}));
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QVERIFY(store.setUser({"left", "a"}, 9).accepted);
+        // In-place modification: restoring below keeps the inode, but changes time.
+        compat::put(a, "{\"a\":7}");
+        const auto first = compat::request(store, [&] { return store.save(); });
+        QCOMPARE(first.error.code, QString("source-preimage-conflict"));
+        QVERIFY(store.setUser({"right", "b"}, 8).accepted);
+        const auto partial = compat::request(store, [&] { return store.flush(); });
+        QCOMPARE(partial.status, QString("failed"));
+        QCOMPARE(partial.publicationState, QString("partial"));
+        QVERIFY(partial.coveredRevisions.contains("b"));
+        QVERIFY(compat::bytes(b).contains("\"b\":8"));
+        QCOMPARE(compat::bytes(a), QByteArray("{\"a\":7}"));
+        QVERIFY(!first.evidence.isEmpty());
+    }
+    void ordinaryFailureCanResolve() {
+        QTemporaryDir dir;
+        compat::put(dir.filePath("user.json"), "{\"a\":1}");
+        auto o = strictOptions(dir.path());
+        auto once = std::make_shared<std::atomic<bool>>(true);
+        o.fileFault = [once](const QString &phase, const QString &) {
+            return phase == "write" && once->exchange(false) ? QString("once") : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QVERIFY(store.setUser({"a"}, 9).accepted);
+        QCOMPARE(compat::request(store, [&] { return store.save(); }).error.code, QString("once"));
+        const auto resolved = compat::request(store, [&] { return store.save(); });
+        QCOMPARE(resolved.status, QString("saved"));
+        QVERIFY(compat::bytes(dir.filePath("user.json")).contains("\"a\":9"));
+        QCOMPARE(compat::request(store, [&] { return store.flush(); }).status,
+                 QString("nothing_to_save"));
+        ConfigStore restart(o);
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value({"a"}).toInt(), 9);
+    }
     void declaration() {
         QTemporaryDir dir;
         auto o = strictOptions(dir.path());
@@ -108,6 +309,21 @@ private slots:
         QCOMPARE(restarted.value({"a"}).toInt(), 7);
         QCOMPARE(restarted.value({"b"}).toInt(), 1);
     }
+    void pureContentEqualABA() {
+        QTemporaryDir dir;
+        const auto path = dir.filePath("user.json");
+        const QByteArray original = "{ \"a\":1,\"b\":1 }\n";
+        compat::put(path, original);
+        ConfigStore store(strictOptions(dir.path()));
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QVERIFY(store.setUser({"b"}, 8).accepted);
+        replace(path, original);
+        QCOMPARE(compat::request(store, [&] { return store.save(); }).status, QString("saved"));
+        ConfigStore restart(strictOptions(dir.path()));
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value({"a"}).toInt(), 1);
+        QCOMPARE(restart.value({"b"}).toInt(), 8);
+    }
     void inodeAndABA() {
         QTemporaryDir dir;
         const auto path = dir.filePath("user.json");
@@ -117,11 +333,41 @@ private slots:
         QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
         QVERIFY(store.setUser({"b"}, 8).accepted);
         replace(path, "{\"a\":2,\"b\":1}");
+        const auto failed = compat::request(store, [&] { return store.save(); });
+        QCOMPARE(failed.error.code, QString("source-preimage-conflict"));
+        QVERIFY(!failed.evidence.isEmpty());
         replace(path, bytes);
         const auto result = compat::request(store, [&] { return store.save(); });
-        QCOMPARE(result.error.code, QString("source-preimage-conflict"));
-        QCOMPARE(compat::bytes(path), bytes);
+        QCOMPARE(result.status, QString("saved"));
+        QVERIFY(compat::bytes(path).contains("\"b\":8"));
         QCOMPARE(store.value({"b"}).toInt(), 8);
+        ConfigStore restart(strictOptions(dir.path()));
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value({"b"}).toInt(), 8);
+    }
+    void retainedContentEqualResolution() {
+        QTemporaryDir dir;
+        const auto path = dir.filePath("user.json");
+        const QByteArray original = "{ \"a\":1,\"b\":1 }\n";
+        compat::put(path, original);
+        ConfigStore store(strictOptions(dir.path()));
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto capture = compat::request(store, [&] { return store.retainGroup(group()); });
+        replace(path, "{\"a\":1,\"b\":1}"); // Same JSON is not the same bytes.
+        const auto failed =
+            compat::request(store, [&] { return store.saveGroup(capture.groupToken); });
+        QCOMPARE(failed.error.code, QString("source-preimage-conflict"));
+        replace(path, original);
+        const auto retry =
+            compat::request(store, [&] { return store.retryGroup(capture.groupToken); });
+        QCOMPARE(retry.status, QString("saved"));
+        QCOMPARE(retry.attemptNumber, quint64(2));
+        QVERIFY(!failed.evidence.isEmpty());
+        for (const auto &ref : failed.evidence)
+            QVERIFY(QFileInfo::exists(ref.directory + "/metadata.json"));
+        ConfigStore restart(strictOptions(dir.path()));
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value({"b"}).toInt(), 9);
     }
     void configuredLinkAndParentIdentity_data() {
         QTest::addColumn<bool>("parent");

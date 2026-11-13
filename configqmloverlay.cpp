@@ -2,18 +2,21 @@
 #include "configqmlstore.h"
 #include "configqmloverlay.h"
 #include "configqmlvalue.h"
+#include "configqmlevent_p.h"
 #include "configstorehandle.h"
 #include "configconsumer_p.h"
 #include "configoverlay_p.h"
+#include "configchange_p.h"
 #include <QQmlEngine>
 #include <QJSValueIterator>
 #include <cmath>
 
 namespace configqml {
-QVariantMap ConfigQmlStore::resultMap(const ConfigResult &result) const {
-    auto map = qmlResult(result, m_diagnostics);
-    if (result.status == "opened" && m_overlayHandles.value(result.editorId))
-        map["editor"] = QVariant::fromValue<QObject *>(m_overlayHandles.value(result.editorId));
+QJSValue ConfigQmlStore::resultMap(const ConfigResult &result) const {
+    auto map = qmlResultEvent(scriptEngine(), result, m_diagnostics);
+    if (scriptEngine() && result.status == "opened" && m_overlayHandles.value(result.editorId))
+        map.setProperty("editor",
+                        scriptEngine()->newQObject(m_overlayHandles.value(result.editorId)));
     return map;
 }
 void ConfigQmlStore::initializeOverlaySignals() {
@@ -40,6 +43,10 @@ ConfigQmlOverlay::ConfigQmlOverlay(ConfigStore *store, ConfigOverlayEditor *edit
     connect(m_adapter, &ConfigQmlStore::inputRejected, this, &ConfigQmlOverlay::inputRejected);
     m_adapter->m_values =
         createConfigNamespace(m_adapter, *editor->schema().descriptor({}), {}, m_adapter);
+    m_adapter->initializeNotifications();
+    m_publishedPlacementToken = placementToken();
+    editor->m_changes->add(this, {}, {},
+                           [this](const auto &) { m_publishedPlacementToken = placementToken(); });
 }
 ConfigQmlOverlay::~ConfigQmlOverlay() {
     if (m_adapter->m_overlay)
@@ -54,11 +61,21 @@ QString ConfigQmlOverlay::discard(const QJSValue &callback) {
                                       m_adapter, m_adapter->callback(callback)))
                                 : QString();
 }
+QString ConfigQmlOverlay::save(const QJSValue &callback) {
+    return m_adapter->m_overlay ? QString::number(m_adapter->m_overlay->save(
+                                      m_adapter, m_adapter->callback(callback)))
+                                : QString();
+}
+QString ConfigQmlOverlay::flush(const QJSValue &callback) {
+    return m_adapter->m_overlay ? QString::number(m_adapter->m_overlay->flush(
+                                      m_adapter, m_adapter->callback(callback)))
+                                : QString();
+}
 bool ConfigQmlOverlay::unset(const QStringList &path) { return m_adapter->unset(path); }
 void ConfigQmlOverlay::detach() { m_adapter->detach(); }
 QString ConfigQmlStore::openOverlay(const QJSValue &options, const QJSValue &function) {
     ConfigConsumerGuard boundary(this);
-    if (!m_core || m_draft || m_overlay) {
+    if (!m_core || m_draft || m_overlay || m_isPreview) {
         reject({}, "overlay-selection");
         return {};
     }
@@ -103,9 +120,11 @@ QString ConfigQmlStore::openOverlay(const QJSValue &options, const QJSValue &fun
     const auto mode = captured.value("mode", "editor");
     if (mode.metaType().id() != QMetaType::QString)
         error = "overlay-options";
-    else if (mode != "editor" && mode != "view")
+    else if (mode != "editor" && mode != "view" && mode != "live")
         semanticError = true;
-    native.mode = mode == "view" ? ConfigOverlayMode::View : ConfigOverlayMode::Editor;
+    native.mode = mode == "view"   ? ConfigOverlayMode::View
+                  : mode == "live" ? ConfigOverlayMode::Live
+                                   : ConfigOverlayMode::Editor;
     if (captured.value("mergePolicy") != "recursive_objects_replace_lists" ||
         captured.value("differencePolicy") != "top_level_omit_equal")
         semanticError = true;

@@ -2,12 +2,13 @@
 #pragma once
 #include "configjsoncodec.h"
 #include <functional>
+#include <memory>
 #include <QThread>
 
 namespace configqml {
 enum class ConfigWatchMode { Off, StartupSnapshot, Live };
 enum class ConfigStartupErrorPolicy { FailReady, SkipProjectionRetainError };
-enum class ConfigConflictPolicy { PathIntent, StrictSourcePreimage };
+enum class ConfigConflictPolicy { PathIntent, StrictSourcePreimage, StrictPendingRebase };
 struct ConfigJsonFile {
     QString layerId = "user";
     QString sourceId = "json";
@@ -26,13 +27,22 @@ struct ConfigFileEdit {
     std::optional<QVariant> value; // Missing means reset, null remains a value.
     bool ifMissing = false;
     std::optional<ConfigPath> fencePath;
-    bool pruneEmpty = false; // Only declared namespace cleanup, never an atomic empty value.
+    bool pruneEmpty = false;     // Only declared namespace cleanup, never an atomic empty value.
+    bool namespaceReset = false; // A fragmented reset retains the whole namespace fence.
+};
+struct ConfigSourcePreimage {
+    ConfigRevision revision;
+    QByteArray bytes;
 };
 struct ConfigJsonTransaction {
     ConfigBackendResult outcome;
     QVariantMap raw;
     bool published = false;
+    bool preflightRead = false; // Only a successful fresh read under the publication lock.
     QByteArray candidateBytes;
+    std::optional<ConfigSourcePreimage> preflightBase;
+    std::optional<ConfigRevision> rebasedOnto;
+    QList<ConfigPath> overriddenPaths;
     struct Observation {
         ConfigBackendResult result;
         QString phase, role;
@@ -41,16 +51,19 @@ struct ConfigJsonTransaction {
     // Candidate diagnostics become publication facts only when published is true.
     QList<ConfigError> warnings;
 };
-struct ConfigSourcePreimage {
-    ConfigRevision revision;
-    QByteArray bytes;
-};
 bool applyFileEdit(QVariantMap &raw, const ConfigFileEdit &edit);
+// Same content/presence and resolved name/link/parent chain; ignores final-file
+// inode/timestamps. Publication's late-race fence still compares full revisions.
+bool sameSourcePreimage(const ConfigSourcePreimage &a, const ConfigSourcePreimage &b);
 class ConfigJsonBackend : public ConfigBackend {
 public:
     using FaultHook = std::function<QString(const QString &phase, const QString &file)>;
     using Canonicalizer = std::function<ConfigError(QVariantMap &, const ConfigBackendResult &,
                                                     QList<ConfigError> &)>;
+    // Supplying this enables ordinary pending rebase only on StrictPendingRebase
+    // sources. The worker retains/adopts/publishes the foreign observation under
+    // the lock before this callback succeeds. Groups and migrations omit it.
+    using PendingAcceptor = std::function<ConfigError(const ConfigBackendResult &)>;
     explicit ConfigJsonBackend(const QList<ConfigJsonFile> &files, FaultHook hook = {},
                                const QMap<QString, ConfigDiagnosticBuilder> &diagnostics = {});
     ConfigBackendCapabilities capabilities() const override;
@@ -59,7 +72,8 @@ public:
     ConfigJsonTransaction reconcile(const QString &sourceId, const QVariantMap &baseline,
                                     const QList<ConfigFileEdit> &edits,
                                     const std::optional<ConfigSourcePreimage> &preimage = {},
-                                    const Canonicalizer &canonicalize = {});
+                                    const Canonicalizer &canonicalize = {},
+                                    const PendingAcceptor &acceptPending = {});
     ConfigError preserveBackup(const QString &sourceId, int version, const QByteArray &original);
     ConfigError exportProfile(const QString &file, const QByteArray &bytes);
     bool changed(const QString &sourceId) const;
@@ -69,6 +83,14 @@ public:
     quint64 reads(const QString &sourceId) const { return m_reads.value(sourceId); }
 
 private:
+    friend class ConfigWorker;
+    struct DirectoryWitnesses;
+    // Worker save scope, never a process/store-lifetime exemption.
+    void beginPublication();
+    void endPublication();
+    ConfigError prepareParent(const QString &id, const QString &name, DirectoryWitnesses &owned);
+    ConfigRevision withOwnParents(const ConfigRevision &revision, const QString &id,
+                                  const DirectoryWitnesses &owned) const;
     struct Target {
         QString path;
         QStringList links;
@@ -97,5 +119,6 @@ private:
     QMap<quint64, ConfigBackendResult> m_results;
     quint64 m_next = 0;
     QThread *m_owner = QThread::currentThread();
+    std::shared_ptr<DirectoryWitnesses> m_saveDirectories;
 };
 } // namespace configqml

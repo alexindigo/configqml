@@ -11,7 +11,9 @@ public:
     ConfigStoreHandle(ConfigStore *store, ConfigPath prefix, bool writable,
                       QObject *parent = nullptr);
     ~ConfigStoreHandle() override;
-    bool attached() const { return m_store; }
+    bool attached() const {
+        return m_store && (!m_previewLifetime || (m_previewDraft && *m_previewLifetime));
+    }
     void detach();
     ConfigStoreHandle *scope(const ConfigPath &relative, bool writable = true);
     QVariant value(const ConfigPath &relative) const;
@@ -27,10 +29,15 @@ signals:
 
 private:
     friend class ConfigStore;
+    friend class ConfigDraft;
+    ConfigStoreHandle(ConfigDraft *draft, ConfigPath prefix, QObject *parent);
     void invalidateLifetime();
     std::weak_ptr<ConfigOverlayEndpoint> m_endpoint;
     std::shared_ptr<std::atomic_bool> m_lifetime = std::make_shared<std::atomic_bool>(true);
     QPointer<ConfigStore> m_store;
+    QPointer<ConfigDraft> m_previewDraft;
+    QString m_previewId;
+    std::shared_ptr<std::atomic_bool> m_previewLifetime;
     ConfigPath m_prefix;
     bool m_writable;
     ConfigDiagnosticBuilder m_diagnostics;

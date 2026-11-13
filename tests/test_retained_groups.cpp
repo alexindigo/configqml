@@ -48,10 +48,326 @@ void control(ConfigStore &store, const std::function<void(ConfigWorker &)> &acti
     if (!complete)
         qFatal("worker control timeout");
 }
+QVariantMap groupView(const ConfigGroupInfo &info) {
+    QVariantList coverage, attempts;
+    for (const auto &c : info.coverage)
+        coverage.append(QVariantMap{{"path", c.path},
+                                    {"source", c.sourceId},
+                                    {"input", QString::number(c.inputThrough)},
+                                    {"intent", QString::number(c.intentRevision)}});
+    for (const auto &a : info.attempts)
+        attempts.append(QVariantMap{{"id", a.attemptId},
+                                    {"request", QString::number(a.requestId)},
+                                    {"number", QString::number(a.attemptNumber)},
+                                    {"status", a.status},
+                                    {"publication", a.publicationState},
+                                    {"error", a.error.code}});
+    return {{"token", info.groupToken}, {"key", info.requestKey},
+            {"state", info.state},      {"prefix", QString::number(info.capturePrefix)},
+            {"coverage", coverage},     {"dependencies", info.dependencies},
+            {"attempts", attempts},     {"error", info.error.code}};
+}
 } // namespace
 class RetainedGroupsTest : public QObject {
     Q_OBJECT
 private slots:
+    void unrelatedReloadPreservesStoppedGroupAndRetry() {
+        QTemporaryDir dir;
+        const auto binding = dir.filePath("binding.json"), ui = dir.filePath("ui.json");
+        compat::put(binding, "{\"choice\":0}");
+        compat::put(ui, "{\"other\":0}");
+        auto o = options();
+        o.schema =
+            ConfigSchema(D::group({{"binding", D::group({{"choice", D::leaf(T::SafeInteger, 0)}})},
+                                   {"ui", D::group({{"other", D::leaf(T::SafeInteger, 0)}})}}));
+        o.layers[0].sources = {{"binding", {"binding"}, {}}, {"ui", {"ui"}, {}}};
+        o.jsonFiles = {{"user", "binding", binding}, {"user", "ui", ui}};
+        auto once = std::make_shared<std::atomic_bool>(true);
+        o.fileFault = [once](const QString &phase, const QString &) {
+            return phase == "write" && once->exchange(false) ? QString("one-shot-write")
+                                                             : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const ConfigPath path{"binding", "choice"};
+        const auto capture = compat::request(store, [&] {
+            return store.retainGroup({"reload-head", {path}, {{path, true, 1}}, {}});
+        });
+        const auto failed =
+            compat::request(store, [&] { return store.saveGroup(capture.groupToken); });
+        QCOMPARE(failed.error.code, QString("one-shot-write"));
+        const auto before = groupView(store.groupInfo(capture.groupToken));
+        int errors = 0;
+        bool coherent = true;
+        connect(&store, &ConfigStore::sourceError, this, [&](const auto &error) {
+            ++errors;
+            coherent &= error.code == "json-syntax" &&
+                        groupView(store.groupInfo(capture.groupToken)) == before;
+        });
+        compat::put(ui, "malformed ui");
+        QCOMPARE(compat::request(store, [&] { return store.reload(); }).error.code,
+                 QString("json-syntax"));
+        QTRY_COMPARE(errors, 1);
+        const auto after = groupView(store.groupInfo(capture.groupToken));
+        // The same choice an application makes from the public native facade.
+        const auto retry = compat::request(store, [&] {
+            return store.groupInfo(capture.groupToken).state == "stopped"
+                       ? store.retryGroup(capture.groupToken)
+                       : store.saveGroup(capture.groupToken);
+        });
+        QCOMPARE(retry.status, QString("saved"));
+        QCOMPARE(after, before);
+        QVERIFY(coherent);
+        QCOMPARE(retry.groupToken, capture.groupToken);
+        QCOMPARE(retry.capturePrefix, capture.capturePrefix);
+        QCOMPARE(retry.requestKey, capture.requestKey);
+        QCOMPARE(retry.attemptNumber, quint64(2));
+        QCOMPARE(store.groupInfo(capture.groupToken).attempts.first().attemptId, failed.attemptId);
+        QCOMPARE(disk(binding, "choice"), 1);
+        QCOMPARE(compat::bytes(ui), QByteArray("malformed ui"));
+        compat::put(ui, "{\"other\":0}");
+        ConfigStore restart(o);
+        QTRY_COMPARE(restart.status(), ConfigStore::Status::Ready);
+        QCOMPARE(restart.value(path).toInt(), 1);
+    }
+    void partialPacketsPreserveGroupMetadata_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"empty", "source-error", "warning", "source-metadata", "effects",
+                                 "source-acceptance", "migration", "readiness", "autosave",
+                                 "result", "overlay", "models", "admitted", "value-delta"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void partialPacketsPreserveGroupMetadata() {
+        QFETCH(QString, kind);
+        ConfigStore store(options());
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto capture =
+            compat::request(store, [&] { return store.retainGroup(choice("partial", 1)); });
+        control(store, [](auto &w) {
+            w.scheduleBackend({false, ConfigMemoryBackend::Fault::BeforeOperation});
+        });
+        const auto failed =
+            compat::request(store, [&] { return store.saveGroup(capture.groupToken); });
+        QCOMPARE(failed.status, QString("failed"));
+        const auto before = groupView(store.groupInfo(capture.groupToken));
+        const auto snapshot = store.snapshot();
+        const auto inputs = store.inputs().size();
+        ConfigWorkerPacket packet;
+        if (kind == "source-error")
+            packet.sourceError = ConfigError{"partial-error", "unrelated", "read"};
+        if (kind == "warning")
+            packet.projectionDiagnostics.append({"partial-warning", "unrelated", "projection"});
+        if (kind == "source-metadata")
+            packet.sourceStates = store.sourceStates();
+        if (kind == "effects")
+            packet.projectionEffects.append({"run", "projection", "unrelated", "revision", {}});
+        if (kind == "source-acceptance") {
+            ConfigSourceAccepted event;
+            event.eventId = "partial";
+            event.origin = "external";
+            packet.sourceAccepted = event;
+        }
+        if (kind == "migration") {
+            ConfigResult r;
+            r.operation = "migration";
+            r.status = "saved";
+            packet.migrationResult = r;
+        }
+        if (kind == "readiness")
+            packet.initial = true;
+        if (kind == "autosave")
+            packet.autoSaveRequested = true;
+        if (kind == "result") {
+            ConfigResult r;
+            r.operation = "diagnostic";
+            r.status = "saved";
+            packet.result = r;
+        }
+        if (kind == "overlay") {
+            ConfigOverlayPresentation p;
+            p.editorId = "unrelated";
+            packet.overlays.append(p);
+        }
+        if (kind == "models")
+            packet.models[{"other"}][0] = ConfigModelPlan{};
+        if (kind == "admitted")
+            packet.admitted = std::make_shared<const ConfigSnapshot>(snapshot);
+        if (kind == "value-delta")
+            packet.snapshot = snapshot;
+        QObject observer;
+        int notifications = 0;
+        bool coherent = true;
+        const auto observe = [&] {
+            ++notifications;
+            coherent &= groupView(store.groupInfo(capture.groupToken)) == before;
+        };
+        connect(&store, &ConfigStore::sourceError, &observer, observe);
+        connect(&store, &ConfigStore::sourceWarning, &observer, observe);
+        connect(&store, &ConfigStore::sourceStatesChanged, &observer, observe);
+        connect(&store, &ConfigStore::projectionEffects, &observer, observe);
+        connect(&store, &ConfigStore::sourceAccepted, &observer, observe);
+        connect(&store, &ConfigStore::migrationCompleted, &observer, observe);
+        connect(&store, &ConfigStore::published, &observer, observe);
+        control(store, [&](auto &w) {
+            w.holdInputs(true);
+            ConfigStoreTestAccess::post(w, packet);
+        });
+        const auto after = groupView(store.groupInfo(capture.groupToken));
+        QObject::disconnect(&store, nullptr, &observer, nullptr);
+        control(store, [](auto &w) { w.holdInputs(false); });
+        QCOMPARE(after, before);
+        QVERIFY(coherent);
+        const bool notifies = kind == "source-error" || kind == "warning" ||
+                              kind == "source-metadata" || kind == "effects" ||
+                              kind == "source-acceptance" || kind == "migration" ||
+                              kind == "admitted";
+        QCOMPARE(notifications, notifies ? 1 : 0);
+        const auto retry =
+            compat::request(store, [&] { return store.retryGroup(capture.groupToken); });
+        QCOMPARE(retry.status, QString("saved"));
+        QCOMPARE(retry.attemptNumber, quint64(2));
+        QCOMPARE(retry.capturePrefix, capture.capturePrefix);
+        QCOMPARE(store.groupInfo(capture.groupToken).attempts.first().attemptId, failed.attemptId);
+        QCOMPARE(store.inputs().size(), inputs);
+        QCOMPARE(store.value({"choice"}).toInt(), 1);
+        QVariantMap raw;
+        control(store, [&](auto &w) {
+            const auto id =
+                w.backend()->submit({ConfigBackendRequest::Operation::Read, "user", {}, {}});
+            raw = decodeMemoryValue(w.backend()->take(id)->bytes);
+        });
+        QCOMPARE(valueAt(raw, {"choice"})->toInt(), 1);
+    }
+    void fullGroupSnapshotsRespectOrderAndEmpty() {
+        ConfigStore store(options());
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto capture =
+            compat::request(store, [&] { return store.retainGroup(choice("old", 1)); });
+        control(store, [](auto &w) {
+            w.scheduleBackend({false, ConfigMemoryBackend::Fault::BeforeOperation});
+        });
+        QCOMPARE(compat::request(store, [&] { return store.saveGroup(capture.groupToken); }).status,
+                 QString("failed"));
+        ConfigWorkerPacket old;
+        control(store, [&](auto &w) { old = ConfigStoreTestAccess::publication(w); });
+        QVERIFY(old.retainedGroups.has_value());
+        QCOMPARE(
+            compat::request(store, [&] { return store.retryGroup(capture.groupToken); }).status,
+            QString("saved"));
+        QCOMPARE(
+            compat::request(store, [&] { return store.releaseGroup(capture.groupToken); }).status,
+            QString("released"));
+        const auto released = groupView(store.groupInfo(capture.groupToken));
+        const auto newer = compat::request(store, [&] {
+            return store.retainGroup({"new", {{"other"}}, {{{"other"}, true, 7}}, {}});
+        });
+        ConfigStoreTestAccess::inject(store, old);
+        QCOMPARE(groupView(store.groupInfo(capture.groupToken)), released);
+        QCOMPARE(store.groupInfo(newer.groupToken).state, QString("retained"));
+
+        ConfigWorkerPacket empty;
+        control(store, [&](auto &w) { empty = ConfigStoreTestAccess::publication(w); });
+        empty.retainedGroups->groups.clear();
+        empty.retainedGroups->generations.clear();
+        bool emptyBeforeNotification = false;
+        const auto connection = connect(&store, &ConfigStore::published, this, [&] {
+            emptyBeforeNotification =
+                store.groupInfo(capture.groupToken).error.code == "group-token" &&
+                store.groupInfo(newer.groupToken).error.code == "group-token";
+        });
+        ConfigStoreTestAccess::inject(store, empty);
+        disconnect(connection);
+        QVERIFY(emptyBeforeNotification);
+        QCOMPARE(store.groupInfo(newer.groupToken).error.code, QString("group-token"));
+        ConfigStoreTestAccess::inject(store, old);
+        QCOMPARE(store.groupInfo(capture.groupToken).error.code, QString("group-token"));
+        ConfigStoreTestAccess::inject(store, ConfigWorkerPacket{});
+        QCOMPARE(store.groupInfo(newer.groupToken).error.code, QString("group-token"));
+        // The next actual worker publication restores its complete current view,
+        // including the released tombstone, not an older stopped capture.
+        control(store, [](auto &w) {
+            ConfigStoreTestAccess::post(w, ConfigStoreTestAccess::publication(w));
+        });
+        QCOMPARE(groupView(store.groupInfo(capture.groupToken)), released);
+        QCOMPARE(store.groupInfo(newer.groupToken).state, QString("retained"));
+        QCOMPARE(compat::request(store, [&] { return store.saveGroup(newer.groupToken); }).status,
+                 QString("saved"));
+        QCOMPARE(store.value({"other"}).toInt(), 7);
+    }
+    void heldRepliesKeepCaptureTimeGroupState() {
+        ConfigStore store(options());
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto capture =
+            compat::request(store, [&] { return store.retainGroup(choice("held", 1)); });
+        control(store, [](auto &w) {
+            w.scheduleBackend({false, ConfigMemoryBackend::Fault::BeforeOperation});
+        });
+        const auto failed =
+            compat::request(store, [&] { return store.saveGroup(capture.groupToken); });
+        QMap<quint64, ConfigResult> results;
+        connect(&store, &ConfigStore::completed, this,
+                [&](const auto &r) { results[r.requestId] = r; });
+        QString diagnosticState;
+        connect(&store, &ConfigStore::sourceError, this,
+                [&](const auto &) { diagnosticState = store.groupInfo(capture.groupToken).state; });
+        control(store, [](auto &w) {
+            w.holdReplies(true);
+            w.scheduleBackend({true, ConfigMemoryBackend::Fault::None});
+        });
+        const auto id = store.retryGroup(capture.groupToken);
+        control(store, [](auto &w) {
+            ConfigWorkerPacket packet;
+            packet.sourceError = ConfigError{"unrelated-error", "other", "read"};
+            ConfigStoreTestAccess::post(w, packet);
+            w.releaseBackend();
+        });
+        const auto stillStopped = store.groupInfo(capture.groupToken).state;
+        control(store, [](auto &w) { w.releaseReplies(1); });
+        const auto saving = store.groupInfo(capture.groupToken).state;
+        control(store, [](auto &w) { w.releaseReplies(1); });
+        const auto afterDiagnostic = store.groupInfo(capture.groupToken).state;
+        control(store, [](auto &w) { w.holdReplies(false); });
+        QTRY_VERIFY(results.contains(id));
+        QCOMPARE(stillStopped, QString("stopped"));
+        QCOMPARE(saving, QString("saving"));
+        QCOMPARE(afterDiagnostic, QString("saving"));
+        QCOMPARE(diagnosticState, QString("saving"));
+        QCOMPARE(results[id].status, QString("saved"));
+        QCOMPARE(results[id].attemptNumber, quint64(2));
+        QCOMPARE(store.groupInfo(capture.groupToken).state, QString("succeeded"));
+        QCOMPARE(store.groupInfo(capture.groupToken).attempts.first().attemptId, failed.attemptId);
+    }
+    void terminalFailureKeepsStoppedGroup() {
+        ConfigStore store(options());
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto capture =
+            compat::request(store, [&] { return store.retainGroup(choice("terminal", 1)); });
+        control(store, [](auto &w) {
+            w.scheduleBackend({false, ConfigMemoryBackend::Fault::BeforeOperation});
+        });
+        QCOMPARE(compat::request(store, [&] { return store.saveGroup(capture.groupToken); }).status,
+                 QString("failed"));
+        const auto before = groupView(store.groupInfo(capture.groupToken));
+        bool coherent = false;
+        connect(&store, &ConfigStore::statusChanged, this, [&] {
+            coherent = store.status() == ConfigStore::Status::Error &&
+                       groupView(store.groupInfo(capture.groupToken)) == before;
+        });
+        control(store, [](auto &w) {
+            w.fail("terminal-test");
+            ConfigWorkerPacket packet;
+            packet.terminal = true;
+            packet.error = "terminal-test";
+            ConfigStoreTestAccess::post(w, packet);
+        });
+        QVERIFY(coherent);
+        QCOMPARE(groupView(store.groupInfo(capture.groupToken)), before);
+        const auto retry =
+            compat::request(store, [&] { return store.retryGroup(capture.groupToken); });
+        QCOMPARE(retry.status, QString("failed"));
+        QCOMPARE(retry.error.code, QString("worker-stopped"));
+        QCOMPARE(groupView(store.groupInfo(capture.groupToken)), before);
+    }
     void lifecycleRequestsCaptureSubmissionGeneration_data() {
         QTest::addColumn<QString>("operation");
         QTest::addColumn<bool>("success");

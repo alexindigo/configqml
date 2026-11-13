@@ -219,8 +219,17 @@ QList<ConfigPendingIntent> ConfigWorker::eligibleIntents(const QString &source,
             if (m_groups.value(command.groupToken).intents.value(source).contains(intent.id))
                 result.append(intent);
         } else if (intent.input <= command.prefix && intent.reservation.isEmpty() &&
-                   (intent.edit.pruneEmpty || !reserved(intent.path)))
-            result.append(intent);
+                   (intent.edit.pruneEmpty || !reserved(intent.path))) {
+            bool capturedCleanup = false;
+            if (intent.edit.pruneEmpty &&
+                m_files.value(source).conflictPolicy == ConfigConflictPolicy::StrictPendingRebase)
+                for (const auto &capture : m_groups)
+                    capturedCleanup |= capture.info.state != "succeeded" &&
+                                       capture.info.state != "released" &&
+                                       capture.intents.value(source).contains(intent.id);
+            if (!capturedCleanup)
+                result.append(intent);
+        }
     }
     return result;
 }
@@ -234,14 +243,16 @@ void ConfigWorker::recordPersistentEdit(const ConfigRoute &route, const ConfigPa
         m_pendingBytes[route.sourceId] = m_sourceBytes.value(route.sourceId);
     }
     const auto relative = path.mid(route.prefix.size());
+    const auto descriptor = m_options.schema.descriptor(path);
     auto append = [&](const ConfigPath &absolute, const std::optional<QVariant> &v,
                       const std::optional<ConfigPath> &fence, bool prune) {
         ConfigFileEdit edit{absolute.mid(route.prefix.size()), v, ifMissing};
         edit.fencePath = fence;
         edit.pruneEmpty = prune;
+        edit.namespaceReset =
+            !value && descriptor && descriptor->type == ConfigDescriptor::Type::Group;
         m_intents[route.sourceId].append({++m_nextIntent, input, absolute, edit, {}});
     };
-    const auto descriptor = m_options.schema.descriptor(path);
     if (!value && descriptor && descriptor->type == ConfigDescriptor::Type::Group) {
         const auto source = before.source(route.layerId, route.sourceId);
         const auto raw = source ? valueAt(source->raw, relative).value_or(QVariantMap{})
@@ -293,7 +304,13 @@ void ConfigWorker::recordPersistent(const ConfigInput &input, const ConfigLayers
                     input.kind == ConfigInput::Kind::Initialize, input.sequence, before);
 }
 void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
-                             const ConfigBackendResult &outcome) {
+                             const ConfigBackendResult &outcome,
+                             const ConfigSourcePreimage *preflight) {
+    prepareApplyConfirmation(id, preflight);
+    const auto route = m_routes.value(id);
+    QMap<ConfigPath, QList<ConfigContribution>> before;
+    for (const auto &path : m_options.schema.leaves())
+        before[path] = m_layers->info(path).contributions;
     const auto saved = m_saveIntents.value(id);
     QSet<quint64> ids;
     for (const auto &intent : saved)
@@ -302,6 +319,13 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
             ids.insert(intent.id);
     auto &remaining = m_intents[id];
     remaining.removeIf([&](const ConfigPendingIntent &intent) { return ids.contains(intent.id); });
+    for (auto &intent : remaining)
+        if (intent.frozen && savePredecessor(id, *intent.frozen)) {
+            // Correlated own descendants may advance a frozen ordinary witness,
+            // just as retained captures do; foreign rebases cannot advance it.
+            intent.frozen = ConfigSourcePreimage{outcome.revision, outcome.bytes};
+            intent.frozenBase = raw;
+        }
     m_baselines[id] = raw;
     m_revisions[id] = outcome.revision;
     m_pendingRevisions[id] = outcome.revision;
@@ -309,23 +333,18 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
     m_pendingBytes[id] = outcome.bytes;
     for (auto &capture : m_groups)
         if (capture.bases.contains(id)) {
+            if (m_files.value(id).conflictPolicy == ConfigConflictPolicy::StrictPendingRebase &&
+                capture.info.groupToken != m_save.groupToken &&
+                !savePredecessor(id, {capture.revisions.value(id), capture.bytes.value(id)}))
+                continue; // An ordinary rebase cannot launder foreign data into a capture.
             if (capture.info.groupToken == m_save.groupToken)
                 capture.confirmedRevisions[id] = outcome.revision;
             capture.bases[id] = raw;
             capture.revisions[id] = outcome.revision;
             capture.bytes[id] = outcome.bytes;
             capture.intents[id].subtract(ids);
-            if (capture.uncertain.contains(id)) {
-                if (capture.info.groupToken == m_save.groupToken) {
-                    capture.uncertain.remove(id);
-                    capture.uncertainBytes.remove(id);
-                } else {
-                    capture.uncertain[id] = outcome.revision;
-                    capture.uncertainBytes[id] = outcome.bytes;
-                }
-            }
         }
-    const auto route = m_routes.value(id);
+    advanceOwnPublications(id, outcome, ids);
     auto disk = *m_layers->source(route.layerId, id);
     disk.raw = raw;
     disk.bytes = outcome.bytes;
@@ -339,19 +358,46 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
     disk.localIntent = !remaining.isEmpty();
     disk.exists |= disk.localIntent;
     m_layers->replaceSource(route.layerId, disk);
+    for (auto it = before.cbegin(); it != before.cend(); ++it) {
+        const auto after = m_layers->info(it.key()).contributions;
+        auto prior = m_ownConfirmations.find(it.key());
+        if (prior != m_ownConfirmations.end() && prior->second == it.value())
+            prior->second = after;
+        else
+            m_ownConfirmations[it.key()] = {it.value(), after};
+    }
     refreshDirty(id);
     m_acceptOrigin = "own_save";
     m_acceptCause = "save";
 }
 bool ConfigWorker::recoverOwnPublication(const QString &source, const ConfigBackendResult &read) {
-    QString error;
+    const auto own = ownPublication(source, read);
+    QString retention;
     if (m_files.contains(source))
-        error = retainObservation(source, read, "readback", "late", m_save, &m_saveResult);
-    for (const auto &capture : m_groups)
-        if (capture.uncertain.contains(source) &&
-            (!read.success || capture.uncertain.value(source) != read.revision ||
-             capture.uncertainBytes.value(source) != read.bytes))
+        retention = retainObservation(source, read, "readback", own ? "own" : "late",
+                                      own ? own->origin : m_save, &m_saveResult);
+    QString error = read.success ? QString() : read.error.code;
+    if (retention.isEmpty())
+        supersedeOrdinaryPublication(source, read);
+    const ConfigSourcePreimage capture{m_saveRevisions.value(source), m_saveBytes.value(source)};
+    const ConfigSourcePreimage observation{read.revision, read.bytes};
+    const auto publications = m_ownPublications.value(source);
+    bool causal = false;
+    for (const auto &publication : publications)
+        causal |= causalPublicationBase(source, capture, publication.predecessor) ||
+                  causalPublicationBase(source, capture, publication.recoveryBase) ||
+                  causalPublicationBase(source, capture, publication.output);
+    for (auto it = publications.cbegin(); it != publications.cend(); ++it) {
+        const bool exactOwn =
+            read.success && it->output.revision == read.revision && it->output.bytes == read.bytes;
+        // Ordinary strict work also retains its existing exact-preimage restoration path.
+        const bool restored =
+            it.key().isEmpty() && read.success && samePublicationBase(source, capture, observation);
+        if (!(exactOwn && causal) && !restored)
             error = read.success ? QString("source-preimage-conflict") : read.error.code;
+    }
+    if (!retention.isEmpty())
+        error = retention;
     if (!error.isEmpty()) {
         m_saveResult.status = "failed";
         m_saveResult.error = {error, source, "readback"};
@@ -359,13 +405,17 @@ bool ConfigWorker::recoverOwnPublication(const QString &source, const ConfigBack
             {source, false, read.revision, "known", m_saveResult.error});
         return false;
     }
+    if (!m_ownPublications.contains(source))
+        return true; // Superseded PathIntent work keeps its original per-path baseline.
     ConfigJsonCodec codec(m_options.schema.diagnostics().at(m_routes.value(source).prefix));
     const auto raw = m_files.contains(source) ? codec.decode(read.bytes, source).raw
                                               : decodeMemoryValue(read.bytes);
+    m_recoveryPreimages[source] = capture;
     m_saveBases[source] = raw;
     m_saveRevisions[source] = read.revision;
     m_saveBytes[source] = read.bytes;
     m_recoveryWhole.insert(source);
+    m_saveRebase.remove(source); // Verified own recovery is never a foreign rebase.
     return true;
 }
 void ConfigWorker::retainedGroupCommand(const ConfigCommand &command) {
@@ -536,11 +586,18 @@ void ConfigWorker::retainedGroupCommand(const ConfigCommand &command) {
                     if (!intent.edit.pruneEmpty)
                         intent.reservation = token;
                     capture.intents[source.key()].insert(intent.id);
-                    capture.bases[source.key()] = m_baselines.value(source.key());
-                    capture.revisions[source.key()] =
-                        m_pendingRevisions.value(source.key(), m_revisions.value(source.key()));
-                    capture.bytes[source.key()] =
-                        m_pendingBytes.value(source.key(), m_sourceBytes.value(source.key()));
+                    if (!capture.bases.contains(source.key()) || intent.frozen) {
+                        capture.bases[source.key()] =
+                            intent.frozen ? intent.frozenBase : m_baselines.value(source.key());
+                        capture.revisions[source.key()] =
+                            intent.frozen ? intent.frozen->revision
+                                          : m_pendingRevisions.value(
+                                                source.key(), m_revisions.value(source.key()));
+                        capture.bytes[source.key()] =
+                            intent.frozen ? intent.frozen->bytes
+                                          : m_pendingBytes.value(source.key(),
+                                                                 m_sourceBytes.value(source.key()));
+                    }
                 }
         for (const auto &path : leaves) {
             const auto id = m_layers->info(path).route.sourceId;
@@ -583,8 +640,13 @@ void ConfigWorker::retainedGroupCommand(const ConfigCommand &command) {
         capture.bases.clear();
         capture.revisions.clear();
         capture.intents.clear();
-        capture.uncertain.clear();
-        capture.uncertainBytes.clear();
+        for (auto it = m_ownPublications.begin(); it != m_ownPublications.end();) {
+            it.value().remove(command.groupToken);
+            if (it.value().isEmpty())
+                it = m_ownPublications.erase(it);
+            else
+                ++it;
+        }
         capture.originalBases.clear();
         capture.originalRevisions.clear();
         capture.bytes.clear();
@@ -621,7 +683,6 @@ void ConfigWorker::retainedGroupCommand(const ConfigCommand &command) {
             describeGroup(m_saveResult, capture.info);
             m_saveResult.status = "failed";
             m_saveResult.error = {"group-dependency-stopped", {}, command.operation};
-            m_saveRetainedFailure = false;
             m_unresolvedSave = false;
             finishSave();
             return;

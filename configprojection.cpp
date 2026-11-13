@@ -1,11 +1,36 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configprojection_p.h"
+#include "confignumber.h"
 #include <QAbstractItemModel>
 #include <QSet>
 #include <algorithm>
 #include <vector>
 
 namespace configqml {
+QVariant unknownPresentation(const QVariant &value) {
+    const auto type = value.metaType().id();
+    const bool token = value.metaType() == QMetaType::fromType<ConfigNumber>();
+    if (token || type == QMetaType::Int || type == QMetaType::UInt || type == QMetaType::LongLong ||
+        type == QMetaType::ULongLong) {
+        const auto number =
+            token ? value.value<ConfigNumber>() : *ConfigNumber::fromJson(value.toString());
+        const auto exact = number.exactPresentation();
+        return exact ? QVariant(*exact) : QVariant::fromValue(number);
+    }
+    if (type == QMetaType::QVariantMap) {
+        auto map = value.toMap();
+        for (auto &item : map)
+            item = unknownPresentation(item);
+        return map;
+    }
+    if (type == QMetaType::QVariantList) {
+        auto list = value.toList();
+        for (auto &item : list)
+            item = unknownPresentation(item);
+        return list;
+    }
+    return value;
+}
 QVariant collectionPresentation(const ConfigDescriptor &d, const QVariant &v) {
     using T = ConfigDescriptor::Type;
     if (!v.isValid() || isNull(v))
@@ -25,6 +50,8 @@ QVariant collectionPresentation(const ConfigDescriptor &d, const QVariant &v) {
                 it.value() = collectionPresentation(d.element.first(), it.value());
             else if (d.fields.contains(it.key()))
                 it.value() = collectionPresentation(d.fields.value(it.key()), it.value());
+            else
+                it.value() = unknownPresentation(it.value());
         return map;
     }
     return v;

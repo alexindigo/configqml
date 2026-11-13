@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configqmlvalue.h"
 #include "configprojection_p.h"
+#include "confignumber.h"
+#include <QJSEngine>
 #include <QJSValue>
 #include <QJSValueIterator>
 #include <cmath>
@@ -163,36 +165,98 @@ ConfigValueResult admitQmlValue(const ConfigDescriptor &d, const QVariant &input
 QVariant qmlValue(const ConfigDescriptor &d, const QVariant &v) {
     return collectionPresentation(d, v);
 }
-QVariantMap qmlResult(const ConfigResult &input, const ConfigDiagnosticBuilder &diagnostics) {
-    const auto r = diagnostics.sanitize(input);
+QVariant qmlPresentation(QJSEngine *engine, const QVariant &value) {
+    if (value.metaType() == QMetaType::fromType<ConfigNumber>()) {
+        const auto exact = value.value<ConfigNumber>().exactPresentation();
+        if (exact)
+            return *exact;
+        if (!engine)
+            return value;
+        const auto atom = engine->toScriptValue(value);
+        engine->globalObject().property("Object").property("freeze").call({atom});
+        return QVariant::fromValue(atom);
+    }
+    if (value.metaType().id() == QMetaType::QVariantMap) {
+        auto map = value.toMap();
+        for (auto &item : map)
+            item = qmlPresentation(engine, item);
+        return map;
+    }
+    if (value.metaType().id() == QMetaType::QVariantList) {
+        auto list = value.toList();
+        for (auto &item : list)
+            item = qmlPresentation(engine, item);
+        return list;
+    }
+    return value;
+}
+QJSValue detachedQmlValue(QJSEngine *engine, const QVariant &value) {
+    if (value.metaType().id() == QMetaType::QVariantMap) {
+        auto object = engine->newObject();
+        object.setPrototype(QJSValue(QJSValue::NullValue));
+        const auto map = value.toMap();
+        for (auto it = map.cbegin(); it != map.cend(); ++it)
+            object.setProperty(it.key(), detachedQmlValue(engine, it.value()));
+        return object;
+    }
+    if (value.metaType().id() == QMetaType::QVariantList) {
+        const auto list = value.toList();
+        auto array = engine->newArray(list.size());
+        for (qsizetype i = 0; i < list.size(); ++i)
+            array.setProperty(i, detachedQmlValue(engine, list[i]));
+        return array;
+    }
+    return engine->toScriptValue(qmlPresentation(engine, value));
+}
+static QVariantMap resultFields(const ConfigResult &input,
+                                const ConfigDiagnosticBuilder &diagnostics, const QString &field) {
+    const auto r = field.isEmpty() || field == "publications" ? diagnostics.sanitize(input) : input;
+    const auto wants = [&](const char *key) {
+        return field.isEmpty() || field == QLatin1String(key);
+    };
     QVariantMap covered;
-    for (auto it = r.coveredRevisions.cbegin(); it != r.coveredRevisions.cend(); ++it)
-        covered[it.key()] = QString::fromLatin1(it->token);
+    if (wants("coveredRevisions"))
+        for (auto it = r.coveredRevisions.cbegin(); it != r.coveredRevisions.cend(); ++it)
+            covered[it.key()] = QString::fromLatin1(it->token);
     QVariantList publications;
     QVariantList masks;
     QVariantList coverage, evidence;
-    for (const auto &item : r.coverage)
-        coverage.append(QVariantMap{{"path", item.path},
-                                    {"sourceId", item.sourceId},
-                                    {"inputThrough", QString::number(item.inputThrough)},
-                                    {"intentRevision", QString::number(item.intentRevision)}});
-    for (const auto &item : r.evidence)
-        evidence.append(QVariantMap{{"evidenceId", item.evidenceId},
-                                    {"directory", item.directory},
-                                    {"sourceId", item.sourceId},
-                                    {"phase", item.phase},
-                                    {"role", item.role},
-                                    {"observationOrder", QString::number(item.observationOrder)}});
-    for (auto it = r.masks.cbegin(); it != r.masks.cend(); ++it)
-        masks.append(QVariantMap{{"path", it.key()}, {"maskedBy", it.value()}});
-    for (const auto &p : r.publications)
-        publications.append(QVariantMap{{"sourceId", p.sourceId},
-                                        {"success", p.success},
-                                        {"revision", QString::fromLatin1(p.revision.token)},
-                                        {"publicationState", p.state},
-                                        {"file", p.error.file},
-                                        {"phase", p.error.operation},
-                                        {"error", p.error.code}});
+    if (wants("coverage"))
+        for (const auto &item : r.coverage)
+            coverage.append(QVariantMap{{"path", item.path},
+                                        {"sourceId", item.sourceId},
+                                        {"inputThrough", QString::number(item.inputThrough)},
+                                        {"intentRevision", QString::number(item.intentRevision)}});
+    if (wants("evidence"))
+        for (const auto &item : r.evidence)
+            evidence.append(
+                QVariantMap{{"evidenceId", item.evidenceId},
+                            {"directory", item.directory},
+                            {"sourceId", item.sourceId},
+                            {"phase", item.phase},
+                            {"role", item.role},
+                            {"observationOrder", QString::number(item.observationOrder)}});
+    if (wants("masks"))
+        for (auto it = r.masks.cbegin(); it != r.masks.cend(); ++it)
+            masks.append(QVariantMap{{"path", it.key()}, {"maskedBy", it.value()}});
+    if (wants("publications"))
+        for (const auto &p : r.publications) {
+            QVariantList overridden;
+            for (const auto &path : p.overriddenPaths)
+                overridden.append(QVariant(path));
+            publications.append(
+                QVariantMap{{"sourceId", p.sourceId},
+                            {"success", p.success},
+                            {"revision", QString::fromLatin1(p.revision.token)},
+                            {"publicationState", p.state},
+                            {"file", p.error.file},
+                            {"phase", p.error.operation},
+                            {"error", p.error.code},
+                            {"rebasedOnto",
+                             p.rebasedOnto ? QString::fromLatin1(p.rebasedOnto->token) : QString()},
+                            {"overriddenPaths", overridden}});
+        }
+    const auto error = diagnostics.sanitize(r.error);
     return {{"requestId", QString::number(r.requestId)},
             {"storeId", r.storeId},
             {"operation", r.operation},
@@ -201,12 +265,12 @@ QVariantMap qmlResult(const ConfigResult &input, const ConfigDiagnosticBuilder &
             {"coveredRevisions", covered},
             {"publications", publications},
             {"publicationState", r.publicationState},
-            {"error", QVariantMap{{"code", r.error.code},
-                                  {"sourceId", r.error.sourceId},
-                                  {"file", r.error.file},
-                                  {"path", r.error.path},
-                                  {"line", r.error.line},
-                                  {"operation", r.error.operation}}},
+            {"error", QVariantMap{{"code", error.code},
+                                  {"sourceId", error.sourceId},
+                                  {"file", error.file},
+                                  {"path", error.path},
+                                  {"line", error.line},
+                                  {"operation", error.operation}}},
             {"maskedBy", r.maskedBy},
             {"masks", masks},
             {"coverage", coverage},
@@ -224,6 +288,17 @@ QVariantMap qmlResult(const ConfigResult &input, const ConfigDiagnosticBuilder &
             {"editorId", r.editorId},
             {"refreshState", r.refreshState},
             {"description", r.description()}};
+}
+QStringList qmlResultKeys() {
+    static const auto keys = resultFields(ConfigResult{}, ConfigDiagnosticBuilder{}, {}).keys();
+    return keys;
+}
+QVariant qmlResultField(const ConfigResult &input, const ConfigDiagnosticBuilder &diagnostics,
+                        const QString &field) {
+    return resultFields(input, diagnostics, field).value(field);
+}
+QVariantMap qmlResult(const ConfigResult &input, const ConfigDiagnosticBuilder &diagnostics) {
+    return resultFields(input, diagnostics, {});
 }
 QVariantMap qmlGroupInfo(const ConfigGroupInfo &info, const ConfigDiagnosticBuilder &diagnostics) {
     if (!info.error.empty())

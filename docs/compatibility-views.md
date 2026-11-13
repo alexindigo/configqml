@@ -74,6 +74,13 @@ and cause distinguish startup, foreign reads, own saves and metadata projection.
 An unchanged confirmed own echo generates no acceptance event. Metadata-only
 events do not pretend to be an external settings choice.
 
+Each event is one coherent accepted generation, not a transaction spanning
+independent file replacements. With Live watching, two replacements may produce
+one combined event or two successive complete disk-branch events. Consume each
+event's origin/cause, facts and source revisions together; a debounce interval is
+not a batching guarantee. An explicit reload after both replacements publishes
+their final admitted state, but does not retract an earlier accepted watch event.
+
 ## Record-list housekeeping and editing
 
 `ConfigRecordListPolicy` names one atomic owning leaf, a declared `listPath`, its
@@ -104,6 +111,12 @@ Ordinary whole-leaf assignments retain their existing meaning: the whole submitt
 value is explicit user choice, not an inferred diff of a detached display copy.
 Property/model generations install coherently before completion. Unrelated path
 publications do not invalidate a displayed leaf's address generation.
+
+An unchanged list keeps its displayed generation across its own successful save
+confirmation/readback, including cross-shard saves. Captured remove/edit, transfer,
+ensure/copy/at endpoints remain usable without copying a fresh generation. A
+foreign or other-writer change, hidden raw change, mapping or metadata change
+still invalidates them; own save does not refresh an already-stale endpoint.
 
 ### Raw-preserving transfer (0.3.0)
 

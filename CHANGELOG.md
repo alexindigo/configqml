@@ -2,6 +2,125 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-12
+
+### Added
+
+- Opt-in `StrictPendingRebase` publication policy for unfrozen ordinary
+  pending work. Locked preflight accepts foreign observations before applying
+  local-wins leaf edits, preserving foreign siblings and deletions. Retained
+  groups and failed attempts stay frozen; structural conflicts still refuse.
+  No-effect refusals pin the original capture for content-restoration resolution;
+  failures before a successful locked read do not freeze work. A frozen source
+  holds newer edits strictly too.
+- Route receipt fields `rebasedOnto` and `overriddenPaths`, with value-free
+  `foreign-value-overridden` source warnings and retained foreign-byte evidence.
+- Writable overlay `mode: "live"` for runtime instance settings. Checked setters
+  read back immediately, queue owning-leaf admission without editor busy fences,
+  keep sparse overrides and refresh on base/owner changes. `save()`/`flush()` and
+  autosave use normal owner persistence, receipts and evidence.
+- Read-only live `draft.preview` and `draft.previewScope(path)` overlay bases.
+  Edited leaves show draft values; unedited leaves follow current effective
+  store values without changing frozen Apply/conflict fences. Preview scopes
+  close on successful Apply/discard or draft destruction.
+- Overlay `placementToken` fences observable raw-row mapping changes without
+  persistent row IDs. Member edits and indistinguishable same-ID replacements
+  keep the token; observable moves/reorders and identity changes update it.
+- `copyValue` makes detached JS-mutable deep copies with exact native numeric
+  atoms and own prototype-like keys preserved.
+- BINDABLE store and overlay
+  `status`/`ready`/`error`/`dirty`/`conflicted`/`busy` properties, with native
+  `bindable*()` accessors. Namespace leaf bindings, including `Qt.binding`,
+  write through the checked setter and retain normal admission and intent.
+- Public error codes `evidence-backlog` for saturated evidence retention,
+  `conflict-policy` for invalid source policy, `not-a-draft` for draft-only
+  operations, and `overlay-mode` for unsupported writable-overlay operations.
+  View-mode refusals remain `overlay-readonly`.
+
+### Fixed
+
+- Keep draft confirmation, whole-source preflight leases and terminal Live handles
+  from laundering foreign or replacement selections. Mixed ordinary/group uncertain
+  Retry retains causal roots; failed first saves retain their own parent identities,
+  and reload migrations use the freshly acquired full revision.
+- Keep absent-placement tokens stable and sanitize absolute override paths without
+  scope prefixes. Test probes retain asynchronous result storage, and permission
+  fault cases check whether DAC restrictions can actually be enforced.
+- Replace expanded public revision and projection-run identities with compact
+  digests, preserving equality, ordering counters and deduplication semantics.
+- Materialize QML signal/callback metadata only when its fields are read, rather
+  than charging unused source tables, coverage, publications and evidence to
+  every event. Retained events keep their original immutable snapshot.
+- Prepare existing namespace getters and bound consumers before public change
+  signals across owners, scopes, drafts, previews, overlays and models, without
+  depending on connection order. Binding writes retain admission and intent;
+  readiness guards also update before closure and detach notifications.
+- Own save confirmation no longer invalidates unchanged generation-fenced list
+  edits, transfers, container commands or overlay selections. Provenance updates
+  remain independently ordered; foreign, other-writer, raw and mapping changes
+  still make captured selections stale.
+- Admitted open numeric values validate in their declared destination domain.
+  Integral overrides now open as Real in every overlay mode, consistently with
+  JSON input; drafts, record-list edits, projections and nested values share the
+  correction without coercing strings or changing exact raw atoms.
+- Drafts and frozen overlay editors can Retry their own admitted failed Apply
+  without recapture or duplicate intent. Repaired IO/partial/readback failures
+  publish the original work; competing selected changes still conflict, including
+  foreign raw edits hidden by pending values. New draft edits admit only their delta.
+- Partial worker packets no longer clear retained-group metadata. Complete group
+  snapshots distinguish empty from unchanged and reject older publications,
+  preserving original-capture Retry after unrelated source errors and diagnostics.
+- Uncertain own publications share provenance with watcher admission and Retry.
+  Exact own revision/bytes no longer become false external choices or settle
+  failed work early; Retry preserves original evidence correlation and newest
+  intent. Different revisions, including identical-byte replacements, remain
+  external for ordinary and retained work.
+- Superseded ordinary PathIntent uncertainty witnesses no longer impose strict
+  source recovery. Disjoint foreign edits merge, overlaps report `path-conflict`,
+  and later resolution can save without discarding pending intent.
+- Keep acquired evidence across retention failures in bounded per-source worker
+  backlogs. Saturated sources fail visibly until durable draining succeeds;
+  unrelated sources continue, and retries preserve exact bytes and correlation.
+  The bound is enforced in Release too; draft/overlay Retry receipts include
+  evidence recovered by their internal refresh.
+- Overlays publish only changed token/dirty metadata and prepare/notify only
+  actual presentation changes. Unrelated publications and duplicate packets are
+  silent; invalid mode operations do not introduce busy/conflict transitions.
+- On unchanged files, `StrictPendingRebase` now matches `StrictSourcePreimage`,
+  including explicit equal-value rewrites and reset of an unchanged absent file.
+  No-write shortcuts still apply to actual foreign rebases.
+- Unknown numeric members present as exact JS numbers or frozen native
+  `.decimal` atoms through namespaces, models, drafts, previews and overlays,
+  preserving unsafe numeric tokens on write-back.
+- Ordinary save failures no longer prevent unrelated routes from publishing or
+  poison later clean saves after resolution. Earlier receipts remain evidence.
+- Rejected inputs keep their own failed receipts without failing later publishing
+  saves. Autosave can retry resolved ordinary work through the normal policy.
+- Strict captures resolve against exact original bytes and presence under the
+  lock despite final-file inode/mtime changes. Link and parent identity fences,
+  hard-link refusal and late-race checks remain active.
+
+### Changed
+
+- Separate native filesystem revision witnesses from opaque identity. Explicit
+  `revision.details()` and retained `revision.json` expose full witnesses;
+  conflict, own/foreign observation and evidence retention contracts are unchanged.
+- QML adapter event arguments are now `QJSValue` objects with enumerable lazy
+  fields instead of `QVariantMap`. QML field access and complete explicit copies
+  keep their shapes; C++ adapter connections must accept the new argument type.
+  Source errors additionally expose an empty `evidence` array.
+- Before 1.0, each minor release has its own shared-library SONAME
+  `so.0.<minor>`. The 0.5.0 package installs `libconfigqml_core.so.0.5` and
+  `libconfigqml.so.0.5`; native consumers must rebuild on minor bumps.
+- Native `Real` admission also accepts integral int/qint64/quint64 values in its
+  finite domain, matching JSON numeric admission without coercing strings.
+- Autosave retries resolved failed ordinary work through the normal publication
+  policy; earlier failed receipts remain history rather than a permanent stop.
+- Rebuild native dependents for pre-1.0 ABI changes to `ConfigRevision`, `ConfigPublication`,
+  `ConfigFileEdit`, `ConfigJsonTransaction`, `ConfigJsonBackend::reconcile`,
+  `ConfigOverlayEditor`, `ConfigDraft`, `ConfigStoreHandle`, `ConfigNumber`,
+  `ConfigNode`, `ConfigListModel`, `ConfigStore`, `ConfigQmlStore` and `ConfigQmlOverlay`.
+
 ## [0.4.0] - 2026-11-08
 
 ### Added
@@ -133,7 +252,8 @@
 - Native/QML quick starts, executable standalone examples, complete shipped
   contracts and technical release gates.
 
-[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/alexindigo/configqml/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/alexindigo/configqml/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/alexindigo/configqml/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/alexindigo/configqml/compare/v0.2.0...v0.2.1

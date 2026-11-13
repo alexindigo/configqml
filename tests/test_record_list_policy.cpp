@@ -94,6 +94,277 @@ QVariantList displayed(ConfigStore &store, bool same, bool right = false) {
 class RecordListTest : public QObject {
     Q_OBJECT
 private slots:
+    void ownSaveContinuation_data() {
+        QTest::addColumn<QString>("change");
+        for (const auto *change :
+             {"none", "foreign", "foreign-equal", "foreign-aba", "local-equal", "metadata-equal",
+              "numeric-storage", "failed-write", "uncertain-readback"})
+            QTest::newRow(change) << QString::fromLatin1(change);
+    }
+    void ownSaveContinuation() {
+        QFETCH(QString, change);
+        QTemporaryDir dir;
+        const auto file = dir.filePath("user.json");
+        const QByteArray original =
+            "{\"rows\":[{\"id\":\"x\",\"label\":\"old\"}],\"wide\":18446744073709551615}";
+        compat::put(file, original);
+        auto row = D::leaf(T::Record, QVariantMap{{"id", "x"}});
+        row.fields = {{"id", D::leaf(T::String, QString())}};
+        ConfigStoreOptions o;
+        o.autoSave = false;
+        o.schema = ConfigSchema(D::group({{"rows", D::list(row, {})}}));
+        o.layers = {{"user",
+                     ConfigLayerKind::File,
+                     ConfigAdmissionPolicy::FieldFallback,
+                     {{"user", {}, {}}},
+                     true}};
+        o.jsonFiles = {{"user", "user", file}};
+        auto armed = std::make_shared<bool>(true);
+        o.fileFault = [armed, change](const QString &phase, const QString &) {
+            if (*armed && ((change == "failed-write" && phase == "write") ||
+                           (change == "uncertain-readback" && phase == "readback"))) {
+                *armed = false;
+                return QString("once");
+            }
+            return QString();
+        };
+        o.recordListPolicies = {{"rows", {"rows"}, {}, "id"}};
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const ConfigRecordListEdit edit{
+            ConfigRecordListEdit::Op::Set, 0,
+            change == "numeric-storage" ? QString("number") : QString("label"),
+            change == "numeric-storage" ? QVariant(17) : QVariant(QString("edited"))};
+        QCOMPARE(compat::request(store,
+                                 [&] {
+                                     return store.editRecordList(
+                                         "rows",
+                                         {store.info({"rows"}).publicationGeneration, {}, {edit}});
+                                 })
+                     .status,
+                 QString("admitted"));
+        const auto captured = store.info({"rows"});
+        if (change == "failed-write" || change == "uncertain-readback") {
+            QCOMPARE(compat::request(store, [&] { return store.save(); }).status,
+                     QString("failed"));
+            QCOMPARE(store.info({"rows"}).publicationGeneration, captured.publicationGeneration);
+        }
+        QCOMPARE(compat::request(store, [&] { return store.save(); }).status, QString("saved"));
+        const auto saved = store.info({"rows"});
+        QCOMPARE(saved.publicationGeneration, captured.publicationGeneration);
+        QCOMPARE(saved.contentRevision, captured.contentRevision);
+        QCOMPARE(saved.pathGeneration, captured.pathGeneration);
+        QCOMPARE(saved.intentRevision, captured.intentRevision);
+        QCOMPARE(saved.provenance.contributions.last().localIntentRevision, quint64(0));
+        QVERIFY(saved.provenance.contributions.last().revision !=
+                captured.provenance.contributions.last().revision);
+        if (change.startsWith("foreign")) {
+            const auto ownBytes = compat::bytes(file);
+            compat::put(file, change == "foreign-equal"
+                                  ? ownBytes
+                                  : QByteArray("{\"rows\":[{\"id\":\"x\",\"label\":\"foreign\"}],"
+                                               "\"wide\":18446744073709551615}"));
+            QCOMPARE(compat::request(store, [&] { return store.reload(); }).status,
+                     QString("reloaded"));
+            if (change == "foreign-aba") {
+                compat::put(file, ownBytes);
+                QCOMPARE(compat::request(store, [&] { return store.reload(); }).status,
+                         QString("reloaded"));
+            }
+        } else if (change == "local-equal")
+            compat::request(
+                store, [&] { return store.setUser({"rows"}, store.value({"rows"})).requestId; });
+        else if (change == "metadata-equal")
+            QCOMPARE(
+                compat::request(store, [&] { return store.updateRecordListPolicy("rows", {}); })
+                    .status,
+                QString("projected"));
+        ConfigRecordListEdit remove;
+        remove.op = ConfigRecordListEdit::Op::Remove;
+        const auto result = compat::request(store, [&] {
+            return store.editRecordList("rows", {captured.publicationGeneration, {}, {remove}});
+        });
+        const bool stale = change != "none" && change != "numeric-storage" &&
+                           change != "failed-write" && change != "uncertain-readback";
+        if (stale) {
+            QCOMPARE(result.error.code, QString("list-edit-conflict"));
+            QCOMPARE(store.value({"rows"}).toList().size(), 1);
+        } else {
+            QCOMPARE(result.status, QString("admitted"));
+            QVERIFY(store.value({"rows"}).toList().isEmpty());
+            QCOMPARE(compat::request(store, [&] { return store.save(); }).status, QString("saved"));
+            QVERIFY(ConfigJsonCodec()
+                        .decode(compat::bytes(file), "user")
+                        .raw.value("rows")
+                        .toList()
+                        .isEmpty());
+        }
+        QCOMPARE(ConfigJsonCodec()
+                     .decode(compat::bytes(file), "user")
+                     .raw.value("wide")
+                     .value<ConfigNumber>()
+                     .token(),
+                 QString("18446744073709551615"));
+    }
+    void transferAfterOwnSave_data() {
+        QTest::addColumn<bool>("foreign");
+        QTest::newRow("own-confirmation") << false;
+        QTest::newRow("foreign-after-confirmation") << true;
+    }
+    void rebaseBeforeOwnConfirmationStillInvalidates() {
+        QTemporaryDir dir;
+        const auto file = dir.filePath("left.json");
+        compat::put(file, "{\"rows\":[{\"id\":\"clock\"}]}");
+        auto o = transferOptions(false, dir.path());
+        o.evidenceDirectory = dir.filePath("evidence");
+        o.jsonFiles[0].conflictPolicy = ConfigConflictPolicy::StrictPendingRebase;
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        ConfigRecordListEdit set{ConfigRecordListEdit::Op::Set, 0, "label", QString("edited")};
+        QCOMPARE(compat::request(
+                     store,
+                     [&] {
+                         return store.editRecordList(
+                             "left", {store.info(owner(false)).publicationGeneration, {}, {set}});
+                     })
+                     .status,
+                 QString("admitted"));
+        const auto captured = store.info(owner(false)).publicationGeneration;
+        compat::put(file, "{\"rows\":[{\"id\":\"clock\",\"foreign\":true}]}");
+        QCOMPARE(compat::request(store, [&] { return store.save(); }).status, QString("saved"));
+        QVERIFY(store.info(owner(false)).publicationGeneration != captured);
+        ConfigRecordListEdit remove;
+        remove.op = ConfigRecordListEdit::Op::Remove;
+        QCOMPARE(compat::request(
+                     store, [&] { return store.editRecordList("left", {captured, {}, {remove}}); })
+                     .error.code,
+                 QString("list-edit-conflict"));
+    }
+    void transferAfterOwnSave() {
+        QFETCH(bool, foreign);
+        QTemporaryDir dir;
+        auto o = transferOptions(false, dir.path());
+        compat::put(dir.filePath("left.json"),
+                    "{\"rows\":[{\"id\":\"clock\",\"wide\":18446744073709551615}]}");
+        compat::put(dir.filePath("right.json"), "{\"rows\":[{\"id\":\"other\"}]}");
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        for (const auto &path : {owner(false), owner(false, true)})
+            QCOMPARE(compat::request(
+                         store, [&] { return store.setUser(path, store.value(path)).requestId; })
+                         .status,
+                     QString("accepted"));
+        auto edits = transfer(store, false);
+        QCOMPARE(compat::request(store, [&] { return store.save(); }).status, QString("saved"));
+        QCOMPARE(store.info(owner(false)).publicationGeneration, edits.edits[0].from.generation);
+        QCOMPARE(store.info(owner(false, true)).publicationGeneration,
+                 edits.edits[0].destination.generation);
+        if (foreign) {
+            compat::put(dir.filePath("right.json"), "{\"rows\":[{\"id\":\"changed\"}]}");
+            QCOMPARE(compat::request(store, [&] { return store.reload(); }).status,
+                     QString("reloaded"));
+        }
+        const auto result =
+            compat::request(store, [&] { return store.editRecordList("left", edits); });
+        QVERIFY2(foreign || result.status == "admitted", qPrintable(result.error.code));
+        if (foreign) {
+            QCOMPARE(result.error.code, QString("list-edit-conflict"));
+            QCOMPARE(store.value(owner(false)).toList().size(), 1);
+        } else {
+            QCOMPARE(result.status, QString("admitted"));
+            QVERIFY(store.value(owner(false)).toList().isEmpty());
+            QCOMPARE(store.value(owner(false, true)).toList().size(), 2);
+            QCOMPARE(compat::request(store, [&] { return store.save(); }).status, QString("saved"));
+            const auto raw =
+                ConfigJsonCodec().decode(compat::bytes(dir.filePath("right.json")), "right").raw;
+            QCOMPARE(raw.value("rows")
+                         .toList()
+                         .last()
+                         .toMap()
+                         .value("wide")
+                         .value<ConfigNumber>()
+                         .token(),
+                     QString("18446744073709551615"));
+        }
+    }
+    void hiddenRowsStillInvalidateAfterOwnSave() {
+        QTemporaryDir dir;
+        const auto file = dir.filePath("left.json");
+        compat::put(file, "{\"rows\":[{\"id\":\"hidden\",\"old\":true},{\"id\":\"clock\"}]}");
+        auto o = transferOptions(false, dir.path());
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QCOMPARE(
+            compat::request(
+                store, [&] { return store.updateRecordListPolicy("left", transferMetadata()); })
+                .status,
+            QString("projected"));
+        ConfigRecordListEdit set{ConfigRecordListEdit::Op::Set, 0, "label", QString("edited")};
+        QCOMPARE(compat::request(
+                     store,
+                     [&] {
+                         return store.editRecordList(
+                             "left", {store.info(owner(false)).publicationGeneration, {}, {set}});
+                     })
+                     .status,
+                 QString("admitted"));
+        const auto captured = store.info(owner(false)).publicationGeneration;
+        const auto displayed = store.value(owner(false));
+        QCOMPARE(compat::request(store, [&] { return store.save(); }).status, QString("saved"));
+        QCOMPARE(store.info(owner(false)).publicationGeneration, captured);
+        compat::put(file, "{\"rows\":[{\"id\":\"hidden\",\"old\":false},{\"id\":\"clock\","
+                          "\"label\":\"edited\"}]}");
+        QCOMPARE(compat::request(store, [&] { return store.reload(); }).status,
+                 QString("reloaded"));
+        QCOMPARE(store.value(owner(false)), displayed);
+        ConfigRecordListEdit remove;
+        remove.op = ConfigRecordListEdit::Op::Remove;
+        QCOMPARE(compat::request(
+                     store, [&] { return store.editRecordList("left", {captured, {}, {remove}}); })
+                     .error.code,
+                 QString("list-edit-conflict"));
+    }
+    void openNumericRecordListUsesDeclaredDomain() {
+        auto row = D::leaf(T::Record, QVariantMap{{"id", "x"}, {"n", 0.0}});
+        row.fields = {{"id", D::leaf(T::String, QString())}, {"n", D::leaf(T::Real, 0.0)}};
+        ConfigStoreOptions o;
+        o.autoSave = false;
+        o.schema = ConfigSchema(
+            D::group({{"rows", D::list(row, {QVariantMap{{"id", "x"}, {"n", 0.0}}})}}));
+        o.layers = {{"user",
+                     ConfigLayerKind::File,
+                     ConfigAdmissionPolicy::FieldFallback,
+                     {{"user", {}, {}}},
+                     true}};
+        o.recordListPolicies = {{"rows", {"rows"}, {}, "id", {}, false, true}};
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        ConfigRecordListMetadata metadata;
+        metadata.ready = true;
+        metadata.entries = {{"x", true, false, true, {{"n", 17}}}};
+        QCOMPARE(
+            compat::request(store, [&] { return store.updateRecordListPolicy("rows", metadata); })
+                .status,
+            QString("projected"));
+        ConfigRecordListEdit edit;
+        edit.field = "n";
+        auto open = D::leaf(T::Record, QVariantMap{});
+        open.open = true;
+        const auto captured = open.validate(QVariantMap{{"n", 17}});
+        QVERIFY(captured.ok());
+        edit.value = captured.value.toMap().value("n");
+        ConfigRecordListEditOptions edits{store.info({"rows"}).publicationGeneration, {}, {edit}};
+        QCOMPARE(compat::request(store, [&] { return store.editRecordList("rows", edits); }).status,
+                 QString("admitted"));
+        const auto value = store.value({"rows"}).toList().first().toMap().value("n");
+        QCOMPARE(value.metaType().id(), QMetaType::Double);
+        QCOMPARE(value.toDouble(), 17.0);
+        edits.generation = store.info({"rows"}).publicationGeneration;
+        edits.edits[0].value = QString("17");
+        QCOMPARE(compat::request(store, [&] { return store.editRecordList("rows", edits); }).status,
+                 QString("failed"));
+        QCOMPARE(store.value({"rows"}).toList().first().toMap().value("n").toDouble(), 17.0);
+    }
     void samePolicyAddressesAndSameList() {
         auto o = transferOptions(true);
         ConfigStore store(o);

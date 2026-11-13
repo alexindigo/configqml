@@ -24,6 +24,69 @@ QVariant overlayMerge(const QVariant &base, const QVariant &overrides) {
                                : it.value();
     return result;
 }
+bool overlayPlacementMoved(const QVariant &before, const QVariant &after,
+                           const QList<ConfigValueSelector> &address, const QString &overrideKey) {
+    auto withoutOverride = [&](const QVariant &value, const QList<ConfigValueSelector> &tail) {
+        const auto record = overlayAt(value, tail);
+        if (!record || record->metaType().id() != QMetaType::QVariantMap)
+            return value;
+        auto map = record->toMap();
+        map.remove(overrideKey);
+        return overlayReplace(value, tail, map).value_or(value);
+    };
+    QVariant old = before, current = after;
+    for (qsizetype depth = 0; depth < address.size(); ++depth) {
+        const auto selector = address[depth];
+        if (selector.kind == ConfigValueSelector::Kind::Index &&
+            old.metaType().id() == QMetaType::QVariantList &&
+            current.metaType().id() == QMetaType::QVariantList) {
+            const auto a = old.toList(), b = current.toList();
+            const auto index = selector.index;
+            if (index >= a.size() || index >= b.size())
+                return (index < a.size()) != (index < b.size());
+            const auto tail = address.mid(depth + 1);
+            const auto previous = withoutOverride(a[index], tail);
+            const auto selected = withoutOverride(b[index], tail);
+            if (previous != selected) {
+                bool cameFromElsewhere = false, movedElsewhere = false;
+                for (qsizetype i = 0; i < a.size(); ++i)
+                    cameFromElsewhere |= i != index && withoutOverride(a[i], tail) == selected;
+                for (qsizetype i = 0; i < b.size(); ++i)
+                    movedElsewhere |= i != index && withoutOverride(b[i], tail) == previous;
+                if ((cameFromElsewhere && movedElsewhere) ||
+                    (a.size() != b.size() && (cameFromElsewhere || movedElsewhere)))
+                    return true;
+            }
+        }
+        if (selector.kind == ConfigValueSelector::Kind::Key &&
+            old.metaType().id() == QMetaType::QVariantMap &&
+            current.metaType().id() == QMetaType::QVariantMap) {
+            const auto a = old.toMap(), b = current.toMap();
+            if (a.contains(selector.key) && b.contains(selector.key)) {
+                const auto tail = address.mid(depth + 1);
+                const auto previous = withoutOverride(a.value(selector.key), tail);
+                const auto selected = withoutOverride(b.value(selector.key), tail);
+                if (previous != selected) {
+                    bool cameFromElsewhere = false, movedElsewhere = false;
+                    for (auto it = a.cbegin(); it != a.cend(); ++it)
+                        cameFromElsewhere |= it.key() != selector.key &&
+                                             withoutOverride(it.value(), tail) == selected;
+                    for (auto it = b.cbegin(); it != b.cend(); ++it)
+                        movedElsewhere |= it.key() != selector.key &&
+                                          withoutOverride(it.value(), tail) == previous;
+                    if (cameFromElsewhere && movedElsewhere)
+                        return true;
+                }
+            }
+        }
+        const auto a = overlayAt(old, {selector}), b = overlayAt(current, {selector});
+        if (!a || !b)
+            return bool(a) != bool(b);
+        old = *a;
+        current = *b;
+    }
+    return false;
+}
 static bool schemaEqual(const ConfigDescriptor &descriptor, const QVariant &a, const QVariant &b) {
     const auto left = descriptor.validate(a), right = descriptor.validate(b);
     return left.ok() && right.ok() && left.value == right.value;

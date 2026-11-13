@@ -53,9 +53,14 @@ ConfigError ConfigDiagnosticBuilder::sanitize(ConfigError error) const {
     return error;
 }
 ConfigResult ConfigDiagnosticBuilder::sanitize(ConfigResult result) const {
+    auto absolute = *this;
+    absolute.m_origin.clear();
     result.error = sanitize(result.error);
-    for (auto &publication : result.publications)
+    for (auto &publication : result.publications) {
         publication.error = sanitize(publication.error);
+        for (auto &overridden : publication.overriddenPaths)
+            overridden = absolute.path(overridden);
+    }
     return result;
 }
 ConfigError ConfigDiagnosticBuilder::error(const ConfigDiagnostic &diagnostic,
