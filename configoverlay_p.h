@@ -71,6 +71,7 @@ struct ConfigOverlayTransaction {
     ConfigOverlayCapture captured;
     QMap<ConfigPath, std::optional<QVariant>> edits;
     QString error;
+    bool preflightFailed = false;
     QList<ConfigEvidenceReference> preflightEvidence;
     QList<std::shared_ptr<ConfigOverlayEndpoint>> order;
     qsizetype acquired = 0;

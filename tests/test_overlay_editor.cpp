@@ -8,6 +8,8 @@
 #include <QSignalSpy>
 #include <QSaveFile>
 #include <QProcess>
+#include <QSemaphore>
+#include <QScopeGuard>
 #include <limits>
 #include <stdexcept>
 using namespace configqml;
@@ -132,6 +134,196 @@ bool pendingBackend(ConfigStore &store) {
 class OverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void readFailureDoesNotRetireSelections_data() {
+        QTest::addColumn<int>("mode");
+        QTest::addColumn<bool>("write");
+        QTest::addColumn<bool>("preview");
+        QTest::addColumn<bool>("ownerFirst");
+        QTest::addColumn<bool>("readOwner");
+        QTest::addColumn<bool>("injected");
+        QTest::addColumn<bool>("newer");
+        for (auto mode : {ConfigOverlayMode::View, ConfigOverlayMode::Live})
+            for (bool write : {false, true}) {
+                if (write && mode == ConfigOverlayMode::View)
+                    continue;
+                for (bool preview : {false, true})
+                    for (bool ownerFirst : {false, true})
+                        for (bool readOwner : {false, true})
+                            for (bool injected : {false, true})
+                                for (bool newer : {false, true}) {
+                                    if (newer && !write)
+                                        continue;
+                                    QTest::newRow(
+                                        qPrintable(QString("%1-write-%2-preview-%3-ownerFirst-%4-"
+                                                           "readOwner-%5-io-%6-newer-%7")
+                                                       .arg(int(mode))
+                                                       .arg(write)
+                                                       .arg(preview)
+                                                       .arg(ownerFirst)
+                                                       .arg(readOwner)
+                                                       .arg(injected)
+                                                       .arg(newer)))
+                                        << int(mode) << write << preview << ownerFirst << readOwner
+                                        << injected << newer;
+                                }
+            }
+    }
+    void readFailureDoesNotRetireSelections() {
+        QFETCH(int, mode);
+        QFETCH(bool, write);
+        QFETCH(bool, preview);
+        QFETCH(bool, ownerFirst);
+        QFETCH(bool, readOwner);
+        QFETCH(bool, injected);
+        QFETCH(bool, newer);
+        QTemporaryDir dir;
+        const auto file = dir.filePath("base.json");
+        const auto ownerFile = dir.filePath("main.json");
+        compat::put(file, "{\"volume\":1,\"object\":{\"a\":1,\"b\":2}}");
+        compat::put(ownerFile, "{\"rows\":[{\"id\":\"x\",\"sibling\":false}]}");
+        auto entered = std::make_shared<QSemaphore>();
+        auto release = std::make_shared<QSemaphore>();
+        auto armed = std::make_shared<std::atomic_bool>(false);
+        const auto fault = [=](const QString &phase, const QString &) {
+            if (phase == "read-validate" && armed->exchange(false)) {
+                entered->release();
+                if (!release->tryAcquire(1, 10000))
+                    return QString("fixture-timeout");
+                if (injected)
+                    return QString("read-failed");
+            }
+            return QString();
+        };
+        auto baseConfig = baseOptions(file), mainConfig = mainOptions(ownerFile);
+        (readOwner ? mainConfig : baseConfig).fileFault = fault;
+        std::unique_ptr<ConfigStore> main, base;
+        if (ownerFirst)
+            main = std::make_unique<ConfigStore>(mainConfig);
+        base = std::make_unique<ConfigStore>(baseConfig);
+        if (!main)
+            main = std::make_unique<ConfigStore>(mainConfig);
+        QTRY_COMPARE(base->status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(main->status(), ConfigStore::Status::Ready);
+        auto *draft = preview ? base->draft({{"settings"}}) : nullptr;
+        auto *scope = draft ? draft->previewScope({"settings"}) : base->scope({"settings"});
+        auto *handle = open(*main, selection(*main, scope, ConfigOverlayMode(mode)));
+        auto observations = std::make_shared<QList<QVariantMap>>();
+        QObject observer;
+        const auto observe = [handle, observations] {
+            observations->append({{"volume", handle->value({"volume"})},
+                                  {"object", handle->value({"object"})},
+                                  {"error", handle->error()}});
+        };
+        connect(handle, &ConfigOverlayEditor::valuesChanged, &observer, observe);
+        connect(handle, &ConfigOverlayEditor::stateChanged, &observer, observe);
+        QSignalSpy errors(readOwner ? main.get() : base.get(), &ConfigStore::sourceError);
+        const auto unblock = qScopeGuard([release] { release->release(); });
+        armed->store(true);
+        quint64 request = 0;
+        if (write) {
+            const auto input = handle->setValue({"volume"}, 9);
+            QVERIFY(input.accepted);
+            request = input.requestId;
+        } else
+            ConfigStoreTestAccess::run(
+                *main, [id = handle->editorId()](auto &w) { w.overlayChanged(id); });
+        QVERIFY(entered->tryAcquire(1, 5000));
+        if (newer)
+            QVERIFY(handle->setValue({"volume"}, 11).accepted);
+        const auto replace = [](const QString &path, const QByteArray &bytes) {
+            QSaveFile foreign(path);
+            if (!foreign.open(QIODevice::WriteOnly) || foreign.write(bytes) != bytes.size() ||
+                !foreign.commit())
+                qFatal("fixture replace");
+        };
+        if (readOwner)
+            replace(ownerFile, "{\"rows\":[{\"id\":\"x\",\"sibling\":true}]}");
+        replace(file, "{\"volume\":6,\"object\":{\"a\":6,\"b\":7}}");
+        release->release();
+        if (write) {
+            const auto refused = compat::request(*main, [&] { return request; });
+            QCOMPARE(refused.status, QString("failed"));
+            QCOMPARE(refused.error.code, QString("overlay-conflict"));
+            const auto settled = handle->value({"volume"}).toInt();
+            if (newer)
+                QCOMPARE(settled, 11);
+            else
+                QVERIFY(settled == 1 ||
+                        settled == 6); // A newer accepted refresh may already arrive.
+        }
+        QTRY_VERIFY(!errors.isEmpty());
+        QCOMPARE(errors[0][0].value<ConfigError>().code,
+                 injected ? QString("read-failed") : QString("concurrent-read"));
+        QCOMPARE(compat::request(*main, [&] { return main->reload(); }).status,
+                 QString("reloaded"));
+        QCOMPARE(compat::request(*base, [&] { return base->reload(); }).status,
+                 QString("reloaded"));
+        QCOMPARE(base->value({"settings", "volume"}).toInt(), 6);
+        QTRY_COMPARE(handle->value({"volume"}).toInt(), newer ? 11 : 6);
+        QVERIFY(handle->ready());
+        QVERIFY(handle->error().isEmpty());
+        QCOMPARE(handle->value({"object"}).toMap().value("a").toInt(), 6);
+        QCOMPARE(handle->value({"object"}).toMap().value("b").toInt(), 7);
+        const auto overrides =
+            main->value({"rows"}).toList()[0].toMap().value("instanceSettings").toMap();
+        if (newer) {
+            QCOMPARE(overrides.value("volume").toInt(), 11);
+            QCOMPARE(compat::request(*main, [&] { return handle->save(); }).status,
+                     QString("saved"));
+        } else
+            QVERIFY(!overrides.contains("volume"));
+        QVERIFY(!observations->isEmpty());
+        for (const auto &observation : *observations) {
+            QVERIFY(observation.value("error").toString().isEmpty());
+            if (observation.value("volume").toInt() == 6) {
+                QCOMPARE(observation.value("object").toMap().value("a").toInt(), 6);
+                QCOMPARE(observation.value("object").toMap().value("b").toInt(), 7);
+            }
+            if (observation.value("object").toMap().value("a").toInt() == 6) {
+                QCOMPARE(observation.value("object").toMap().value("b").toInt(), 7);
+                QVERIFY(observation.value("volume").toInt() == 6 ||
+                        (newer && observation.value("volume").toInt() == 11));
+            }
+        }
+    }
+    void scopeClosureStillRetiresAfterReadFailure() {
+        QTemporaryDir dir;
+        const auto file = dir.filePath("base.json");
+        compat::put(file, "{\"volume\":1}");
+        auto entered = std::make_shared<QSemaphore>();
+        auto release = std::make_shared<QSemaphore>();
+        auto armed = std::make_shared<std::atomic_bool>(false);
+        auto options = baseOptions(file);
+        options.fileFault = [=](const QString &phase, const QString &) {
+            if (phase == "read-validate" && armed->exchange(false)) {
+                entered->release();
+                if (!release->tryAcquire(1, 10000))
+                    return QString("fixture-timeout");
+            }
+            return QString();
+        };
+        ConfigStore base(options), main(mainOptions());
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        auto *scope = base.scope({"settings"});
+        auto *handle = open(main, selection(main, scope, ConfigOverlayMode::Live));
+        const auto unblock = qScopeGuard([release] { release->release(); });
+        armed->store(true);
+        ConfigStoreTestAccess::run(main,
+                                   [id = handle->editorId()](auto &w) { w.overlayChanged(id); });
+        QVERIFY(entered->tryAcquire(1, 5000));
+        scope->detach();
+        QSaveFile foreign(file);
+        QVERIFY(foreign.open(QIODevice::WriteOnly));
+        QVERIFY(foreign.write("{\"volume\":6}") > 0);
+        QVERIFY(foreign.commit());
+        release->release();
+        QTRY_COMPARE(handle->status(), ConfigOverlayEditor::Status::Error);
+        QCOMPARE(handle->error(), QString("overlay-owner"));
+        QCOMPARE(compat::request(base, [&] { return base.reload(); }).status, QString("reloaded"));
+        QVERIFY(!handle->setValue({"volume"}, 9).accepted);
+        QCOMPARE(handle->error(), QString("overlay-owner"));
+    }
     void groupPreflightWaitsForWholeSourceLease() {
         QTemporaryDir dir;
         const auto file = dir.filePath("main.json");
