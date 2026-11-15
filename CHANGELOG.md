@@ -8,6 +8,9 @@
   receipt because an unrelated retained group is unresolved. Successful draft
   Apply and overlay refresh settle normally; overlapping reservations still
   refuse. Root save/flush/close retain their full-prefix promise.
+- Overlay placement tokens now recognize observable reorders of repeated IDs
+  whose raw rows differ only in overrides, including nested and keyed owners.
+  Explicit member-only batches keep placement identity without thawing editors.
 
 ## [0.5.0] - 2026-11-12
 

@@ -222,6 +222,7 @@ private:
     QMap<QString, QPair<QString, bool>> m_overlayDelivered;
     QMap<QString, ConfigOverlayPlacement> m_overlayPlacements;
     QString overlayPlacementToken(const QString &id, const ConfigOverlaySelection &selection);
+    void preserveMemberPlacements(const ConfigCommand &command);
     QMap<QString, std::shared_ptr<const ConfigDraftPreview>> m_draftPreviews;
     QMap<QString, ConfigOverlaySubscription> m_overlaySubscriptions;
     QMap<QString, ConfigResult> m_overlayReceipts;

@@ -1003,6 +1003,270 @@ private slots:
         QCOMPARE(compat::request(main, [&] { return main.save(); }).status, QString("saved"));
         QCOMPARE(tokens(), previous);
     }
+    void placementTokensTrackUntaggedRawMapping_data() {
+        QTest::addColumn<bool>("keyed");
+        QTest::addColumn<bool>("nested");
+        QTest::addColumn<bool>("duplicateMember");
+        for (bool keyed : {false, true})
+            for (bool nested : {false, true})
+                for (bool duplicateMember : {false, true})
+                    QTest::newRow(qPrintable(QString("keyed-%1-nested-%2-duplicate-%3")
+                                                 .arg(keyed)
+                                                 .arg(nested)
+                                                 .arg(duplicateMember)))
+                        << keyed << nested << duplicateMember;
+    }
+    void placementTokensTrackUntaggedRawMapping() {
+        QFETCH(bool, keyed);
+        QFETCH(bool, nested);
+        QFETCH(bool, duplicateMember);
+        auto options = mainOptions();
+        const auto row = options.schema.descriptor({"rows"})->element.first();
+        auto collection = [keyed](const D &element) {
+            auto result = keyed ? D::leaf(T::Map, QVariantMap{}) : D::list(element, {});
+            if (keyed)
+                result.element = {element};
+            return result;
+        };
+        auto descriptor = collection(row);
+        if (nested) {
+            auto container =
+                D::leaf(T::Record, QVariantMap{{"id", "container"},
+                                               {"children", keyed ? QVariant(QVariantMap{})
+                                                                  : QVariant(QVariantList{})}});
+            container.fields = {{"id", D::leaf(T::String, QString())}, {"children", descriptor}};
+            descriptor = collection(container);
+        }
+        options.schema =
+            ConfigSchema(D::group({{"rows", descriptor}, {"other", D::leaf(T::SafeInteger, 0)}}));
+        const auto value = [keyed, nested](const QVariantList &rows) {
+            QVariant contents = rows;
+            if (keyed) {
+                QVariantMap map;
+                for (qsizetype i = 0; i < rows.size(); ++i)
+                    map[QString::number(i)] = rows[i];
+                contents = map;
+            }
+            if (!nested)
+                return contents;
+            const QVariantMap container{{"id", "container"}, {"children", contents}};
+            return keyed ? QVariant(QVariantMap{{"container", container}})
+                         : QVariant(QVariantList{container});
+        };
+        const auto record = [](int volume) {
+            return QVariantMap{{"id", "x"}, {"instanceSettings", QVariantMap{{"volume", volume}}}};
+        };
+        QVariantList rows{record(2), record(3)};
+        options.layers[0].sources[0].raw["rows"] = value(rows);
+        if (nested && !keyed)
+            options.recordListPolicies = {{"containers", {"rows"}, {}, "id"}};
+        ConfigStore base(baseOptions()), main(options);
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        QList<ConfigOverlayEditor *> overlays;
+        for (auto mode :
+             {ConfigOverlayMode::View, ConfigOverlayMode::Live, ConfigOverlayMode::Editor}) {
+            auto selected = selection(main, base.scope({"settings"}), mode);
+            selected.entryPath =
+                keyed ? QList<ConfigValueSelector>{{ConfigValueSelector::Kind::Key, "0"}}
+                      : QList<ConfigValueSelector>{{ConfigValueSelector::Kind::Index, {}, 0}};
+            if (nested) {
+                selected.entryPath.prepend({ConfigValueSelector::Kind::Key, "children"});
+                selected.entryPath.prepend(
+                    keyed ? ConfigValueSelector{ConfigValueSelector::Kind::Key, "container"}
+                          : ConfigValueSelector{ConfigValueSelector::Kind::Index, {}, 0});
+            }
+            overlays.append(open(main, selected));
+        }
+        const auto tokens = [&] {
+            QStringList result;
+            for (auto *overlay : overlays)
+                result.append(overlay->placementToken());
+            return result;
+        };
+        const auto publish = [&] {
+            QCOMPARE(
+                compat::request(main, [&] { return main.setUser({"rows"}, value(rows)).requestId; })
+                    .status,
+                QString("accepted"));
+        };
+        auto previous = tokens();
+        rows.swapItemsAt(0,
+                         1); // No tag/label/UUID distinguishes these rows outside their overrides.
+        publish();
+        for (qsizetype i = 0; i < overlays.size(); ++i)
+            QVERIFY(tokens()[i] != previous[i]);
+        for (auto *overlay : {overlays[0], overlays[1]})
+            QTRY_COMPARE(overlay->value({"volume"}).toInt(), 3);
+        previous = tokens();
+        rows[0] = record(7);
+        publish();
+        QCOMPARE(tokens(), previous); // An override edit alone is not movement.
+        auto member = rows[0].toMap();
+        member["other-member"] = "edited";
+        rows[0] = member;
+        publish();
+        QCOMPARE(tokens(), previous);
+        rows[0] = record(2);
+        publish();
+        QCOMPARE(tokens(), previous);
+        rows.swapItemsAt(0, 1); // Both raw rows are now byte-identical.
+        publish();
+        QCOMPARE(tokens(), previous);
+        rows[1] = record(3);
+        publish();
+        QCOMPARE(tokens(), previous);
+        rows.prepend(record(9));
+        publish();
+        for (qsizetype i = 0; i < overlays.size(); ++i)
+            QVERIFY(tokens()[i] != previous[i]);
+        previous = tokens();
+        rows.removeFirst();
+        publish();
+        for (qsizetype i = 0; i < overlays.size(); ++i)
+            QVERIFY(tokens()[i] != previous[i]);
+        previous = tokens();
+        rows.append(record(2));
+        publish();
+        QCOMPARE(tokens(), previous);
+        rows[0] = record(3); // A and B both have duplicates, but their multiplicities change.
+        publish();
+        QCOMPARE(tokens(), previous);
+        if (duplicateMember) {
+            auto a = record(2), b = record(2);
+            a["member"] = "a";
+            b["member"] = "b";
+            rows = {a, a, b};
+            publish();
+            previous = tokens();
+            rows[0] = b; // An ordinary member edit changes the duplicate counts too.
+            publish();
+            QCOMPARE(tokens(), previous);
+        }
+        rows = {record(2), record(3), record(4)};
+        publish();
+        previous = tokens();
+        rows.swapItemsAt(0, 1);
+        rows[2] = record(5); // An unrelated row edit cannot hide an observable A/B swap.
+        publish();
+        for (qsizetype i = 0; i < overlays.size(); ++i)
+            QVERIFY(tokens()[i] != previous[i]);
+        previous = tokens();
+        rows[2] = record(6);
+        publish();
+        QCOMPARE(tokens(), previous);
+        auto a = record(2), b = record(3);
+        a["member"] = "a";
+        b["member"] = "b";
+        rows = {a, b};
+        publish();
+        previous = tokens();
+        rows.swapItemsAt(0, 1);
+        a["instanceSettings"] = QVariantMap{{"volume", 9}};
+        rows[1] = a; // The existing structural witness survives a moved row's override edit.
+        publish();
+        for (qsizetype i = 0; i < overlays.size(); ++i)
+            QVERIFY(tokens()[i] != previous[i]);
+        previous = tokens();
+        rows.append(record(2));
+        if (nested && !keyed) {
+            QVariantMap first{{"id", "container"}, {"children", rows}, {"member", "left"}};
+            QVariantMap second = first;
+            second["member"] = "right";
+            QCOMPARE(
+                compat::request(
+                    main,
+                    [&] { return main.setUser({"rows"}, QVariantList{first, second}).requestId; })
+                    .status,
+                QString("accepted"));
+            previous = tokens();
+            ConfigRecordListEditOptions edits;
+            edits.generation = main.info({"rows"}).publicationGeneration;
+            for (qsizetype index = 0; index < 2; ++index) {
+                ConfigRecordListEdit edit;
+                edit.op = ConfigRecordListEdit::Op::Set;
+                edit.index = index;
+                edit.field = "member";
+                edit.value = QString(index ? "left" : "right");
+                edits.edits.append(edit);
+            }
+            QCOMPARE(compat::request(main, [&] { return main.editRecordList("containers", edits); })
+                         .status,
+                     QString("admitted"));
+            QCOMPARE(tokens(), previous); // An ancestor's unrelated member is not a child remap.
+            rows.swapItemsAt(0, 2);
+            edits.generation = main.info({"rows"}).publicationGeneration;
+            edits.edits.clear();
+            ConfigRecordListEdit replace;
+            replace.op = ConfigRecordListEdit::Op::Set;
+            replace.index = 0;
+            replace.field = "children";
+            replace.value = rows;
+            edits.edits.append(replace);
+            QCOMPARE(compat::request(main, [&] { return main.editRecordList("containers", edits); })
+                         .status,
+                     QString("admitted"));
+            for (qsizetype i = 0; i < overlays.size(); ++i)
+                QVERIFY(tokens()[i] != previous[i]); // Replacing a child container can remap it.
+        }
+    }
+    void placementTokensPreserveExplicitMemberBatches_data() {
+        QTest::addColumn<bool>("overrides");
+        QTest::newRow("overrides") << true;
+        QTest::newRow("other-members") << false;
+    }
+    void placementTokensPreserveExplicitMemberBatches() {
+        QFETCH(bool, overrides);
+        auto options = mainOptions();
+        options.recordListPolicies = {{"rows", {"rows"}, {}, "id"}};
+        const auto record = [overrides](int volume) {
+            QVariantMap row{{"id", "x"},
+                            {"instanceSettings", QVariantMap{{"volume", overrides ? volume : 2}}}};
+            if (!overrides)
+                row["member"] = QString::number(volume);
+            return row;
+        };
+        options.layers[0].sources[0].raw["rows"] = QVariantList{record(2), record(3)};
+        ConfigStore base(baseOptions()), main(options);
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        QList<ConfigOverlayEditor *> overlays;
+        QStringList previous;
+        for (auto mode :
+             {ConfigOverlayMode::View, ConfigOverlayMode::Live, ConfigOverlayMode::Editor}) {
+            auto *overlay = open(main, selection(main, base.scope({"settings"}), mode));
+            overlays.append(overlay);
+            previous.append(overlay->placementToken());
+        }
+        ConfigRecordListEditOptions edits;
+        edits.generation = main.info({"rows"}).publicationGeneration;
+        for (qsizetype index = 0; index < 2; ++index) {
+            ConfigRecordListEdit edit;
+            edit.op = ConfigRecordListEdit::Op::Set;
+            edit.index = index;
+            edit.field = overrides ? "instanceSettings" : "member";
+            edit.value = overrides ? QVariant(QVariantMap{{"volume", index ? 2 : 3}})
+                                   : QVariant(QString::number(index ? 2 : 3));
+            edits.edits.append(edit);
+        }
+        QCOMPARE(compat::request(main, [&] { return main.editRecordList("rows", edits); }).status,
+                 QString("admitted"));
+        for (qsizetype i = 0; i < overlays.size(); ++i)
+            QCOMPARE(overlays[i]->placementToken(), previous[i]);
+        for (auto *overlay : {overlays[0], overlays[1]})
+            QTRY_COMPARE(overlay->value({"volume"}).toInt(), overrides ? 3 : 2);
+        edits.generation = main.info({"rows"}).publicationGeneration;
+        edits.edits.clear();
+        ConfigRecordListEdit move;
+        move.op = ConfigRecordListEdit::Op::Move;
+        move.index = 0;
+        move.to = 1;
+        edits.edits.append(move);
+        QCOMPARE(compat::request(main, [&] { return main.editRecordList("rows", edits); }).status,
+                 QString("admitted"));
+        for (qsizetype i = 0; i < overlays.size(); ++i)
+            QVERIFY(overlays[i]->placementToken() != previous[i]);
+    }
     void draftPreviewInheritsWithoutChangingFrozenFences() {
         QTemporaryDir dir;
         const auto baseFile = dir.filePath("base.json"), mainFile = dir.filePath("main.json");
