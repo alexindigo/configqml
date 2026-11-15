@@ -254,7 +254,8 @@ private:
     QList<ConfigPendingIntent> eligibleIntents(const QString &source,
                                                const ConfigCommand &command) const;
     bool reserved(const ConfigPath &path) const;
-    QStringList unresolvedGroups(quint64 prefix) const;
+    QList<ConfigPath> receiptPaths(const ConfigCommand &command) const;
+    QStringList unresolvedGroups(quint64 prefix, const QList<ConfigPath> &selection = {}) const;
     void confirmed(const QString &id, const QVariantMap &raw, const ConfigBackendResult &outcome,
                    const ConfigSourcePreimage *preflight = nullptr);
     void refreshDirty(const QString &id);

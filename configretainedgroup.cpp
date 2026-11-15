@@ -178,12 +178,29 @@ void ConfigWorker::describeGroup(ConfigResult &result, const ConfigGroupInfo &in
         result.attemptNumber = info.attempts.last().attemptNumber;
     }
 }
-QStringList ConfigWorker::unresolvedGroups(quint64 prefix) const {
+QList<ConfigPath> ConfigWorker::receiptPaths(const ConfigCommand &command) const {
+    if (!command.groupToken.isEmpty())
+        return m_groups.value(command.groupToken).selections;
+    return command.selection; // Empty is the root store's full-prefix promise.
+}
+QStringList ConfigWorker::unresolvedGroups(quint64 prefix,
+                                           const QList<ConfigPath> &selection) const {
     QStringList result;
     for (const auto &capture : m_groups)
         if (capture.info.capturePrefix <= prefix && capture.info.state != "succeeded" &&
-            capture.info.state != "released")
-            result.append(capture.info.groupToken);
+            capture.info.state != "released") {
+            if (selection.isEmpty())
+                result.append(capture.info.groupToken);
+            else {
+                bool intersects = false;
+                for (const auto &requested : selection)
+                    for (const auto &reserved : capture.selections)
+                        intersects |=
+                            startsWith(requested, reserved) || startsWith(reserved, requested);
+                if (intersects)
+                    result.append(capture.info.groupToken);
+            }
+        }
     return result;
 }
 bool ConfigWorker::reserved(const ConfigPath &path) const {

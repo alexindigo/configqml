@@ -105,10 +105,12 @@ quint64 ConfigStoreHandle::save(ConfigStore::Callback callback) {
     if (!m_store || !m_writable)
         return 0;
     QPointer<ConfigStoreHandle> guard(this);
-    return m_store->save(this, [guard, callback = std::move(callback)](const ConfigResult &result) {
-        if (guard && guard->attached() && callback)
-            callback(result);
-    });
+    return m_store->request("save", this,
+                            [guard, callback = std::move(callback)](const ConfigResult &result) {
+                                if (guard && guard->attached() && callback)
+                                    callback(result);
+                            },
+                            {m_prefix});
 }
 ConfigDraft *ConfigStoreHandle::draft(const QList<ConfigPath> &paths) {
     if (!m_store || !m_writable)

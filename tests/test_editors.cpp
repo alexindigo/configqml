@@ -81,6 +81,163 @@ static ConfigStoreOptions options(const QString &directory = {}) {
 class EditorsTest : public QObject {
     Q_OBJECT
 private slots:
+    void unresolvedGroupsRespectScopedReceipts_data() {
+        QTest::addColumn<bool>("draftApply");
+        QTest::addColumn<bool>("stopped");
+        QTest::addColumn<bool>("sameSource");
+        QTest::addColumn<bool>("overlap");
+        for (bool draft : {false, true})
+            for (bool stopped : {false, true})
+                for (bool same : {false, true})
+                    for (bool overlap : {false, true})
+                        QTest::newRow(
+                            qPrintable(QString("draft-%1-stopped-%2-same-source-%3-overlap-%4")
+                                           .arg(draft)
+                                           .arg(stopped)
+                                           .arg(same)
+                                           .arg(overlap)))
+                            << draft << stopped << same << overlap;
+    }
+    void unresolvedGroupsRespectScopedReceipts() {
+        QFETCH(bool, draftApply);
+        QFETCH(bool, stopped);
+        QFETCH(bool, sameSource);
+        QFETCH(bool, overlap);
+        QTemporaryDir dir;
+        auto o = options(dir.path());
+        const QByteArray originalA = "{\"n\":1,\"opaque\":18446744073709551615}";
+        const QByteArray originalB = "{\"n\":1}";
+        if (sameSource) {
+            o.layers[0].sources = {{"user", {}, {}}};
+            o.jsonFiles = {{"user", "user", dir.filePath("user.json")}};
+            writeFile(dir.filePath("user.json"),
+                      "{\"a\":{\"n\":1,\"opaque\":18446744073709551615},\"b\":{\"n\":1}}");
+        } else {
+            writeFile(dir.filePath("a.json"), originalA);
+            writeFile(dir.filePath("b.json"), originalB);
+        }
+        auto block = std::make_shared<std::atomic_bool>(stopped);
+        o.fileFault = [block](const QString &phase, const QString &) {
+            return phase == "write" && block->load() ? QString("held-group") : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const ConfigPath reserved = overlap ? ConfigPath{"a", "n"} : ConfigPath{"b", "n"};
+        const auto capture = request(store, [&] {
+            return store.retainGroup({"waiting", {reserved}, {{reserved, true, 9}}, {}});
+        });
+        QCOMPARE(capture.status, QString("retained"));
+        const auto token = capture.groupToken;
+        if (stopped)
+            QCOMPARE(request(store, [&] { return store.saveGroup(token); }).error.code,
+                     QString("held-group"));
+        block->store(false);
+        const auto before = store.groupInfo(token);
+        QCOMPARE(request(store, [&] { return store.save(); }).error.code,
+                 QString("unresolved-group"));
+        QCOMPARE(request(store, [&] { return store.flush(); }).error.code,
+                 QString("unresolved-group"));
+        ConfigDraft *draft = draftApply ? store.draft({{"a", "n"}}) : nullptr;
+        auto *scope = store.scope({"a"});
+        if (draft)
+            QVERIFY(draft->setValue({"a", "n"}, 2).accepted);
+        else
+            QVERIFY(scope->setUser({"n"}, 2).accepted);
+        const auto result = request(store, [&] { return draft ? draft->apply() : scope->save(); });
+        QCOMPARE(store.groupInfo(token).state, before.state);
+        QCOMPARE(store.groupInfo(token).attempts.size(), before.attempts.size());
+        QVERIFY(result.excludedGroups.contains(token));
+        if (overlap) {
+            QCOMPARE(result.error.code, QString("unresolved-group"));
+            QVERIFY(result.unresolvedGroups.contains(token));
+            if (draft)
+                QVERIFY(draft->dirty());
+        } else {
+            QCOMPARE(result.status, QString("saved"));
+            QVERIFY(result.unresolvedGroups.isEmpty());
+            QVERIFY(!result.coveredRevisions.isEmpty());
+            if (draft) {
+                QVERIFY(!draft->dirty());
+                QVERIFY(!draft->conflicted());
+                QCOMPARE(draft->value({"a", "n"}).toInt(), 2);
+            }
+            ConfigStore cold(o);
+            QTRY_COMPARE(cold.status(), ConfigStore::Status::Ready);
+            QCOMPARE(cold.value({"a", "n"}).toInt(), 2);
+            QCOMPARE(cold.value({"b", "n"}).toInt(), 1);
+            const auto uiFile = dir.filePath(sameSource ? "user.json" : "a.json");
+            QVERIFY(readFile(uiFile).contains("18446744073709551615"));
+            if (!sameSource)
+                QCOMPARE(readFile(dir.filePath("b.json")), originalB);
+            const auto noOp =
+                request(store, [&] { return draft ? draft->apply() : scope->save(); });
+            QCOMPARE(noOp.status, QString("nothing_to_save"));
+            QVERIFY(noOp.unresolvedGroups.isEmpty());
+        }
+        // A scoped receipt never releases/retries the other workflow or upgrades
+        // the root save/flush promise, including when no eligible work remains.
+        QCOMPARE(request(store, [&] { return store.save(); }).error.code,
+                 QString("unresolved-group"));
+        QCOMPARE(request(store, [&] { return store.flush(); }).error.code,
+                 QString("unresolved-group"));
+        const auto resolved = request(
+            store, [&] { return stopped ? store.retryGroup(token) : store.saveGroup(token); });
+        QCOMPARE(resolved.status, QString("saved"));
+        QCOMPARE(request(store, [&] { return store.releaseGroup(token); }).status,
+                 QString("released"));
+        const auto final = request(store, [&] { return store.save(); });
+        QVERIFY(final.status == "saved" || final.status == "nothing_to_save");
+    }
+    void scopedReceiptOutlivesConsumer_data() {
+        QTest::addColumn<bool>("draftApply");
+        QTest::newRow("namespace") << false;
+        QTest::newRow("draft") << true;
+    }
+    void scopedReceiptOutlivesConsumer() {
+        QFETCH(bool, draftApply);
+        ConfigStore store(options());
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        const auto retained = request(store, [&] {
+            return store.retainGroup({"other-workflow", {{"b", "n"}}, {{{"b", "n"}, true, 9}}, {}});
+        });
+        QCOMPARE(retained.status, QString("retained"));
+        auto *draft = draftApply ? store.draft({{"a", "n"}}) : nullptr;
+        auto *scope = draftApply ? nullptr : store.scope({"a"});
+        QEventLoop held;
+        bool holding = false;
+        ConfigStoreTestAccess::run(
+            store, [](auto &worker) { worker.holdInputs(true); }, &held,
+            [&] {
+                holding = true;
+                held.quit();
+            });
+        QTimer::singleShot(10000, &held, &QEventLoop::quit);
+        held.exec();
+        QVERIFY(holding);
+        bool callback = false;
+        if (draft)
+            QVERIFY(draft->setValue({"a", "n"}, 7).accepted);
+        else
+            QVERIFY(scope->setUser({"n"}, 7).accepted);
+        const auto result = request(store, [&] {
+            const auto id = draft ? draft->apply(nullptr, [&](const auto &) { callback = true; })
+                                  : scope->save([&](const auto &) { callback = true; });
+            delete draft;
+            delete scope;
+            ConfigStoreTestAccess::run(store, [](auto &worker) { worker.holdInputs(false); });
+            return id;
+        });
+        QCOMPARE(result.status, QString("saved"));
+        QVERIFY(result.unresolvedGroups.isEmpty());
+        QVERIFY(result.excludedGroups.contains(retained.groupToken));
+        QVERIFY(!callback);
+        QCOMPARE(store.value({"a", "n"}).toInt(), 7);
+        QCOMPARE(store.groupInfo(retained.groupToken).state, QString("retained"));
+        QCOMPARE(request(store, [&] { return store.saveGroup(retained.groupToken); }).status,
+                 QString("saved"));
+        QCOMPARE(request(store, [&] { return store.releaseGroup(retained.groupToken); }).status,
+                 QString("released"));
+    }
     void reloadMigrationUsesFreshRevision_data() {
         QTest::addColumn<int>("policy");
         QTest::addColumn<bool>("fault");

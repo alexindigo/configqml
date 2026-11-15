@@ -134,6 +134,82 @@ bool pendingBackend(ConfigStore &store) {
 class OverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void unrelatedGroupDoesNotFailScopedOverlay_data() {
+        QTest::addColumn<QString>("operation");
+        QTest::addColumn<bool>("stopped");
+        for (const auto *operation : {"apply", "reset", "save", "flush"})
+            for (bool stopped : {false, true})
+                QTest::newRow(qPrintable(QString("%1-stopped-%2").arg(operation).arg(stopped)))
+                    << QString::fromLatin1(operation) << stopped;
+    }
+    void unrelatedGroupDoesNotFailScopedOverlay() {
+        QFETCH(QString, operation);
+        QFETCH(bool, stopped);
+        QTemporaryDir dir;
+        const auto file = dir.filePath("main.json");
+        compat::put(file, "{\"rows\":[{\"id\":\"x\",\"instanceSettings\":{\"volume\":2,"
+                          "\"opaque\":{\"keep\":false}}}],\"other\":0}");
+        auto o = mainOptions(file);
+        auto block = std::make_shared<std::atomic_bool>(stopped);
+        o.fileFault = [block](const QString &phase, const QString &) {
+            return phase == "write" && block->load() ? QString("held-group") : QString();
+        };
+        ConfigStore main(o), base(baseOptions());
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        const auto retained = compat::request(main, [&] {
+            return main.retainGroup({"unrelated", {{"other"}}, {{{"other"}, true, 9}}, {}});
+        });
+        QCOMPARE(retained.status, QString("retained"));
+        const auto token = retained.groupToken;
+        if (stopped)
+            QCOMPARE(compat::request(main, [&] { return main.saveGroup(token); }).error.code,
+                     QString("held-group"));
+        block->store(false);
+        const auto before = main.groupInfo(token);
+        const bool live = operation == "save" || operation == "flush";
+        auto *editor =
+            open(main, selection(main, base.scope({"settings"}),
+                                 live ? ConfigOverlayMode::Live : ConfigOverlayMode::Editor));
+        if (operation != "reset")
+            QVERIFY(editor->setValue({"volume"}, 7).accepted);
+        const auto result = compat::request(main, [&] {
+            if (operation == "reset")
+                return editor->resetOverrides();
+            if (operation == "save")
+                return editor->save();
+            if (operation == "flush")
+                return editor->flush();
+            return editor->apply();
+        });
+        QCOMPARE(result.status, QString("saved"));
+        QCOMPARE(result.refreshState, QString("current"));
+        QVERIFY(result.unresolvedGroups.isEmpty());
+        QVERIFY(result.excludedGroups.contains(token));
+        QCOMPARE(main.groupInfo(token).state, before.state);
+        QCOMPARE(main.groupInfo(token).attempts.size(), before.attempts.size());
+        if (!live)
+            QVERIFY(!editor->dirty());
+        QCOMPARE(editor->value({"volume"}).toInt(), operation == "reset" ? 1 : 7);
+        const auto raw = ConfigJsonCodec().decode(compat::bytes(file), "main").raw;
+        QCOMPARE(raw.value("other").value<ConfigNumber>().token(), QString("0"));
+        const auto row = raw.value("rows").toList().first().toMap();
+        if (operation == "reset")
+            QVERIFY(!row.contains("instanceSettings"));
+        else {
+            const auto overrides = row.value("instanceSettings").toMap();
+            QCOMPARE(overrides.value("volume").value<ConfigNumber>().token(), QString("7"));
+            QVERIFY(overrides.value("opaque").toMap().contains("keep"));
+        }
+        QCOMPARE(compat::request(main, [&] { return main.save(); }).error.code,
+                 QString("unresolved-group"));
+        QCOMPARE(compat::request(
+                     main, [&] { return stopped ? main.retryGroup(token) : main.saveGroup(token); })
+                     .status,
+                 QString("saved"));
+        QCOMPARE(compat::request(main, [&] { return main.releaseGroup(token); }).status,
+                 QString("released"));
+    }
     void readFailureDoesNotRetireSelections_data() {
         QTest::addColumn<int>("mode");
         QTest::addColumn<bool>("write");

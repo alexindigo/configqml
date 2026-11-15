@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Namespace handles, drafts and overlays no longer fail a scoped persistence
+  receipt because an unrelated retained group is unresolved. Successful draft
+  Apply and overlay refresh settle normally; overlapping reservations still
+  refuse. Root save/flush/close retain their full-prefix promise.
+
 ## [0.5.0] - 2026-11-12
 
 ### Added

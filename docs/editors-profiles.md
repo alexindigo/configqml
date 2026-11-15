@@ -37,6 +37,12 @@ same shard do not invalidate a draft. Raw changes beneath an atomic setting,
 masked changes, invalid raw changes and equal-valued local intent do invalidate
 that path's base. No stale publication may overwrite newer ordinary local input.
 
+An unrelated retained/stopped capture outside the Apply's edited paths cannot
+fail its receipt. Overlapping captures still refuse, retain the draft and do not
+Retry implicitly. On a successful scoped receipt, normal dirty/baseline/preview
+settlement occurs before the callback. A clean Apply uses its selected draft
+paths for this reservation check.
+
 The accepted store generation is installed coherently before completion. This
 does not promise an all-file filesystem transaction: partial publication remains
 failed/partial with truthful route outcomes. Preview/dirty edits survive admission,
@@ -148,6 +154,11 @@ Native `store.scope(prefix)` returns a `ConfigStoreHandle` with relative value,
 info, listModel, setUser, save, draft, scope and detach. Native draft paths remain
 absolute store paths, including when created by a scoped handle. Handle QObject
 parentage determines lifetime, independently of shared persistence ownership.
+
+The namespace prefix also scopes unresolved-group refusal on its save/flush
+receipt, in native and QML handles. A root-prefix handle still covers the whole
+store. This does not make a Group handle a leaf selection or change the normal
+save's earlier-ordinary-prefix publication policy; root store save remains full.
 
 Call `scope()` and `previewScope()` once and keep the returned handle. This
 applies to store, nested-handle and draft factories in native code and QML.

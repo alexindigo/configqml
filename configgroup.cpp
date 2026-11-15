@@ -33,6 +33,7 @@ quint64 ConfigStore::applyGroup(const QMap<ConfigPath, std::optional<QVariant>> 
     const bool retry = attempt && attempt->expected && input.edits.isEmpty();
     ConfigCommand command{id, retry ? m_sequence : input.sequence, "apply",
                           retry ? std::nullopt : std::optional<ConfigInput>(input)};
+    command.selection = edits.isEmpty() ? fences.keys() : edits.keys();
     command.applyAttempt = attempt;
     if (!m_accepting || m_status != Status::Ready || !m_owner->dispatch(command)) {
         ConfigResult result;

@@ -844,12 +844,13 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
     m_recoveryWhole.clear();
     m_recoveryPreimages.clear();
     m_unresolvedSave = false;
+    m_saveResult.excludedGroups = unresolvedGroups(command.prefix);
+    m_saveResult.excludedGroups.removeAll(command.groupToken);
     if (!command.groupToken.isEmpty()) {
         describeGroup(m_saveResult, m_groups.value(command.groupToken).info);
         m_saveResult.coveredRevisions = m_groups.value(command.groupToken).confirmedRevisions;
     } else {
-        m_saveResult.unresolvedGroups = unresolvedGroups(command.prefix);
-        m_saveResult.excludedGroups = m_saveResult.unresolvedGroups;
+        m_saveResult.unresolvedGroups = unresolvedGroups(command.prefix, receiptPaths(command));
         m_unresolvedSave =
             command.operation != "autosave" && !m_saveResult.unresolvedGroups.isEmpty();
     }
@@ -1199,7 +1200,7 @@ void ConfigWorker::finishSave() {
         ++m_groups[m_save.groupToken].generation;
         describeGroup(m_saveResult, info);
         m_groups[m_save.groupToken].receipts.append(m_saveResult);
-        m_saveResult.unresolvedGroups = unresolvedGroups(m_save.prefix);
+        m_saveResult.unresolvedGroups = unresolvedGroups(m_save.prefix, receiptPaths(m_save));
         if (info.state == "succeeded")
             scheduleAutoSave();
     }

@@ -114,6 +114,19 @@ future saves after explicit resolution. Autosave reports its eligible subset and
 excluded groups; it never claims full-prefix durability for excluded work.
 Group failures remain separate from the failure history of unrelated ordinary saves.
 
+Existing namespace-handle save/flush, draft Apply and overlay persistence requests
+carry their owning selection into the shared save pipeline. Their
+`unresolvedGroups` contains only unresolved captures overlapping that selection;
+unrelated reserved work remains visible in `excludedGroups` without failing the
+scoped receipt. Empty namespace prefixes still select the whole store. No scoped
+success retries, releases or changes another capture's lifecycle.
+
+This scopes reservation refusal, not filesystem outcomes or ordinary publication
+policy: the normal save still covers earlier eligible ordinary work, and any
+actual admission/IO/readback/evidence failure remains failed/partial. It is not a
+new selected-publication API. Root save/flush/close keep the full-prefix refusal
+above, including when no eligible work remains to publish.
+
 Success resolves that capture's reservation; newer accepted local intent remains
 pending independently. `releaseGroup` is asynchronous `released | failed`, allowed
 after success only. It releases captured source data and retains a value-free
