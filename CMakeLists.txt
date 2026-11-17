@@ -127,6 +127,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/configqmlConfig.cmake"
 option(BUILD_TESTING "Build the configqml tests" OFF)
 include(CTest)
 if(BUILD_TESTING)
+    configure_file(tests/generator.cmake.in test-generator.cmake @ONLY)
     find_package(Qt6 6.12 REQUIRED COMPONENTS Test Gui)
     foreach(suite compact_events projections fallback_layers startup_policy record_list_policy record_list_containers unknown_data source_events retained_groups strict_conflicts pending_rebase evidence_backlog empty_shards overlay_editor string_pattern)
         add_executable(test_${suite} tests/test_${suite}.cpp)

@@ -1,3 +1,4 @@
+include("@CMAKE_CURRENT_BINARY_DIR@/test-generator.cmake")
 function(run)
     execute_process(COMMAND ${ARGN} RESULT_VARIABLE status TIMEOUT 45)
     if(NOT status EQUAL 0)
@@ -14,9 +15,8 @@ function(probe name config expected)
     if(NOT "@CMAKE_CONFIGURATION_TYPES@" STREQUAL "")
         list(APPEND config_options "-DCMAKE_CONFIGURATION_TYPES=${config}")
     endif()
-    run("@CMAKE_COMMAND@" -S "${source}" -B "${build}" -G "@CMAKE_GENERATOR@"
+    run("@CMAKE_COMMAND@" -S "${source}" -B "${build}" ${_configqml_test_generator}
         "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@" "-DCMAKE_BUILD_TYPE=${config}"
-        "-DCMAKE_MAKE_PROGRAM=@CMAKE_MAKE_PROGRAM@"
         "-DEXPECTED_TIMING=${expected}" ${config_options} ${ARGN})
     run("@CMAKE_COMMAND@" --build "${build}" --config "${config}" --parallel 2)
     set(output "${build}")
@@ -50,23 +50,9 @@ probe(auto_reconfigure Debug 0 -DCONFIGQML_TIMING_GATES=AUTO)
 probe(auto_reconfigure Release 1)
 probe(off_reconfigure Debug 0 -DCONFIGQML_TIMING_GATES=OFF)
 probe(off_reconfigure Release 0)
-# CMake may know this generator even when its build tool is not installed. Look
-# only on PATH so a Makefiles-only environment does not acquire a Ninja dependency.
-find_program(ninja_executable NAMES ninja ninja-build HINTS ENV PATH NO_DEFAULT_PATH)
-set(multi_config_available OFF)
-if(ninja_executable)
-    execute_process(COMMAND "@CMAKE_COMMAND@"
-        -S "@CMAKE_CURRENT_SOURCE_DIR@/tests/timing_gates/generator-check"
-        -B "@CMAKE_CURRENT_BINARY_DIR@/timing-gate-probes/generator-check"
-        -G "Ninja Multi-Config" "-DCMAKE_MAKE_PROGRAM=${ninja_executable}"
-        RESULT_VARIABLE availability OUTPUT_VARIABLE availability_output
-        ERROR_VARIABLE availability_error TIMEOUT 45)
-    if(availability EQUAL 0)
-        set(multi_config_available ON)
-    endif()
-endif()
-if(NOT multi_config_available)
-    message(STATUS "Skipping Ninja Multi-Config timing probes: generator or Ninja unavailable")
+# Cross-configuration probes require the outer generator's multi-config capability.
+if("@CMAKE_CONFIGURATION_TYPES@" STREQUAL "")
+    message(STATUS "Skipping multi-config timing probes: outer generator is single-config")
     return()
 endif()
 foreach(sanitized OFF ON)
@@ -77,8 +63,7 @@ foreach(sanitized OFF ON)
     endif()
     # Direct execution keeps CMAKE_CONFIGURATION_TYPES' list in one argument.
     execute_process(COMMAND "@CMAKE_COMMAND@"
-        -S "@CMAKE_CURRENT_SOURCE_DIR@/tests/timing_gates" -B "${build}" -G "Ninja Multi-Config"
-        "-DCMAKE_MAKE_PROGRAM=${ninja_executable}"
+        -S "@CMAKE_CURRENT_SOURCE_DIR@/tests/timing_gates" -B "${build}" ${_configqml_test_generator}
         "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@" "-DCMAKE_CONFIGURATION_TYPES=Debug;Release"
         "-DCMAKE_CXX_FLAGS_DEBUG=${flags}"
         "-DEXPECTED_TIMING=$<AND:$<NOT:$<BOOL:${sanitized}>>,$<CONFIG:Release>>"

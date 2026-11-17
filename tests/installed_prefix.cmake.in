@@ -1,5 +1,6 @@
 # Install, relocate, and exercise only public installed artifacts in new processes.
 set(root "@CMAKE_CURRENT_BINARY_DIR@/installed-consumer")
+include("@CMAKE_CURRENT_BINARY_DIR@/test-generator.cmake")
 include("@CMAKE_CURRENT_SOURCE_DIR@/cmake/ConfigQmlInstallPath.cmake")
 set(relocatable TRUE)
 foreach(destination "@CMAKE_INSTALL_LIBDIR@" "@_configqml_include_dir@"
@@ -71,7 +72,7 @@ foreach(mode optional required default)
     foreach(unavailable TRUE FALSE)
         execute_process(COMMAND ${clean} "@CMAKE_COMMAND@"
             -S "@CMAKE_CURRENT_SOURCE_DIR@/tests/package_components"
-            -B "${root}/components-${mode}-${unavailable}" -G Ninja
+            -B "${root}/components-${mode}-${unavailable}" ${_configqml_test_generator}
             "-DQt6_DIR=@Qt6_DIR@" "-Dconfigqml_DIR=${cmakedir}" "-DMODE=${mode}"
             "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
             "-DCMAKE_DISABLE_FIND_PACKAGE_Qt6Qml=${unavailable}"
@@ -86,7 +87,7 @@ foreach(mode optional required default)
     endforeach()
 endforeach()
 run(${clean} "@CMAKE_COMMAND@" -S "${root}/examples/native" -B "${root}/native"
-    -G Ninja "-DQt6_DIR=@Qt6_DIR@"
+    ${_configqml_test_generator} "-DQt6_DIR=@Qt6_DIR@"
     "-Dconfigqml_DIR=${cmakedir}"
     "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
     "-DCMAKE_CXX_FLAGS=@CMAKE_CXX_FLAGS@" "-DCMAKE_EXE_LINKER_FLAGS=@CMAKE_EXE_LINKER_FLAGS@")
@@ -98,7 +99,7 @@ endif()
 # Also compile/link the installed QML target and its public header closure.
 file(WRITE "${root}/qml-native/CMakeLists.txt" "cmake_minimum_required(VERSION 3.21)\nproject(qml_consumer LANGUAGES CXX)\nfind_package(configqml @PROJECT_VERSION@ REQUIRED COMPONENTS Qml)\nadd_executable(qml-consumer main.cpp)\ntarget_link_libraries(qml-consumer PRIVATE configqml::configqml)\n")
 file(WRITE "${root}/qml-native/main.cpp" "#include <configqmlstore.h>\n#include <configqmlvalue.h>\n#include <configqmlmodel.h>\n#include <configfacade.h>\n#include <cstring>\nint main() { return std::strcmp(configqml::ConfigQmlStore::staticMetaObject.className(), \"configqml::ConfigQmlStore\"); }\n")
-run(${clean} "@CMAKE_COMMAND@" -S "${root}/qml-native" -B "${root}/qml-native-build" -G Ninja
+run(${clean} "@CMAKE_COMMAND@" -S "${root}/qml-native" -B "${root}/qml-native-build" ${_configqml_test_generator}
     "-DQt6_DIR=@Qt6_DIR@" "-Dconfigqml_DIR=${cmakedir}"
     "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
     "-DCMAKE_CXX_FLAGS=@CMAKE_CXX_FLAGS@" "-DCMAKE_EXE_LINKER_FLAGS=@CMAKE_EXE_LINKER_FLAGS@")
