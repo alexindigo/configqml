@@ -828,6 +828,8 @@ void ConfigWorker::freezeOrdinary(const QString &id, const ConfigJsonTransaction
         }
 }
 void ConfigWorker::beginSave(const ConfigCommand &command) {
+    if (command.operation == "saveSelected" && !prepareSelected(command))
+        return;
     m_autoTimer->stop();
     m_json->beginPublication();
     m_save = command;
@@ -886,7 +888,7 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
         if (command.groupToken.isEmpty() &&
             m_files.value(id).conflictPolicy == ConfigConflictPolicy::StrictPendingRebase) {
             bool frozen = false;
-            for (const auto &intent : intents)
+            for (const auto &intent : sourceFenceIntents(id, command, intents))
                 if (intent.frozen) {
                     frozen = true;
                     m_saveBases[id] = intent.frozenBase;
@@ -902,6 +904,10 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
                 quint64 through = 0;
                 for (const auto &intent : intents)
                     if (!reserved(path) &&
+                        (command.operation != "saveSelected" ||
+                         std::any_of(
+                             command.selection.cbegin(), command.selection.cend(),
+                             [&](const auto &selection) { return startsWith(path, selection); })) &&
                         (startsWith(path, intent.path) || startsWith(intent.path, path)))
                         through = qMax(through, intent.input);
                 if (through)
@@ -912,6 +918,12 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
     for (const auto &id : m_pendingEvidence.keys())
         if ((command.groupToken.isEmpty() ||
              m_groups.value(command.groupToken).bases.contains(id)) &&
+            (command.operation != "saveSelected" ||
+             std::any_of(command.selection.cbegin(), command.selection.cend(),
+                         [&](const auto &selection) {
+                             const auto prefix = m_routes.value(id).prefix;
+                             return startsWith(selection, prefix) || startsWith(prefix, selection);
+                         })) &&
             !m_saveSources.contains(id))
             m_saveSources.append(id);
     if (m_saveSources.isEmpty()) {
@@ -1176,7 +1188,7 @@ void ConfigWorker::finishSave() {
     if (m_saveResult.status.isEmpty())
         m_saveResult.status = m_savePublished ? "saved" : "nothing_to_save";
     if (m_saveResult.status != "failed" && m_save.groupToken.isEmpty() &&
-        m_saveResult.excludedGroups.isEmpty())
+        m_save.operation != "saveSelected" && m_saveResult.excludedGroups.isEmpty())
         m_saveResult.coveredRevisions = m_revisions;
     const bool refusal = m_unresolvedSave && m_saveResult.status != "failed";
     if (refusal) {
@@ -1232,6 +1244,8 @@ void ConfigWorker::finishSave() {
     }
     post(publish(m_saveResult));
     m_busy = false;
+    if (m_save.operation == "saveSelected" && !m_dirty.isEmpty())
+        scheduleAutoSave();
     if (closing)
         m_closed = true;
     else

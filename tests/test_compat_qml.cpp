@@ -89,6 +89,10 @@ private slots:
                     "{\"oldCount\":7,\"a\":1,\"b\":2,\"wide\":18446744073709551615}");
         compat::put(dir.filePath("bad.json"), "malformed");
         const bool retained = QString(COMPAT_FIXTURE).endsWith("tst_retained_groups.qml");
+        const bool saveSelected = QString(COMPAT_FIXTURE).endsWith("tst_save_selected.qml");
+        if (saveSelected)
+            compat::put(dir.filePath("user.json"),
+                        "{\"opaque\":18446744073709551615,\"ui\":{\"unknown\":true}}");
         const bool strictEmpty = QString(COMPAT_FIXTURE).endsWith("tst_strict_empty.qml");
         const bool overlay = QString(COMPAT_FIXTURE).endsWith("tst_overlay_editor.qml");
         const bool liveOverlay = QString(COMPAT_FIXTURE).endsWith("tst_live_overlay.qml");
@@ -349,6 +353,37 @@ private slots:
             }
             QVERIFY(obstruction.restore());
         }
+        if (saveSelected) {
+            QString previous;
+            QElapsedTimer deadline;
+            deadline.start();
+            while (!root->property("finished").toBool() &&
+                   root->property("failure").toString().isEmpty() && deadline.elapsed() < 10000) {
+                const auto stage = root->property("stage").toString();
+                if (!stage.isEmpty() && stage != previous) {
+                    const auto data = ConfigJsonCodec()
+                                          .decode(compat::bytes(dir.filePath("user.json")), "user")
+                                          .raw;
+                    const auto n = [&](const ConfigPath &path) {
+                        return ConfigDescriptor::leaf(ConfigDescriptor::Type::SafeInteger, 0)
+                            .validate(valueAt(data, path).value_or(QVariant(0)))
+                            .value.toInt();
+                    };
+                    QCOMPARE(n({"ui", "a"}), stage == "leaf" || stage == "namespace" ? 1
+                                             : stage == "disjoint"                   ? 3
+                                                                                     : 0);
+                    QCOMPARE(n({"ui", "b"}), stage == "leaf" ? 0 : 2);
+                    QCOMPARE(n({"other"}), stage == "leaf" || stage == "namespace" ? 0 : 9);
+                    QCOMPARE(n({"binding", "key"}), 0);
+                    QCOMPARE(data["opaque"].value<ConfigNumber>().token(),
+                             QString("18446744073709551615"));
+                    QVERIFY(valueAt(data, {"ui", "unknown"})->toBool());
+                    previous = stage;
+                    QVERIFY(QMetaObject::invokeMethod(root.get(), "advance"));
+                }
+                QTest::qWait(1);
+            }
+        }
         if (retained) {
             QTRY_VERIFY_WITH_TIMEOUT(root->property("stopped").toBool(), 10000);
             QVERIFY(obstruction.restore());
@@ -390,7 +425,8 @@ private slots:
                      numberLeg == "json" ? numberBytes : QByteArray("{}"));
         }
         if (strictEmpty || overlay || pattern || recordList || unknownData || pendingRebase ||
-            sharedParents || liveOverlay || draftPreview || draftRetry || valueCopy) {
+            sharedParents || liveOverlay || draftPreview || draftRetry || valueCopy ||
+            saveSelected) {
             if (draftRetry) {
                 const auto raw =
                     ConfigJsonCodec().decode(compat::bytes(dir.filePath("user.json")), "user").raw;

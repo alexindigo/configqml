@@ -367,6 +367,9 @@ quint64 ConfigStore::request(const QString &operation, QObject *context, Callbac
     return id;
 }
 quint64 ConfigStore::save(QObject *c, Callback f) { return request("save", c, std::move(f)); }
+quint64 ConfigStore::saveSelected(const QList<ConfigPath> &paths, QObject *c, Callback f) {
+    return request("saveSelected", c, std::move(f), paths);
+}
 quint64 ConfigStore::reload(QObject *c, Callback f) { return request("reload", c, std::move(f)); }
 quint64 ConfigStore::flush(QObject *c, Callback f) { return request("flush", c, std::move(f)); }
 quint64 ConfigStore::close(QObject *c, Callback f) { return request("close", c, std::move(f)); }

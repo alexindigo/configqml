@@ -126,6 +126,36 @@ normal saves merge disjoint foreign changes or report `path-conflict` on overlap
 not a permanent strict-preimage refusal. The foreign observation does not cover
 unsaved intent. Strict policies and retained-group recovery stay unchanged.
 
+## Selected publication
+
+`saveSelected(const QList<ConfigPath> &paths, QObject *context = nullptr,
+Callback callback = {})` returns a request ID and asynchronously publishes only
+eligible persistent intent inside the owned selection and reported input prefix.
+It does not create input, reserve work, capture a retained group or scan getters.
+Selections must be nonempty and contain declared writable leaves/namespaces;
+`{{}}` explicitly selects the root namespace. Empty, duplicate, undeclared,
+atomic-member and nonwritable selections fail `save-selection` without publication
+or poisoning later requests. Namespace selections require every covered leaf to
+have a writable route. Overlapping parent/child selections form their union.
+
+An unresolved retained/stopped group overlapping the selection fails
+`unresolved-group` before any source is attempted. Unrelated groups appear only
+in `excludedGroups`, and retain their capture, state and Retry identity. Ordinary
+intent outside the selection stays pending with normal autosave behavior.
+Namespace-reset fragments preserve their original structural conflict fences;
+selected cleanup cannot remove remaining siblings or unknown raw members.
+A strict pending source's frozen preimage still fences newer selected work;
+excluding its older ordinary intent never authorizes a foreign rebase.
+
+Receipts use operation `saveSelected` and the existing three statuses. `coverage`
+names selected attempted leaf intent, `coveredRevisions` only confirmed sources
+actually covered by this request, and `publications` actual route outcomes.
+`saved` promises only the selected work, never full-prefix durability. No eligible
+selected work returns asynchronous `nothing_to_save`, with no invented revision
+coverage. Relevant source evidence/readback failures remain failed/partial or
+uncertain, exactly as for ordinary persistence. Later root save/flush/close still
+have their unchanged full-prefix promise and unresolved-group refusal.
+
 ## Verification
 
 Native CTest covers ordered exact-prefix persistence, held effects/replies,

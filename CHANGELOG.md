@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Native and QML `saveSelected(paths, callback)` publish only already-admitted
+  persistent intent inside an explicit leaf/namespace selection and input prefix.
+  Unrelated ordinary work stays pending; unrelated retained groups are excluded,
+  while overlapping groups refuse before publication. Root saves are unchanged.
+
 ### Fixed
 
 - Namespace handles, drafts and overlays no longer fail a scoped persistence

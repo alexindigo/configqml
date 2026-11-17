@@ -104,6 +104,9 @@ are reported without rewriting the stored fallback. See
 Construct `ConfigStore` with owned `ConfigStoreOptions` on its object thread.
 Once Ready, `setUser(path, value)` provides checked local read-your-writes;
 `save(context, callback)` publishes its captured input prefix asynchronously.
+`saveSelected(paths, context, callback)` bounds that publication to declared
+writable leaves/namespaces without reserving other work. QML uses
+`saveSelected([["ui", "scale"]], callback)`. See [selected publication](docs/worker.md#selected-publication).
 `flush` saves and settles that prefix; `close` also seals ingress and releases
 the worker. Read-only paths reject persistent writes before local exposure.
 Worker failure settles each pending input back to authoritative state before

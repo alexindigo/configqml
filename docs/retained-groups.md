@@ -127,6 +127,12 @@ actual admission/IO/readback/evidence failure remains failed/partial. It is not 
 new selected-publication API. Root save/flush/close keep the full-prefix refusal
 above, including when no eligible work remains to publish.
 
+For explicitly bounded ordinary publication, use `saveSelected(paths, callback)`
+on the native or QML store. Unlike namespace-handle `save`, it excludes ordinary
+intent outside the selection too. Overlap refuses the whole request before any
+publication; unrelated groups are only excluded. It creates no reservation or
+Retry owner. See [worker.md](worker.md#selected-publication).
+
 Success resolves that capture's reservation; newer accepted local intent remains
 pending independently. `releaseGroup` is asynchronous `released | failed`, allowed
 after success only. It releases captured source data and retains a value-free

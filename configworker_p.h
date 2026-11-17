@@ -187,6 +187,7 @@ private:
     ConfigResult resultFor(const ConfigCommand &command) const;
     bool inheritFailures(ConfigResult &result) const;
     void beginSave(const ConfigCommand &command);
+    bool prepareSelected(const ConfigCommand &command);
     void continueSave();
     void finishSave();
     static void recordPublication(ConfigResult &result, const QString &source,
@@ -254,6 +255,9 @@ private:
     QList<ConfigFileEdit> pendingEdits(const QString &source) const;
     QList<ConfigPendingIntent> eligibleIntents(const QString &source,
                                                const ConfigCommand &command) const;
+    QList<ConfigPendingIntent> sourceFenceIntents(const QString &source,
+                                                  const ConfigCommand &command,
+                                                  const QList<ConfigPendingIntent> &selected) const;
     bool reserved(const ConfigPath &path) const;
     QList<ConfigPath> receiptPaths(const ConfigCommand &command) const;
     QStringList unresolvedGroups(quint64 prefix, const QList<ConfigPath> &selection = {}) const;
