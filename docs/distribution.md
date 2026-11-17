@@ -116,6 +116,7 @@ compiles the tests with timing gates off; normal Release enforces them. Opaque
 instrumentation hidden inside compiler wrappers should explicitly set OFF.
 
 The `timing_gates` compile/run probes use the parent build's generator (including
-Unix Makefiles) and build tool. Additional Ninja Multi-Config cases run only when
-Ninja is on PATH and a generator availability check succeeds; otherwise they emit
-a skip message without failing or disabling the primary probes.
+Unix Makefiles) and build tool. Additional cross-configuration cases run when the
+parent generator supports multiple configurations. Installed-consumer tests pass
+CTest's active configuration through nested builds, installation and executable
+lookup, including all four install-layout variants.

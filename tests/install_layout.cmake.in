@@ -31,5 +31,7 @@ run("@CMAKE_COMMAND@" -S "@CMAKE_CURRENT_SOURCE_DIR@" -B "${root}" ${_configqml_
     "-DCMAKE_CXX_FLAGS=@CMAKE_CXX_FLAGS@"
     "-DCMAKE_EXE_LINKER_FLAGS=@CMAKE_EXE_LINKER_FLAGS@"
     "-DCMAKE_SHARED_LINKER_FLAGS=@CMAKE_SHARED_LINKER_FLAGS@" ${options})
-run("@CMAKE_COMMAND@" --build "${root}" --target configqmlplugin --parallel 4)
-run("@CMAKE_CTEST_COMMAND@" --test-dir "${root}" -R "^installed_prefix$" -V --no-tests=error)
+run("@CMAKE_COMMAND@" --build "${root}" ${_configqml_test_config}
+    --target configqmlplugin --parallel 4)
+run("@CMAKE_CTEST_COMMAND@" --test-dir "${root}" -C "${TEST_CONFIG}"
+    -R "^installed_prefix$" -V --no-tests=error)

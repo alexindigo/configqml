@@ -26,7 +26,8 @@ function(run)
     message(STATUS "${out}${err}")
     set(last_output "${out}${err}" PARENT_SCOPE)
 endfunction()
-run("@CMAKE_COMMAND@" --install "@CMAKE_CURRENT_BINARY_DIR@" --prefix "${root}/original")
+run("@CMAKE_COMMAND@" --install "@CMAKE_CURRENT_BINARY_DIR@" ${_configqml_test_config}
+    --prefix "${root}/original")
 set(prefix "${root}/original")
 if(relocatable)
     file(RENAME "${prefix}" "${root}/prefix")
@@ -91,8 +92,8 @@ run(${clean} "@CMAKE_COMMAND@" -S "${root}/examples/native" -B "${root}/native"
     "-Dconfigqml_DIR=${cmakedir}"
     "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
     "-DCMAKE_CXX_FLAGS=@CMAKE_CXX_FLAGS@" "-DCMAKE_EXE_LINKER_FLAGS=@CMAKE_EXE_LINKER_FLAGS@")
-run("@CMAKE_COMMAND@" --build "${root}/native" --parallel 2)
-run(${clean} "${root}/native/configqml-native")
+run("@CMAKE_COMMAND@" --build "${root}/native" ${_configqml_test_config} --parallel 2)
+run(${clean} "${root}/native${_configqml_test_runtime_suffix}/configqml-native")
 if(NOT last_output MATCHES "CONFIGQML_NATIVE_OK")
     message(FATAL_ERROR "Native example did not observe the admitted value")
 endif()
@@ -103,9 +104,9 @@ run(${clean} "@CMAKE_COMMAND@" -S "${root}/qml-native" -B "${root}/qml-native-bu
     "-DQt6_DIR=@Qt6_DIR@" "-Dconfigqml_DIR=${cmakedir}"
     "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
     "-DCMAKE_CXX_FLAGS=@CMAKE_CXX_FLAGS@" "-DCMAKE_EXE_LINKER_FLAGS=@CMAKE_EXE_LINKER_FLAGS@")
-run("@CMAKE_COMMAND@" --build "${root}/qml-native-build" --parallel 2)
-run(${clean} "${root}/qml-native-build/qml-consumer")
-execute_process(COMMAND ${clean} ldd "${root}/native/configqml-native" OUTPUT_VARIABLE links RESULT_VARIABLE status)
+run("@CMAKE_COMMAND@" --build "${root}/qml-native-build" ${_configqml_test_config} --parallel 2)
+run(${clean} "${root}/qml-native-build${_configqml_test_runtime_suffix}/qml-consumer")
+execute_process(COMMAND ${clean} ldd "${root}/native${_configqml_test_runtime_suffix}/configqml-native" OUTPUT_VARIABLE links RESULT_VARIABLE status)
 if(NOT status EQUAL 0 OR links MATCHES "libQt6(Qml|Quick|Gui|Widgets|DBus|Concurrent)" OR
     NOT links MATCHES "${libdir}/@CMAKE_SHARED_LIBRARY_PREFIX@configqml_core")
     message(FATAL_ERROR "Core consumer linkage escaped installed prefix: ${links}")

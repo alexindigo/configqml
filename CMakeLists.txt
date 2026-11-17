@@ -214,14 +214,15 @@ if(BUILD_TESTING)
         get_filename_component(_qt_runtime_libs "${_qt_core_library}" DIRECTORY)
         configure_file(tests/installed_prefix.cmake.in installed_prefix.cmake @ONLY)
         add_test(NAME installed_prefix COMMAND ${CMAKE_COMMAND}
-            -P ${CMAKE_CURRENT_BINARY_DIR}/installed_prefix.cmake)
+            "-DTEST_CONFIG=$<CONFIG>" -P ${CMAKE_CURRENT_BINARY_DIR}/installed_prefix.cmake)
         set_tests_properties(installed_prefix PROPERTIES TIMEOUT 120 LABELS distribution)
         configure_file(tests/install_layout.cmake.in install_layout.cmake @ONLY)
         # This is also the CI layout matrix; each child builds only the library
         # and runs installed_prefix, never recursively running this matrix.
         foreach(layout gnu_dirs relative_qml absolute_qml absolute_dirs)
             add_test(NAME install_layout_${layout} COMMAND ${CMAKE_COMMAND}
-                -DLAYOUT=${layout} -P ${CMAKE_CURRENT_BINARY_DIR}/install_layout.cmake)
+                -DLAYOUT=${layout} "-DTEST_CONFIG=$<CONFIG>"
+                -P ${CMAKE_CURRENT_BINARY_DIR}/install_layout.cmake)
             set_tests_properties(install_layout_${layout} PROPERTIES TIMEOUT 600 LABELS distribution)
         endforeach()
         add_executable(test_m5_boundaries tests/test_m5_boundaries.cpp)
