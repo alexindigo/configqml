@@ -9,7 +9,7 @@ ConfigRevision fileRevision(bool exists, const QString &target, const QByteArray
         QFile::encodeName(target).toHex() + '|' + stamp + '|' + digest + '|' + parents;
     return {exists, compactIdentity(identity),
             std::make_shared<const ConfigRevisionWitness>(ConfigRevisionWitness{
-                QString(target.constData(), target.size()), stamp, digest, parents})};
+                QString(target.constData(), target.size()), stamp, digest, parents, {}, {}})};
 }
 QVariantMap ConfigRevision::details() const {
     if (!witness)

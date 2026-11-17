@@ -21,12 +21,14 @@ quint64 ConfigStore::applyGroup(const QMap<ConfigPath, std::optional<QVariant>> 
     input.kind = ConfigInput::Kind::Group;
     input.sequence = m_sequence + 1;
     input.edits = edits; // Private callers supply already-owned, schema-checked values.
-    if (attempt && attempt->expected)
-        for (auto it = input.edits.begin(); it != input.edits.end();)
+    if (attempt && attempt->expected) {
+        for (auto it = input.edits.begin(); it != input.edits.end();) {
             if (admittedEdits.contains(it.key()) && admittedEdits.value(it.key()) == it.value())
                 it = input.edits.erase(it);
             else
                 ++it;
+        }
+    }
     input.fences = fences;
     for (auto it = input.edits.cbegin(); it != input.edits.cend(); ++it)
         input.pathGenerations[it.key()] = m_cache.information.value(it.key()).pathGeneration + 1;
