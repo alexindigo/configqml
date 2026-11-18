@@ -83,6 +83,8 @@ public:
     ConfigRequestHandle clearRuntime(const ConfigPath &path, QObject *context = nullptr,
                                      Callback callback = {});
     quint64 save(QObject *context = nullptr, Callback callback = {});
+    quint64 saveSelected(const QList<ConfigPath> &paths, QObject *context = nullptr,
+                         Callback callback = {});
     quint64 reload(QObject *context = nullptr, Callback callback = {});
     ConfigRequestHandle
     initializeIfMissing(const ConfigPath &path, const QVariant &value, QObject *context = nullptr,
@@ -150,7 +152,8 @@ private:
                               const QString &target, QObject *context, Callback callback,
                               ConfigDescriptor::Format format = ConfigDescriptor::Format::Native,
                               const ConfigAdmission *admission = nullptr);
-    quint64 request(const QString &operation, QObject *context, Callback callback);
+    quint64 request(const QString &operation, QObject *context, Callback callback,
+                    const QList<ConfigPath> &selection = {});
     quint64 registerRequest(QObject *context, Callback callback);
     quint64 groupRequest(const QString &operation, const QString &token, QObject *context,
                          Callback callback);

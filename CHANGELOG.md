@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-17
+
+### Added
+
+- Native and QML `saveSelected(paths, callback)` publish only already-admitted
+  persistent intent inside an explicit leaf/namespace selection and input prefix.
+  Unrelated ordinary work stays pending; unrelated retained groups are excluded,
+  while overlapping groups refuse before publication. Root saves are unchanged.
+
+### Fixed
+
+- Namespace handles, drafts and overlays no longer fail a scoped persistence
+  receipt because an unrelated retained group is unresolved. Successful draft
+  Apply and overlay refresh settle normally; overlapping reservations still
+  refuse. Root save/flush/close retain their full-prefix promise.
+- Overlay placement tokens now recognize observable reorders of repeated IDs
+  whose raw rows differ only in overrides, including nested and keyed owners.
+  Explicit member-only batches keep placement identity without thawing editors.
+
+### Changed
+
+- Arch packages and source build instructions use CMake with Unix Makefiles;
+  Ninja is no longer a package build dependency. Nested test consumers inherit
+  the outer generator and selected build configuration.
+
 ## [0.5.0] - 2026-11-12
 
 ### Added
@@ -255,7 +280,8 @@
 - Native/QML quick starts, executable standalone examples, complete shipped
   contracts and technical release gates.
 
-[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/alexindigo/configqml/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/alexindigo/configqml/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/alexindigo/configqml/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/alexindigo/configqml/compare/v0.2.1...v0.3.0

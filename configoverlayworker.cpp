@@ -388,7 +388,8 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
     const bool liveWrite = t->operation == "overlayWrite";
     const bool refresh = t->operation == "overlayRefresh";
     const bool discard = t->operation == "overlayDiscard";
-    const bool retry = command.applyAttempt && command.applyAttempt->expected;
+    const auto expected = command.applyAttempt ? command.applyAttempt->expected : nullptr;
+    const bool retry = bool(expected);
     const auto recovery = retry ? applyCapture(command) : nullptr;
     if (retry && !recovery)
         t->error = "overlay-conflict";
@@ -492,7 +493,7 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         return;
     }
     if (retry && !command.input) {
-        command.applyAttempt->admitted = command.applyAttempt->expected;
+        command.applyAttempt->admitted = expected;
         release(t);
         m_overlayCommands.remove(t->token);
         m_overlayTransactions.remove(t->token);
@@ -550,7 +551,7 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         result.error = {error, {}, command.operation};
         result.rejectedPathGenerations = input.pathGenerations;
         reconcileApplyRejection(command);
-        if (retry && command.applyAttempt->expected->valid) {
+        if (expected && expected->valid) {
             auto &capture = m_overlayCaptures[t->editorId];
             const auto ingress = m_endpoint->revision(t->selection.ownerPath);
             if (ingress == capture.ownerIngress + 1)

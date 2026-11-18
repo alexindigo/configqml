@@ -83,6 +83,7 @@ public:
     Q_INVOKABLE configqml::ConfigListModel *listModel(const QStringList &path);
     Q_INVOKABLE configqml::ConfigListModel *keyedModel(const QStringList &path);
     Q_INVOKABLE QString save(const QJSValue &callback = {});
+    Q_INVOKABLE QString saveSelected(const QVariantList &paths, const QJSValue &callback = {});
     Q_INVOKABLE QString reload(const QJSValue &callback = {});
     Q_INVOKABLE QString initializeIfMissing(const QStringList &path, const QVariant &value,
                                             const QJSValue &callback = {});

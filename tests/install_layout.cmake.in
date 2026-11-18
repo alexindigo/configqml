@@ -1,4 +1,5 @@
 set(root "@CMAKE_CURRENT_BINARY_DIR@/install-layouts/${LAYOUT}")
+include("@CMAKE_CURRENT_BINARY_DIR@/test-generator.cmake")
 set(prefix "${root}/installed-consumer/original")
 set(options)
 if(LAYOUT STREQUAL "gnu_dirs")
@@ -23,12 +24,14 @@ function(run)
         message(FATAL_ERROR "${ARGN}: ${status}")
     endif()
 endfunction()
-run("@CMAKE_COMMAND@" -S "@CMAKE_CURRENT_SOURCE_DIR@" -B "${root}" -G Ninja
+run("@CMAKE_COMMAND@" -S "@CMAKE_CURRENT_SOURCE_DIR@" -B "${root}" ${_configqml_test_generator}
     -DBUILD_TESTING=ON "-DCMAKE_BUILD_TYPE=@CMAKE_BUILD_TYPE@"
     "-DCMAKE_INSTALL_PREFIX=${prefix}" "-DQt6_DIR=@Qt6_DIR@"
     "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
     "-DCMAKE_CXX_FLAGS=@CMAKE_CXX_FLAGS@"
     "-DCMAKE_EXE_LINKER_FLAGS=@CMAKE_EXE_LINKER_FLAGS@"
     "-DCMAKE_SHARED_LINKER_FLAGS=@CMAKE_SHARED_LINKER_FLAGS@" ${options})
-run("@CMAKE_COMMAND@" --build "${root}" --target configqmlplugin --parallel 4)
-run("@CMAKE_CTEST_COMMAND@" --test-dir "${root}" -R "^installed_prefix$" -V --no-tests=error)
+run("@CMAKE_COMMAND@" --build "${root}" ${_configqml_test_config}
+    --target configqmlplugin --parallel 4)
+run("@CMAKE_CTEST_COMMAND@" --test-dir "${root}" ${_configqml_test_ctest_config}
+    -R "^installed_prefix$" -V --no-tests=error)

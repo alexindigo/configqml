@@ -271,6 +271,7 @@ quint64 ConfigStore::overlayRequest(ConfigOverlayEditor *editor, const QString &
     const auto id = registerRequest(context, std::move(callback));
     ConfigCommand command{id, m_sequence, operation, {}};
     command.editorId = editor->m_id;
+    command.selection = {ownPath(editor->m_ownerPath)};
     command.applyAttempt = attempt;
     command.overlayEdits = operation == "overlayWrite" ? edits : editor->m_edits;
     if (!editor->writable() || editor->busy() || !editor->ready())

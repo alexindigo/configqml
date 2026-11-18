@@ -339,10 +339,13 @@ ConfigRequestHandle ConfigStore::reset(const ConfigPath &p, const QString &t, QO
 ConfigRequestHandle ConfigStore::clearRuntime(const ConfigPath &p, QObject *c, Callback f) {
     return write(ConfigInput::Kind::ClearRuntime, p, {}, {}, c, std::move(f));
 }
-quint64 ConfigStore::request(const QString &operation, QObject *context, Callback callback) {
+quint64 ConfigStore::request(const QString &operation, QObject *context, Callback callback,
+                             const QList<ConfigPath> &selection) {
     Q_ASSERT(QThread::currentThread() == thread());
     const auto id = registerRequest(context, std::move(callback));
     ConfigCommand command{id, m_sequence, operation, {}};
+    for (const auto &path : selection)
+        command.selection.append(ownPath(path));
     if (!m_accepting || !m_owner->dispatch(command)) {
         ConfigResult result;
         result.requestId = id;
@@ -364,6 +367,9 @@ quint64 ConfigStore::request(const QString &operation, QObject *context, Callbac
     return id;
 }
 quint64 ConfigStore::save(QObject *c, Callback f) { return request("save", c, std::move(f)); }
+quint64 ConfigStore::saveSelected(const QList<ConfigPath> &paths, QObject *c, Callback f) {
+    return request("saveSelected", c, std::move(f), paths);
+}
 quint64 ConfigStore::reload(QObject *c, Callback f) { return request("reload", c, std::move(f)); }
 quint64 ConfigStore::flush(QObject *c, Callback f) { return request("flush", c, std::move(f)); }
 quint64 ConfigStore::close(QObject *c, Callback f) { return request("close", c, std::move(f)); }

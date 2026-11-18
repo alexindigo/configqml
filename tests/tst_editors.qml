@@ -10,6 +10,8 @@ QtObject {
     property var second: null
     property var receipt: ({})
     property int calls: 0
+    property string scopedToken: ""
+    property string scopedFailure: ""
     readonly property var cfg: store.values
     property int observed: store.ready ? cfg.a.n : -1
     property int other: store.ready ? cfg.b.n : -1
@@ -69,6 +71,45 @@ QtObject {
     }
     function save(): void {
         store.save(function(result) { receipt = result; calls++ })
+    }
+    function scopedReceipt(kind: string): void {
+        store.retainGroup({requestKey: "outside-a", paths: [["b", "n"]], edits: [
+            {path: ["b", "n"], present: true, value: 99}
+        ], dependencies: []}, function(retained) {
+            if (retained.status !== "retained") {
+                root.scopedFailure = "retain";
+                root.calls++;
+                return;
+            }
+            root.scopedToken = retained.groupToken;
+            store.save(function(full) {
+                if (full.status !== "failed" || full.error.code !== "unresolved-group") {
+                    root.scopedFailure = "full-save-promise";
+                    root.calls++;
+                    return;
+                }
+                function finish(result) { root.receipt = result; root.calls++; }
+                if (kind === "draft") {
+                    root.editor = store.draft([["a", "n"]]);
+                    root.editor.values.a.n = 7;
+                    root.editor.apply(finish);
+                } else {
+                    root.first = store.scope(["a"]);
+                    root.first.values.n = 7;
+                    if (kind === "flush") root.first.flush(finish);
+                    else root.first.save(finish);
+                }
+            });
+        });
+    }
+    function resolveScopedGroup(): void {
+        store.saveGroup(root.scopedToken, function(saved) {
+            if (saved.status !== "saved") root.scopedFailure = "group-save";
+            store.releaseGroup(root.scopedToken, function(released) {
+                if (released.status !== "released") root.scopedFailure = "group-release";
+                root.calls++;
+            });
+        });
     }
     function reload(): void {
         store.reload(function(result) { receipt = result; calls++ })

@@ -53,6 +53,36 @@ struct Fixture {
 class QmlEditorsTest : public QObject {
     Q_OBJECT
 private slots:
+    void scopedReceiptsKeepFullSavePromise_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"save", "flush", "draft"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void scopedReceiptsKeepFullSavePromise() {
+        QFETCH(QString, kind);
+        QTemporaryDir dir;
+        Fixture f(dir.path());
+        QTRY_VERIFY(f.store->ready());
+        QVERIFY(QMetaObject::invokeMethod(f.root.get(), "scopedReceipt", Q_ARG(QString, kind)));
+        QTRY_COMPARE(f.number("calls"), 1);
+        QCOMPARE(f.root->property("scopedFailure").toString(), QString());
+        const auto result = f.receipt();
+        QCOMPARE(result.value("status").toString(), QString("saved"));
+        QVERIFY(result.value("unresolvedGroups").toList().isEmpty());
+        QCOMPARE(result.value("excludedGroups").toList().size(), 1);
+        QCOMPARE(f.number("observed"), 7);
+        if (kind == "draft") {
+            QVERIFY(!f.editor()->dirty());
+            QCOMPARE(f.number("preview"), 7);
+        }
+        Fixture cold(dir.path());
+        QTRY_VERIFY(cold.store->ready());
+        QCOMPARE(cold.number("observed"), 7);
+        QCOMPARE(cold.number("other"), 0);
+        f.call("resolveScopedGroup");
+        QTRY_COMPARE(f.number("calls"), 2);
+        QCOMPARE(f.root->property("scopedFailure").toString(), QString());
+    }
     void correctedRejectedDraftReachesConsumers() {
         QTemporaryDir dir;
         Fixture f(dir.path());

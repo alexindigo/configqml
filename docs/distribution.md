@@ -1,20 +1,20 @@
 # Installation and compatibility
 
-configqml 0.5.0 targets C++17 and Qt 6.12 on Linux. The initial verified platform
+configqml 0.5.1 targets C++17 and Qt 6.12 on Linux. The initial verified platform
 is x86_64 Arch Linux. Before 1.0 the API/ABI may change; rebuild consumers when
 upgrading. CMake package version matching uses SameMinorVersion. Before 1.0 each
 minor release has its own SONAME `so.0.<minor>`; consumers rebuild on minor bumps.
-For 0.5.0 this is `libconfigqml_core.so.0.5` and `libconfigqml.so.0.5`.
+For 0.5.x this is `libconfigqml_core.so.0.5` and `libconfigqml.so.0.5`.
 `ConfigQml 1.0` is the QML import revision, not a
 claim that the library has reached stable version 1.0.
 
 ## Installed targets
 
 ```cmake
-find_package(configqml 0.5.0 REQUIRED COMPONENTS Core)
+find_package(configqml 0.5.1 REQUIRED COMPONENTS Core)
 target_link_libraries(headless PRIVATE configqml::core)
 # For native QML integration instead:
-find_package(configqml 0.5.0 REQUIRED COMPONENTS Qml)
+find_package(configqml 0.5.1 REQUIRED COMPONENTS Qml)
 target_link_libraries(declarative PRIVATE configqml::configqml)
 ```
 
@@ -116,6 +116,7 @@ compiles the tests with timing gates off; normal Release enforces them. Opaque
 instrumentation hidden inside compiler wrappers should explicitly set OFF.
 
 The `timing_gates` compile/run probes use the parent build's generator (including
-Unix Makefiles) and build tool. Additional Ninja Multi-Config cases run only when
-Ninja is on PATH and a generator availability check succeeds; otherwise they emit
-a skip message without failing or disabling the primary probes.
+Unix Makefiles) and build tool. Additional cross-configuration cases run when the
+parent generator supports multiple configurations. Installed-consumer tests pass
+CTest's active configuration through nested builds, installation and executable
+lookup, including all four install-layout variants.

@@ -36,16 +36,16 @@ bool qmlSelectors(const QVariant &value, QList<ConfigValueSelector> &out, bool e
         if (segment.size() != 1)
             return false;
         if (segment.contains("key") && segment.value("key").metaType().id() == QMetaType::QString)
-            out.append({ConfigValueSelector::Kind::Key, segment.value("key").toString(), 0});
+            out.append({ConfigValueSelector::Kind::Key, segment.value("key").toString(), 0, {}});
         else if (segment.contains("index")) {
             qsizetype n;
             if (!qmlIndex(segment.value("index"), n))
                 return false;
-            out.append({ConfigValueSelector::Kind::Index, {}, n});
+            out.append({ConfigValueSelector::Kind::Index, {}, n, {}});
         } else if (each && segment.contains("each") &&
                    segment.value("each").metaType().id() == QMetaType::Bool &&
                    segment.value("each").toBool())
-            out.append({ConfigValueSelector::Kind::Each, {}, 0});
+            out.append({ConfigValueSelector::Kind::Each, {}, 0, {}});
         else
             return false;
     }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configoverlay_p.h"
+#include "configjsoncodec.h"
 #include <QMutexLocker>
 
 namespace configqml {
@@ -24,8 +25,38 @@ QVariant overlayMerge(const QVariant &base, const QVariant &overrides) {
                                : it.value();
     return result;
 }
+template <typename Normalize>
+static bool mappingMoved(const QVariantList &before, const QVariantList &after,
+                         const QVariant &previous, const QVariant &selected, Normalize normalize) {
+    if (previous == selected)
+        return false;
+    const auto oldRow = encodeJsonValue(previous), newRow = encodeJsonValue(selected);
+    if (!oldRow.ok() || !newRow.ok() || oldRow.bytes == newRow.bytes)
+        return false;
+    const auto count = [&](const QVariantList &rows, qsizetype &oldCount, qsizetype &newCount) {
+        for (const auto &row : rows) {
+            const auto encoded = encodeJsonValue(normalize(row));
+            if (!encoded.ok())
+                return false;
+            oldCount += encoded.bytes == oldRow.bytes;
+            newCount += encoded.bytes == newRow.bytes;
+        }
+        return true;
+    };
+    qsizetype oldBefore = 0, oldAfter = 0, newBefore = 0, newAfter = 0;
+    if (!count(before, oldBefore, newBefore) || !count(after, oldAfter, newAfter))
+        return false;
+    // Preserve multiplicities of the relocated witnesses, not the entire owner:
+    // unrelated rows can change too. Merely creating a duplicate is not a move.
+    const bool movedElsewhere = oldBefore > 0 && oldBefore == oldAfter;
+    const bool cameFromElsewhere = newBefore > 0 && newBefore == newAfter;
+    return before.size() == after.size() ? movedElsewhere && cameFromElsewhere
+                                         : movedElsewhere || cameFromElsewhere;
+}
 bool overlayPlacementMoved(const QVariant &before, const QVariant &after,
                            const QList<ConfigValueSelector> &address, const QString &overrideKey) {
+    if (before == after)
+        return false;
     auto withoutOverride = [&](const QVariant &value, const QList<ConfigValueSelector> &tail) {
         const auto record = overlayAt(value, tail);
         if (!record || record->metaType().id() != QMetaType::QVariantMap)
@@ -44,39 +75,29 @@ bool overlayPlacementMoved(const QVariant &before, const QVariant &after,
             const auto index = selector.index;
             if (index >= a.size() || index >= b.size())
                 return (index < a.size()) != (index < b.size());
+            if (mappingMoved(a, b, a[index], b[index], [](const QVariant &row) { return row; }))
+                return true;
             const auto tail = address.mid(depth + 1);
             const auto previous = withoutOverride(a[index], tail);
             const auto selected = withoutOverride(b[index], tail);
-            if (previous != selected) {
-                bool cameFromElsewhere = false, movedElsewhere = false;
-                for (qsizetype i = 0; i < a.size(); ++i)
-                    cameFromElsewhere |= i != index && withoutOverride(a[i], tail) == selected;
-                for (qsizetype i = 0; i < b.size(); ++i)
-                    movedElsewhere |= i != index && withoutOverride(b[i], tail) == previous;
-                if ((cameFromElsewhere && movedElsewhere) ||
-                    (a.size() != b.size() && (cameFromElsewhere || movedElsewhere)))
-                    return true;
-            }
+            if (mappingMoved(a, b, previous, selected,
+                             [&](const QVariant &row) { return withoutOverride(row, tail); }))
+                return true;
         }
         if (selector.kind == ConfigValueSelector::Kind::Key &&
             old.metaType().id() == QMetaType::QVariantMap &&
             current.metaType().id() == QMetaType::QVariantMap) {
             const auto a = old.toMap(), b = current.toMap();
             if (a.contains(selector.key) && b.contains(selector.key)) {
+                if (mappingMoved(a.values(), b.values(), a.value(selector.key),
+                                 b.value(selector.key), [](const QVariant &row) { return row; }))
+                    return true;
                 const auto tail = address.mid(depth + 1);
                 const auto previous = withoutOverride(a.value(selector.key), tail);
                 const auto selected = withoutOverride(b.value(selector.key), tail);
-                if (previous != selected) {
-                    bool cameFromElsewhere = false, movedElsewhere = false;
-                    for (auto it = a.cbegin(); it != a.cend(); ++it)
-                        cameFromElsewhere |= it.key() != selector.key &&
-                                             withoutOverride(it.value(), tail) == selected;
-                    for (auto it = b.cbegin(); it != b.cend(); ++it)
-                        movedElsewhere |= it.key() != selector.key &&
-                                          withoutOverride(it.value(), tail) == previous;
-                    if (cameFromElsewhere && movedElsewhere)
-                        return true;
-                }
+                if (mappingMoved(a.values(), b.values(), previous, selected,
+                                 [&](const QVariant &row) { return withoutOverride(row, tail); }))
+                    return true;
             }
         }
         const auto a = overlayAt(old, {selector}), b = overlayAt(current, {selector});

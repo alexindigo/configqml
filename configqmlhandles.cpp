@@ -125,6 +125,20 @@ QList<ConfigPath> ConfigQmlStore::selectedPaths(const QVariantList &paths, bool 
         result.append(prefix);
     return result;
 }
+QString ConfigQmlStore::saveSelected(const QVariantList &paths, const QJSValue &function) {
+    if (!m_core || !m_writable || m_draft || m_overlay) {
+        reject({}, "not-ready");
+        return {};
+    }
+    bool ok = false;
+    QList<ConfigPath> selection;
+    ConfigConsumerGuard boundary(this);
+    if (!boundary.invoke([&] { selection = selectedPaths(paths, &ok); }) || !m_core)
+        return {};
+    if (!ok || paths.isEmpty())
+        selection.clear();
+    return QString::number(m_core->saveSelected(selection, this, callback(function)));
+}
 ConfigQmlStore *ConfigQmlStore::draft(const QVariantList &paths) {
     if (!m_core || !m_writable || m_draft) {
         reject({}, "detached-or-read-only");

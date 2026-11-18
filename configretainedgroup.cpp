@@ -178,12 +178,29 @@ void ConfigWorker::describeGroup(ConfigResult &result, const ConfigGroupInfo &in
         result.attemptNumber = info.attempts.last().attemptNumber;
     }
 }
-QStringList ConfigWorker::unresolvedGroups(quint64 prefix) const {
+QList<ConfigPath> ConfigWorker::receiptPaths(const ConfigCommand &command) const {
+    if (!command.groupToken.isEmpty())
+        return m_groups.value(command.groupToken).selections;
+    return command.selection; // Empty is the root store's full-prefix promise.
+}
+QStringList ConfigWorker::unresolvedGroups(quint64 prefix,
+                                           const QList<ConfigPath> &selection) const {
     QStringList result;
     for (const auto &capture : m_groups)
         if (capture.info.capturePrefix <= prefix && capture.info.state != "succeeded" &&
-            capture.info.state != "released")
-            result.append(capture.info.groupToken);
+            capture.info.state != "released") {
+            if (selection.isEmpty())
+                result.append(capture.info.groupToken);
+            else {
+                bool intersects = false;
+                for (const auto &requested : selection)
+                    for (const auto &reserved : capture.selections)
+                        intersects |=
+                            startsWith(requested, reserved) || startsWith(reserved, requested);
+                if (intersects)
+                    result.append(capture.info.groupToken);
+            }
+        }
     return result;
 }
 bool ConfigWorker::reserved(const ConfigPath &path) const {
@@ -211,6 +228,32 @@ QList<ConfigFileEdit> ConfigWorker::pendingEdits(const QString &source) const {
         edits.append(intent.edit);
     return edits;
 }
+bool ConfigWorker::prepareSelected(const ConfigCommand &command) {
+    auto result = resultFor(command);
+    QSet<ConfigPath> seen;
+    bool valid = !command.selection.isEmpty();
+    for (const auto &selection : command.selection) {
+        const auto descriptor = m_options.schema.descriptor(selection);
+        bool hasLeaf = false;
+        valid &= descriptor.has_value() && !seen.contains(selection);
+        seen.insert(selection);
+        for (const auto &leaf : m_options.schema.leaves())
+            if (startsWith(leaf, selection)) {
+                hasLeaf = true;
+                valid &= m_layers->info(leaf).route.valid();
+            }
+        valid &= hasLeaf;
+    }
+    result.excludedGroups = unresolvedGroups(command.prefix);
+    result.unresolvedGroups = unresolvedGroups(command.prefix, command.selection);
+    if (!valid || !result.unresolvedGroups.isEmpty()) {
+        result.status = "failed";
+        result.error = {valid ? "unresolved-group" : "save-selection", {}, command.operation};
+        post(publish(result));
+        return false;
+    }
+    return true;
+}
 QList<ConfigPendingIntent> ConfigWorker::eligibleIntents(const QString &source,
                                                          const ConfigCommand &command) const {
     QList<ConfigPendingIntent> result;
@@ -231,7 +274,36 @@ QList<ConfigPendingIntent> ConfigWorker::eligibleIntents(const QString &source,
                 result.append(intent);
         }
     }
+    if (command.operation == "saveSelected") {
+        const auto eligible = result;
+        result.clear();
+        for (const auto &intent : eligible) {
+            bool included = selected(command.selection, intent.path);
+            // Ancestor cleanup belongs to this selection's reset fragments,
+            // never to an unrelated pending reset in the same source.
+            if (!included && intent.edit.pruneEmpty)
+                included =
+                    std::any_of(eligible.cbegin(), eligible.cend(), [&](const auto &fragment) {
+                        return !fragment.edit.pruneEmpty && fragment.input == intent.input &&
+                               selected(command.selection, fragment.path) &&
+                               startsWith(fragment.path, intent.path);
+                    });
+            if (included)
+                result.append(intent);
+        }
+    }
     return result;
+}
+QList<ConfigPendingIntent>
+ConfigWorker::sourceFenceIntents(const QString &source, const ConfigCommand &command,
+                                 const QList<ConfigPendingIntent> &selected) const {
+    if (command.operation != "saveSelected")
+        return selected;
+    // Selection bounds publications, not a pending source's strict capture.
+    // Retained reservations keep their existing separate publication policy.
+    auto ordinary = command;
+    ordinary.operation = "save";
+    return eligibleIntents(source, ordinary);
 }
 void ConfigWorker::recordPersistentEdit(const ConfigRoute &route, const ConfigPath &path,
                                         const std::optional<QVariant> &value, bool ifMissing,
@@ -314,9 +386,23 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
     const auto saved = m_saveIntents.value(id);
     QSet<quint64> ids;
     for (const auto &intent : saved)
-        if (!intent.edit.pruneEmpty || !reserved(intent.path) || !valueAt(raw, intent.edit.path) ||
-            valueAt(raw, intent.edit.path)->toMap().isEmpty())
+        if (!intent.edit.pruneEmpty)
             ids.insert(intent.id);
+    for (const auto &intent : saved) {
+        if (!intent.edit.pruneEmpty)
+            continue;
+        bool pendingFragments = false;
+        if (m_save.operation == "saveSelected")
+            for (const auto &fragment : m_intents.value(id))
+                pendingFragments |= !fragment.edit.pruneEmpty && fragment.input == intent.input &&
+                                    startsWith(fragment.path, intent.path) &&
+                                    !ids.contains(fragment.id);
+        // A newer value may intentionally recreate this namespace. Cleanup
+        // settles with its original fragments, not the final raw emptiness.
+        if ((m_save.operation == "saveSelected" ? !pendingFragments : !reserved(intent.path)) ||
+            !valueAt(raw, intent.edit.path) || valueAt(raw, intent.edit.path)->toMap().isEmpty())
+            ids.insert(intent.id);
+    }
     auto &remaining = m_intents[id];
     remaining.removeIf([&](const ConfigPendingIntent &intent) { return ids.contains(intent.id); });
     for (auto &intent : remaining)

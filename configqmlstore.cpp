@@ -465,7 +465,10 @@ QString ConfigQmlStore::save(const QJSValue &f) {
         return {};
     }
     quint64 requestId = 0;
-    ConfigConsumerGuard(this).invoke([&] { requestId = m_core->save(this, callback(f)); });
+    ConfigConsumerGuard(this).invoke([&] {
+        requestId = m_isHandle ? m_core->request("save", this, callback(f), {m_prefix})
+                               : m_core->save(this, callback(f));
+    });
     return QString::number(requestId);
 }
 QString ConfigQmlStore::reload(const QJSValue &f) {
@@ -507,7 +510,10 @@ QString ConfigQmlStore::flush(const QJSValue &f) {
         return {};
     }
     quint64 requestId = 0;
-    ConfigConsumerGuard(this).invoke([&] { requestId = m_core->flush(this, callback(f)); });
+    ConfigConsumerGuard(this).invoke([&] {
+        requestId = m_isHandle ? m_core->request("flush", this, callback(f), {m_prefix})
+                               : m_core->flush(this, callback(f));
+    });
     return QString::number(requestId);
 }
 QString ConfigQmlStore::close(const QJSValue &f) {

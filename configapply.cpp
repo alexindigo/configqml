@@ -77,12 +77,14 @@ void ConfigWorker::prepareApplyConfirmation(const QString &source,
     }
 }
 ConfigApplyCapture *ConfigWorker::applyCapture(const ConfigCommand &command) {
-    if (!command.applyAttempt || !command.applyAttempt->expected)
+    if (!command.applyAttempt)
+        return nullptr;
+    const auto expected = command.applyAttempt->expected;
+    if (!expected)
         return nullptr;
     checkApplyCaptures();
     auto found = m_applyCaptures.find(command.applyAttempt->ownerId);
-    if (found == m_applyCaptures.end() || !command.applyAttempt->expected->valid ||
-        found->witness.lock() != command.applyAttempt->expected)
+    if (found == m_applyCaptures.end() || !expected->valid || found->witness.lock() != expected)
         return nullptr;
     return &found.value();
 }
@@ -104,11 +106,13 @@ void ConfigWorker::rememberApply(const ConfigCommand &command, const QList<Confi
     m_applyCaptures[command.applyAttempt->ownerId] = std::move(capture);
 }
 void ConfigWorker::reconcileApplyRejection(const ConfigCommand &command) {
-    if (!command.input || !command.applyAttempt || !command.applyAttempt->expected)
+    if (!command.input || !command.applyAttempt)
+        return;
+    const auto expected = command.applyAttempt->expected;
+    if (!expected)
         return;
     auto found = m_applyCaptures.find(command.applyAttempt->ownerId);
-    if (found == m_applyCaptures.end() || found->witness.lock() != command.applyAttempt->expected ||
-        !command.applyAttempt->expected->valid)
+    if (found == m_applyCaptures.end() || found->witness.lock() != expected || !expected->valid)
         return;
     for (auto it = command.input->pathGenerations.cbegin();
          it != command.input->pathGenerations.cend(); ++it) {

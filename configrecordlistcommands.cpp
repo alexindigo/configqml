@@ -106,6 +106,51 @@ quint64 ConfigStore::editRecordList(const QString &id, const ConfigRecordListEdi
     }
     return requestId;
 }
+void ConfigWorker::preserveMemberPlacements(const ConfigCommand &command) {
+    for (auto placement = m_overlayPlacements.begin(); placement != m_overlayPlacements.end();
+         ++placement) {
+        const auto capture = m_overlayCaptures.constFind(placement.key());
+        if (capture == m_overlayCaptures.cend())
+            continue;
+        const auto &selection = capture->selection;
+        const auto affects = [&](const QString &policyId) {
+            return m_listPolicies.value(policyId).path == selection.ownerPath;
+        };
+        bool memberEdit = false, structuralEdit = false;
+        for (const auto &edit : command.listEdits->edits) {
+            if (edit.op == ConfigRecordListEdit::Op::Transfer ||
+                edit.op == ConfigRecordListEdit::Op::Copy) {
+                structuralEdit |=
+                    affects(edit.destination.policyId) ||
+                    (edit.op == ConfigRecordListEdit::Op::Transfer && affects(edit.from.policyId));
+                continue;
+            }
+            const auto policy =
+                m_listPolicies.value(edit.at ? edit.at->policyId : command.policyId);
+            if (policy.path != selection.ownerPath)
+                continue;
+            if (edit.op != ConfigRecordListEdit::Op::Set &&
+                edit.op != ConfigRecordListEdit::Op::Unset) {
+                structuralEdit = true;
+                continue;
+            }
+            memberEdit = true;
+            const auto depth = policy.listPath.size() + 1;
+            if (depth < selection.entryPath.size()) {
+                const auto &child = selection.entryPath[depth];
+                structuralEdit |=
+                    child.kind != ConfigValueSelector::Kind::Key || child.key == edit.field;
+            }
+        }
+        if (memberEdit && !structuralEdit) {
+            // An admitted member-only batch preserves row mapping even if its
+            // values happen to exchange. Identity/presence/raw-address checks in
+            // overlayPlacementToken still run, and editor fences stay frozen.
+            placement->ownerValue =
+                m_layers->unmaskedValue(selection.ownerPath).value_or(QVariant());
+        }
+    }
+}
 void ConfigWorker::recordListCommand(const ConfigCommand &command) {
     auto result = resultFor(command);
     result.policyId = command.policyId;
@@ -295,6 +340,7 @@ void ConfigWorker::recordListCommand(const ConfigCommand &command) {
         coverInput(command);
         acceptIntent(input);
         recordPersistent(input, before);
+        preserveMemberPlacements(command);
         scheduleAutoSave();
         result.status = "admitted";
         result.maskedBy = m_layers->info(policy.path).maskedBy;

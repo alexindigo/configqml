@@ -109,6 +109,37 @@ across save boundaries produces three ordered captures/publications, not one
 coalesced value. Every completion is asynchronous, signal before callback, and
 delivered in request order. The callback is detached before consumer reentry.
 
+`saveSelected(paths, callback)` publishes only already-admitted persistent intent
+inside an explicit nonempty array of segment-array leaves/namespaces:
+
+```qml
+const values = owner.values; // Dynamic schema namespaces use a var handle.
+values.ui.scale = 1.6;
+owner.saveSelected([["ui", "scale"]], function(result) {
+    console.log(result.status);
+});
+owner.reset(["ui", "scale"], "user");
+owner.saveSelected([["ui", "scale"]], callback);
+```
+
+Paths on namespace handles are relative to that handle; drafts, previews,
+read-only and detached handles cannot use this operation. Use `[[]]` to select
+the current namespace explicitly; `[]` is invalid, not shorthand for root save.
+Invalid path shapes, undeclared/atomic-member/nonwritable paths and duplicate
+selections return failed `save-selection` receipts without publishing. An
+overlapping retained/stopped group refuses before publication; unrelated groups
+are excluded without failing the receipt or changing their Retry state.
+
+The request ID, asynchronous signal-before-callback delivery and receipt fields
+are unchanged. Operation is `saveSelected`; `coverage` is selected attempted
+intent and `coveredRevisions` only actual confirmed sources, not every source in
+the store. `saved` is a bounded promise, `nothing_to_save` means no eligible
+selected work, and partial/uncertain outcomes remain failed. Other ordinary
+pending work retains normal autosave behavior. This neither stages new edits nor
+creates a retained workflow. See [worker.md](worker.md#selected-publication) for
+the native signature and reset/unknown-data fences. Root `save`, `flush` and
+`close` retain their existing full-prefix contract.
+
 `flush()` publishes its captured prefix and awaits earlier work. `close()` seals
 ingress at that prefix, flushes it, then releases the worker after ordered
 completion. Later writes fail visibly. Read-only stores never write on these
@@ -196,7 +227,7 @@ stable file format or disk durability claim.
 
 QML exposes `values`, `ready`, `status` (Loading/Ready/Error/Closing/Closed),
 `error`, `info(path)`, `setUser`, `setRuntime`, `reset`, `clearRuntime`, `save`,
-`flush`, `close`, `completed(result)` and `inputRejected(path, code)`. Optional
+`saveSelected`, `flush`, `close`, `completed(result)` and `inputRejected(path, code)`. Optional
 callbacks are ordinary JS functions. Request IDs/prefixes/generations in the
 QML result/info maps are decimal strings to avoid eventual counter rounding.
 
