@@ -49,7 +49,7 @@ Bounded [evidence backlogs](docs/strict-files.md) retain acquired bytes across f
 ## Install
 
 Arch Linux package: `qt6-configqml` (AUR; publication follows the first release).
-It depends on `qt6-base` and `qt6-declarative`, with CMake/Ninja for building.
+It depends on `qt6-base` and `qt6-declarative`, with CMake and make for building.
 Rebuild on Qt minor bumps: the isolated QML metadata adapter uses private QtCore
 API and currently requires exact Qt **6.12.0**. See
 [distribution](docs/distribution.md) for package layout and compatibility.
@@ -57,7 +57,7 @@ API and currently requires exact Qt **6.12.0**. See
 From a source archive, inside your build VM:
 
 ```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+cmake -S . -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
 cmake --build build --parallel 4
 sudo cmake --install build
 ```
@@ -71,7 +71,7 @@ Use C++17 and Qt **6.12** on Linux. The production target links only Qt Core;
 Qt Test is used by the test executables. With an installed package:
 
 ```cmake
-find_package(configqml 0.5.0 REQUIRED COMPONENTS Core)
+find_package(configqml 0.5.1 REQUIRED COMPONENTS Core)
 target_link_libraries(myapp PRIVATE configqml::core)
 ```
 
