@@ -63,13 +63,19 @@ as whole values. Missing override means `{}`; present null/nonobject override is
 an error. Optional absent leaves stay absent. Null, false, zero, empty string,
 empty list and empty dictionary retain their normal descriptor semantics.
 
-`top_level_omit_equal` compares each present edited top-level key to the captured
-base using schema-domain equality. Equal keys are omitted; a different key keeps
-its whole edited value, not a recursively sparse difference. An absent edited key
-does not create a deletion tombstone for shared settings. An empty difference
-removes the override field. Unknown existing top-level overrides remain owned on
-the worker and survive known-field edits without dynamic namespace properties;
-unknown members within atomic known values follow normal schema preservation.
+`top_level_omit_equal` applies only to explicitly edited declared keys. The worker
+starts with the original stored overrides and updates only those checked edits,
+never reconstructing overrides from displayed effective values. An explicit set
+equal to the captured base (schema-domain equality), or explicit `unset`, removes
+that key's override. A different set keeps its whole atomic value, not a
+recursively sparse difference. Namespace groups route edits to their selected
+leaves; they do not turn an edit into a replacement of their unedited siblings.
+Untouched known overrides survive verbatim, including equal-to-base values, so a
+later base change cannot change their inheritance ownership. Unknown existing
+overrides likewise survive without dynamic namespace properties; unknown members
+within explicitly edited atomic values follow normal schema preservation.
+Removal never creates a deletion tombstone for shared settings. An empty override
+map removes the override field.
 Explicit `resetOverrides` removes the entire override field, including opaque
 siblings. Neither command saves the base store.
 
@@ -123,9 +129,9 @@ erase newer local values. Admission rejection restores the effective value and
 completes that write with `failed`. Repeated writes, including writes while a save
 is in flight, stay in worker order and never use the editor's busy fence.
 
-The worker merges the current base/override and applies `top_level_omit_equal`
-on admission. Equal-to-base top-level values remain omitted; unknown existing
-top-level overrides and opaque owner siblings survive. `unset(relativeLeafPath)`
+The worker applies `top_level_omit_equal` only to each explicit live edit on
+admission. An explicit equal-to-base set is omitted; all untouched known/unknown
+overrides and opaque owner siblings survive. `unset(relativeLeafPath)`
 removes that leaf's override and reads the inherited base value (or absence).
 It returns a Boolean ingress result. Groups cannot be assigned or unset.
 

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Overlay Apply and live writes preserve untouched stored overrides, including
+  values equal to the base. Equal omission now applies only to explicit edits;
+  unrelated edits no longer silently change future inheritance. Namespace-leaf
+  edits preserve sibling overrides and whole-overlay Reset is unchanged.
+
 ## [0.5.1] - 2026-11-17
 
 ### Added
