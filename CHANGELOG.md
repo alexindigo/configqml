@@ -2,20 +2,45 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-19
+
 ### Added
+
+Draft Reset can now remain private and cancelable until Apply. Native worker
+resolution reveals the actual lower layers without inventing default values.
 
 - Native and QML draft `stageReset` stages selected user-override removal until
   Apply. Worker-resolved values and preview-backed overlays reveal actual lower
   layers, masks, absence and whole-source fallback; Discard cancels unapplied work.
   Removal Apply uses selected publication and retains existing failed-work Retry.
-  Existing reset/unset operations, ordinary drafts and 0.5.x ABI remain unchanged.
+  Existing reset/unset operations, ordinary drafts and 0.5.x ABI remain unchanged
+  (`5493451`).
 
 ### Fixed
+
+Overlay persistence preserves ownership of untouched overrides instead of
+recomputing it from displayed values. Failed selected Apply also waits for
+explicit Retry rather than scheduling its own autosave.
 
 - Overlay Apply and live writes preserve untouched stored overrides, including
   values equal to the base. Equal omission now applies only to explicit edits;
   unrelated edits no longer silently change future inheritance. Namespace-leaf
-  edits preserve sibling overrides and whole-overlay Reset is unchanged.
+  edits preserve sibling overrides and whole-overlay Reset is unchanged
+  (`6941cbc`).
+- Failed selected Apply no longer re-arms autosave; successful selected saves
+  still resume ordinary pending work (`9d0e417`).
+
+### Verification
+
+Installed native/QML consumers and compatibility gates now retain explicit
+baseline/candidate identities and check behavioral failures rather than setup
+failures. Normal source and installed consumer behavior remain unchanged.
+
+- Add durable staged-reset consumer and mutation gates (`d3ae73a`).
+- Bind installed/ABI receipts, actual QML module origins and driver refusals
+  to the tested delivery (`9d0e417`).
+- Validate retained overlay consumers and reject quoted wide numeric tokens
+  (`547f983`).
 
 ## [0.5.1] - 2026-11-17
 
@@ -295,7 +320,8 @@
 - Native/QML quick starts, executable standalone examples, complete shipped
   contracts and technical release gates.
 
-[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/alexindigo/configqml/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/alexindigo/configqml/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/alexindigo/configqml/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/alexindigo/configqml/compare/v0.3.0...v0.4.0

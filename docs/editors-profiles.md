@@ -90,7 +90,7 @@ Successful apply refreshes the preview from the settled effective store. Apply's
 normal save covers the already-reported store prefix, including earlier accepted
 user writes. Autosave never sees un-applied draft edits.
 
-### Staged writable-user override removal (unreleased 0.5.x)
+### Staged writable-user override removal (0.5.2)
 
 Drafts expose the explicit asynchronous operation
 `stageReset(paths, callback)` (native: `stageReset(const QList<ConfigPath> &,
