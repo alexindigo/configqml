@@ -47,10 +47,11 @@ def validate(profile):
         raise RuntimeError("wrong guest workspace")
     if Path(os.environ.get("TMPDIR", "")).resolve() != workspace / "tmp":
         raise RuntimeError("TMPDIR must be the disk-backed task tmp directory")
-    filesystem = subprocess.check_output(["findmnt", "-T", str(workspace), "-n", "-o", "FSTYPE"],
-                                         text=True).strip()
-    if filesystem in ("tmpfs", "ramfs") or not filesystem:
-        raise RuntimeError("workspace must be disk-backed")
+    for path in (workspace, Path(os.environ["TMPDIR"]).resolve()):
+        filesystem = subprocess.check_output(["findmnt", "-T", str(path), "-n", "-o", "FSTYPE"],
+                                             text=True).strip()
+        if filesystem in ("tmpfs", "ramfs") or not filesystem:
+            raise RuntimeError(f"workspace and TMPDIR must be disk-backed: {path}")
     return workspace
 
 
@@ -74,6 +75,17 @@ def build_consumers(args, out):
         out / "clients-configure.log")
     run(["cmake", "--build", str(build), "--parallel", "2"], out / "clients-build.log")
     return build
+
+
+def run_qml(command, output, prefix, env):
+    traced = dict(env, LD_DEBUG="files")
+    text = run(command, output, traced)
+    loaded = {Path(path).resolve() for path in
+              re.findall(r"calling init:\s*(\S*libconfigqmlplugin\.so)\s", text)}
+    expected = (prefix / "lib/qt6/qml/ConfigQml/libconfigqmlplugin.so").resolve(strict=True)
+    if loaded != {expected}:
+        raise RuntimeError(f"QML module origin mismatch: expected {expected}, loaded {loaded}")
+    return text
 
 
 def focused_contract(args, out):
@@ -105,11 +117,13 @@ def baseline(args, out):
     text = run([str(build / "old-native"), "cold", str(native)], out / "cold.log", env)
     assert "OLD_NATIVE_COLD: EXPLICIT_DEFAULT_STILL_PRESENT" in text
     (out / "qml.json").write_text('{"n":9}')
-    text = run([str(build / "import-only"), str(args.source / "tests/staged_reset/baseline.qml"),
-                str(out)], out / "qml.log", env)
+    text = run_qml([str(build / "import-only"), str(args.source / "tests/staged_reset/baseline.qml"),
+                    str(out)], out / "qml.log", args.prefix, env)
     assert "OLD_QML_BASELINE: DRAFT_RESET_REFUSED" in text
     assert "OLD_QML_BASELINE: DEFAULT_ASSIGNMENT_NOT_REMOVAL" in text
     assert json.loads((out / "qml.json").read_text()) == {"n": 1}
+    run([str(build / "old-native"), "cold", str(out / "qml.json")],
+        out / "qml-native-cold.log", env)
     links = run(["ldd", str(build / "import-only")], out / "import-linkage.log", env)
     assert "libconfigqml" not in links
     links = run(["ldd", str(build / "old-native")], out / "native-linkage.log", env)
@@ -143,8 +157,8 @@ def installed(args, out):
     (out / "user.json").write_text('{"n":9}')
     (out / "legacy-reset.json").write_text('{"n":7,"other":8}')
     for mode in ("apply", "cold"):
-        run([str(build / "import-only"), str(args.source / "tests/tst_draft_reset.qml"),
-             str(out), mode], out / f"qml-{mode}.log", env)
+        run_qml([str(build / "import-only"), str(args.source / "tests/tst_draft_reset.qml"),
+                 str(out), mode], out / f"qml-{mode}.log", args.prefix, env)
     assert json.loads((out / "user.json").read_text()) == {}
     (out / "shapes-user.json").write_text(json.dumps({
         "flag": True, "zero": 9, "text": "chosen", "list": ["chosen"],
@@ -159,8 +173,8 @@ def installed(args, out):
         "emptyRecord": {}, "map": {}, "nullable": None,
     }))
     for mode in ("apply", "cold"):
-        run([str(build / "import-only"), str(args.source / "tests/staged_reset/shapes.qml"),
-             str(out), mode], out / f"qml-shapes-{mode}.log", env)
+        run_qml([str(build / "import-only"), str(args.source / "tests/staged_reset/shapes.qml"),
+                 str(out), mode], out / f"qml-shapes-{mode}.log", args.prefix, env)
     assert json.loads((out / "shapes-user.json").read_text()) == {"outsideUnknown": False}
     links = run(["ldd", str(build / "new-native")], out / "native-linkage.log", env)
     assert str(args.prefix / "lib/libconfigqml_core.so.0.5") in links
@@ -169,6 +183,11 @@ def installed(args, out):
         "fixtures": manifest(args.source / "tests/staged_reset"),
         "libraries": manifest(args.prefix), "clients": manifest(build),
         "qml_fixture": digest(args.source / "tests/tst_draft_reset.qml"),
+        "source": json.loads((args.source / "delivery-manifest.json").read_text()),
+    }, indent=2) + "\n")
+    workspace = Path(json.loads(args.profile.read_text())["workspace"])
+    (workspace / "candidate-consumers.json").write_text(json.dumps({
+        "prefix": str(args.prefix), "libraries": manifest(args.prefix),
         "source": json.loads((args.source / "delivery-manifest.json").read_text()),
     }, indent=2) + "\n")
     print("STAGED_RESET_INSTALLED: PASS")
@@ -184,6 +203,13 @@ def abi(args, out):
         assert path.is_relative_to(workspace) and digest(path) == expected
     old = Path(receipt["root"])
     baseline_prefix = workspace / "prefix-base"
+    if args.prefix.resolve() == baseline_prefix.resolve():
+        raise RuntimeError("ABI candidate must not be the baseline prefix")
+    candidate = json.loads((workspace / "candidate-consumers.json").read_text())
+    if (args.prefix.resolve() != Path(candidate["prefix"]).resolve() or
+            manifest(args.prefix) != candidate["libraries"] or
+            json.loads((args.source / "delivery-manifest.json").read_text()) != candidate["source"]):
+        raise RuntimeError("ABI candidate does not match the verified installed delivery")
     baseline_manifest = json.loads((old / "manifest.json").read_text())
     if manifest(baseline_prefix) != baseline_manifest["libraries"]:
         raise RuntimeError("baseline installed library/header identity changed")
@@ -219,8 +245,8 @@ def abi(args, out):
     run([str(old / "clients/old-native"), "baseline", str(path)], out / "old-native.log", env)
     run([str(old / "clients/old-native"), "cold", str(path)], out / "old-cold.log", env)
     (out / "qml.json").write_text('{"n":9}')
-    text = run([str(old / "clients/import-only"), str(old / "baseline.qml"), str(out)],
-               out / "old-qml.log", env)
+    text = run_qml([str(old / "clients/import-only"), str(old / "baseline.qml"), str(out)],
+                   out / "old-qml.log", args.prefix, env)
     assert "OLD_QML_BASELINE: DRAFT_RESET_REFUSED" in text
     assert json.loads((out / "qml.json").read_text()) == {"n": 1}
     links = run(["ldd", str(old / "clients/old-native")], out / "old-runtime-linkage.log", env)
@@ -230,6 +256,25 @@ def abi(args, out):
         "candidate_clients": manifest(build),
     }, indent=2) + "\n")
     print("STAGED_RESET_ABI: PASS")
+
+
+def require_canary_assertion(name, consumer, result):
+    expected = {
+        "default-assignment": ('draft->value({"settings", "n"}).toInt()', '7'),
+        "null-assignment": ('staged.status', 'QString("staged")'),
+        "store-reset-at-stage": ('staged.status', 'QString("staged")'),
+        "nullopt-as-absence": ('draft->value({"settings", "n"}).toInt()', '7'),
+        "drop-unknown-sibling": ('draft->value({"settings", "n"}).toInt()', '1'),
+        "stale-reply": ('draft->value({"settings", "n"}).toInt()', '13'),
+        "root-publication": ('readFile(dir.filePath("outside.json"))', 'QByteArray("{\\"n\\":4}")'),
+    }
+    failures = re.findall(r"FAIL!\s+: DraftResetTest::([^\n]+)", result.stdout)
+    actual = re.search(r"Actual\s+\((.*)\)\s*:", result.stdout)
+    wanted = re.search(r"Expected\s+\((.*)\)\s*:", result.stdout)
+    if (result.returncode != 1 or len(failures) != 1 or
+            not failures[0].startswith(consumer + "()") or not actual or not wanted or
+            (actual[1], wanted[1]) != expected[name]):
+        raise RuntimeError(f"mutation did not fail its designated behavioral assertion: {name}")
 
 
 def canaries(args, out):
@@ -286,9 +331,7 @@ def canaries(args, out):
         result = subprocess.run([str(build / "test_draft_reset"), consumer], text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
         (root / "consumer-red.log").write_text(result.stdout)
-        if result.returncode != 1 or not re.search(r"FAIL!\s+: DraftResetTest::" + consumer,
-                                                   result.stdout):
-            raise RuntimeError(f"mutation did not fail its consumer assertion: {name}")
+        require_canary_assertion(name, consumer, result)
         run([str(build / "test_editors"), "detachedCoherentAndReopened"], root / "no-removal-control.log")
         records.append({"name": name, "consumer": consumer, "exit": result.returncode,
                         "source_manifest": digest(root / "source-manifest.json")})
@@ -297,11 +340,20 @@ def canaries(args, out):
 
 
 def main():
+    if not __debug__:
+        raise RuntimeError("gate requires Python assertions; run without -O/PYTHONOPTIMIZE")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("baseline", "canaries", "abi", "installed"))
     for name in ("profile", "source", "baseline", "build", "baseline-build", "prefix", "output"):
         parser.add_argument("--" + name, type=Path, required=name in ("profile", "source", "output"))
     args = parser.parse_args()
+    required = {
+        "baseline": ("prefix", "baseline"), "installed": ("prefix", "build"),
+        "abi": ("prefix",), "canaries": ("build",),
+    }
+    for name in required[args.mode]:
+        if getattr(args, name) is None:
+            parser.error(f"{args.mode} requires --{name}")
     for key, value in vars(args).items():
         if isinstance(value, Path):
             setattr(args, key, value.resolve())
@@ -309,6 +361,8 @@ def main():
     for value in vars(args).values():
         if isinstance(value, Path) and not value.resolve().is_relative_to(workspace):
             raise RuntimeError(f"path outside owned guest workspace: {value}")
+    if args.output.is_relative_to(args.source):
+        raise RuntimeError("output must be outside the source tree")
     args.output.mkdir(parents=True, exist_ok=False)
     if args.mode == "baseline":
         baseline(args, args.output)

@@ -1249,7 +1249,7 @@ void ConfigWorker::finishSave() {
     }
     post(publish(m_saveResult));
     m_busy = false;
-    if (m_save.selectsPublication() && !m_dirty.isEmpty())
+    if (m_save.selectsPublication() && m_saveResult.status != "failed" && !m_dirty.isEmpty())
         scheduleAutoSave();
     if (closing)
         m_closed = true;

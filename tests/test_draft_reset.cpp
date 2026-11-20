@@ -355,6 +355,32 @@ private slots:
         QVERIFY(!draft->dirty());
         QVERIFY(!decodeJsonValue(readFile(dir.filePath("user.json"))).value.toMap().contains("n"));
     }
+    void failedRemovalDoesNotResumeAutosave() {
+        QTemporaryDir dir;
+        const auto file = dir.filePath("user.json");
+        writeFile(file, "{\"n\":9,\"other\":10}");
+        const auto original = readFile(file);
+        auto o = options(dir.path());
+        o.autoSave = true;
+        o.autoSaveInterval = 25;
+        auto fail = std::make_shared<std::atomic_bool>(true);
+        o.fileFault = [fail](const QString &phase, const QString &) {
+            return fail->load() && phase == "write" ? QString("staged-reset-fault") : QString();
+        };
+        ConfigStore store(o);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *draft = store.draft({{"settings", "n"}});
+        QCOMPARE(request(store, [&] { return draft->stageReset({{}}); }).status, QString("staged"));
+        QCOMPARE(request(store, [&] { return draft->apply(); }).status, QString("failed"));
+        const auto inputs = store.inputs().size();
+        fail->store(false);
+        QTest::qWait(250);
+        QCOMPARE(readFile(file), original);
+        QVERIFY(draft->dirty());
+        QCOMPARE(request(store, [&] { return draft->apply(); }).status, QString("saved"));
+        QCOMPARE(store.inputs().size(), inputs);
+        QVERIFY(!decodeJsonValue(readFile(file)).value.toMap().contains("n"));
+    }
     void shapesPresenceAndAtomicRemoval() {
         QTemporaryDir dir;
         auto record = D::leaf(T::Record, QVariantMap{{"label", "schema"}});

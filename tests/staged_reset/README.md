@@ -8,6 +8,10 @@ DMI UUID, account, workspace and filesystem before running consumers.
 
 `../staged_reset_gate.py` takes a mode and explicit paths. Output directories
 must be new; prior failures are retained, not overwritten.
+`baseline` requires `--prefix` and `--baseline`; `installed` requires `--prefix`
+and `--build`; `abi` requires `--prefix` after a successful `installed` run;
+`canaries` requires `--build`. Outputs must be outside the source tree. Python
+optimization is refused so endpoint assertions cannot be disabled.
 
 | # | Mode | Endpoint |
 | --- | --- | --- |
@@ -20,6 +24,10 @@ The installed QML process links only QtCore/QtQml. Runtime import/link paths
 select the private installed prefix, not the source/build tree or another
 configqml installation. `manifest.json` records fixture, binary, library and
 source hashes; the baseline receipt protects old-consumer identity.
+The installed receipt binds the ABI candidate's complete prefix and source
+delivery identity. ABI refuses the baseline as its candidate. QML witnesses
+verify the actual loaded plugin path through the guest dynamic loader, not just
+the requested import-path setting.
 
 The driver also requires the three registered staged-reset CTest entries to
 exist and pass. A gate prints its `STAGED_RESET_*` success marker only after
