@@ -249,6 +249,11 @@ bool ConfigWorker::prepareSelected(const ConfigCommand &command) {
     if (!valid || !result.unresolvedGroups.isEmpty()) {
         result.status = "failed";
         result.error = {valid ? "unresolved-group" : "save-selection", {}, command.operation};
+        if (command.input) {
+            coverInput(command);
+            result.rejectedPathGenerations = command.input->pathGenerations;
+            reconcileApplyRejection(command);
+        }
         post(publish(result));
         return false;
     }
@@ -274,7 +279,7 @@ QList<ConfigPendingIntent> ConfigWorker::eligibleIntents(const QString &source,
                 result.append(intent);
         }
     }
-    if (command.operation == "saveSelected") {
+    if (command.selectsPublication()) {
         const auto eligible = result;
         result.clear();
         for (const auto &intent : eligible) {
@@ -297,12 +302,13 @@ QList<ConfigPendingIntent> ConfigWorker::eligibleIntents(const QString &source,
 QList<ConfigPendingIntent>
 ConfigWorker::sourceFenceIntents(const QString &source, const ConfigCommand &command,
                                  const QList<ConfigPendingIntent> &selected) const {
-    if (command.operation != "saveSelected")
+    if (!command.selectsPublication())
         return selected;
     // Selection bounds publications, not a pending source's strict capture.
     // Retained reservations keep their existing separate publication policy.
     auto ordinary = command;
     ordinary.operation = "save";
+    ordinary.applyAttempt.reset();
     return eligibleIntents(source, ordinary);
 }
 void ConfigWorker::recordPersistentEdit(const ConfigRoute &route, const ConfigPath &path,
@@ -392,14 +398,14 @@ void ConfigWorker::confirmed(const QString &id, const QVariantMap &raw,
         if (!intent.edit.pruneEmpty)
             continue;
         bool pendingFragments = false;
-        if (m_save.operation == "saveSelected")
+        if (m_save.selectsPublication())
             for (const auto &fragment : m_intents.value(id))
                 pendingFragments |= !fragment.edit.pruneEmpty && fragment.input == intent.input &&
                                     startsWith(fragment.path, intent.path) &&
                                     !ids.contains(fragment.id);
         // A newer value may intentionally recreate this namespace. Cleanup
         // settles with its original fragments, not the final raw emptiness.
-        if ((m_save.operation == "saveSelected" ? !pendingFragments : !reserved(intent.path)) ||
+        if ((m_save.selectsPublication() ? !pendingFragments : !reserved(intent.path)) ||
             !valueAt(raw, intent.edit.path) || valueAt(raw, intent.edit.path)->toMap().isEmpty())
             ids.insert(intent.id);
     }

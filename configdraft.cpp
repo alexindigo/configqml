@@ -37,6 +37,7 @@ ConfigDraft::ConfigDraft(ConfigStore *store, const QList<ConfigPath> &paths, QOb
     : QObject(parent), m_store(store), m_schema(store->schema()) {
     m_changes = std::make_unique<ConfigChangePublisher>();
     m_previewChanges = std::make_unique<ConfigChangePublisher>();
+    new ConfigDraftState(this);
     store->m_changes->add(this, [this](const auto &) { prepareStoreChange(); });
     if (store->status() != ConfigStore::Status::Ready) {
         m_error = "not-ready";
@@ -66,6 +67,7 @@ ConfigDraft::ConfigDraft(ConfigStore *store, const QList<ConfigPath> &paths, QOb
     connect(store, &ConfigStore::published, this, &ConfigDraft::observe);
 }
 ConfigDraft::~ConfigDraft() {
+    ConfigDraftState::get(this)->reset();
     closePreviewScopes();
     // Scoped preview consumers must observe closure before QObject::destroyed
     // reaches their native detached/status forwarding connections.
@@ -79,6 +81,9 @@ QVariant ConfigDraft::previewValue(const ConfigPath &path) const {
     if (!m_store || !m_base.contains(path))
         return {};
     const auto edit = m_edits.constFind(path);
+    const auto state = ConfigDraftState::get(this);
+    if (state->hasRemovals() && (edit == m_edits.cend() || !edit.value()))
+        return state->live(path);
     return edit == m_edits.cend() ? m_store->value(path) : edit.value().value_or(QVariant());
 }
 QVariant ConfigDraft::previewPresentation(const ConfigPath &path) const {
@@ -123,6 +128,8 @@ void ConfigDraft::closePreviewScopes() {
 }
 QVariant ConfigDraft::value(const ConfigPath &path) const {
     const auto edit = m_edits.constFind(path);
+    if (edit != m_edits.cend() && !edit.value())
+        return ConfigDraftState::get(this)->frozen(path);
     return edit == m_edits.cend() ? m_base.value(path) : edit.value().value_or(QVariant());
 }
 QVariant ConfigDraft::presentation(const ConfigPath &path) const {
@@ -143,9 +150,13 @@ ConfigOperation ConfigDraft::setValue(const ConfigPath &path, const QVariant &va
         return {false,
                 {m_schema.diagnostics().make(path, m_busy ? "draft-busy" : "outside-draft")}};
     const auto ownedPath = ownPath(path);
+    const bool resolve = ConfigDraftState::get(this)->hasRemovals();
     m_edits[ownedPath] = checked.value;
     m_presentations.remove(ownedPath);
-    publishPreview();
+    if (resolve)
+        ConfigDraftState::get(this)->resolve(m_edits, false);
+    else
+        publishPreview();
     ConfigConsumerGuard boundary(this);
     if (prepareChanges({ownedPath}) &&
         boundary.invoke([&] { emit previewValuesChanged({ownedPath}); }) &&
@@ -161,9 +172,13 @@ ConfigOperation ConfigDraft::setValue(const ConfigAdmission &value) {
     if (!valid() || m_busy || !m_base.contains(path))
         return {false,
                 {m_schema.diagnostics().make(path, m_busy ? "draft-busy" : "outside-draft")}};
+    const bool resolve = ConfigDraftState::get(this)->hasRemovals();
     m_edits[path] = checked.value;
     m_presentations.remove(path);
-    publishPreview();
+    if (resolve)
+        ConfigDraftState::get(this)->resolve(m_edits, false);
+    else
+        publishPreview();
     ConfigConsumerGuard boundary(this);
     if (prepareChanges({path}) && boundary.invoke([&] { emit previewValuesChanged({path}); }) &&
         boundary.invoke([&] { emit valuesChanged({path}); }))
@@ -209,11 +224,14 @@ void ConfigDraft::observe() {
             this, {{m_changes.get(), {}}, {m_previewChanges.get(), selected}}) ||
         !boundary.invoke([&] { emit previewValuesChanged(selected); }))
         return;
+    if (ConfigDraftState::get(this)->takeValuesChanged() &&
+        !boundary.invoke([&] { emit valuesChanged(selected); }))
+        return;
     if (stateChange)
         boundary.invoke([&] { emit stateChanged(); });
 }
 quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
-    if (!valid() || m_busy)
+    if (!valid() || m_busy || !ConfigDraftState::get(this)->settled())
         return 0;
     m_busy = true;
     if (m_applyId.isEmpty())
@@ -221,6 +239,9 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
     auto attempt = std::make_shared<ConfigApplyAttempt>();
     attempt->ownerId = m_applyId;
     attempt->expected = m_admitted;
+    attempt->selectedPublication = ConfigDraftState::get(this)->hasRemovals();
+    for (const auto &edit : m_admittedEdits)
+        attempt->selectedPublication |= !edit.has_value();
     const auto edits = m_edits;
     const QPointer<ConfigDraft> guard(this);
     const QPointer<QObject> target(context ? context : this);
@@ -235,6 +256,7 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
                 guard->m_admitted.reset();
                 guard->m_admittedEdits.clear();
                 guard->closePreviewScopes();
+                ConfigDraftState::get(guard)->reset();
                 guard->m_edits.clear();
                 guard->m_conflicted = false;
                 guard->refresh();
@@ -299,6 +321,7 @@ bool ConfigDraft::discard() {
     if (!valid() || m_busy)
         return false;
     closePreviewScopes();
+    ConfigDraftState::get(this)->reset();
     m_admitted.reset();
     m_admittedEdits.clear();
     m_edits.clear();

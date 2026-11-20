@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Native and QML draft `stageReset` stages selected user-override removal until
+  Apply. Worker-resolved values and preview-backed overlays reveal actual lower
+  layers, masks, absence and whole-source fallback; Discard cancels unapplied work.
+  Removal Apply uses selected publication and retains existing failed-work Retry.
+  Existing reset/unset operations, ordinary drafts and 0.5.x ABI remain unchanged.
+
 ### Fixed
 
 - Overlay Apply and live writes preserve untouched stored overrides, including

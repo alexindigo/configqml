@@ -55,6 +55,8 @@ ConfigOverlayPresentation presentation(const QString &id, const ConfigOverlayCap
 }
 } // namespace
 QList<ConfigPath> ConfigWorker::commandPaths(const ConfigCommand &command) const {
+    if (command.draft)
+        return command.draft->paths;
     if (command.preview)
         return command.preview->paths;
     if (command.operation == "overlayLease" && command.overlay) {
@@ -204,6 +206,13 @@ void ConfigWorker::overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransac
                 detached.sensitive |=
                     m_options.schema.descriptor(s.basePath.mid(0, depth))->sensitive;
             c.schema = ConfigSchema(detached);
+            QMap<ConfigPath, QVariant> previewValues;
+            bool removal = false;
+            if (preview)
+                for (const auto &edit : preview->edits)
+                    removal |= !edit.has_value();
+            if (removal)
+                previewValues = draftCandidate(*m_layers, preview->paths, preview->edits, t->error);
             for (const auto &relative : c.schema.leaves()) {
                 const auto path = s.basePath + relative;
                 const auto fence = m_previous.information.value(path);
@@ -211,7 +220,8 @@ void ConfigWorker::overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransac
                 c.baseIngress[path] = m_endpoint->revision(path);
                 if (fence.latestInput > fence.workerCovered)
                     t->error = "unsettled-overlay-base";
-                const auto value = preview && preview->edits.contains(path)
+                const auto value = removal ? previewValues.value(path)
+                                   : preview && preview->edits.contains(path)
                                        ? preview->edits.value(path).value_or(QVariant())
                                        : m_previous.values.value(path);
                 if (value.isValid())

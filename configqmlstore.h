@@ -53,7 +53,10 @@ public:
     Status status() const;
     bool ready() const { return status() == Ready; }
     QString error() const {
-        return m_overlay ? m_overlay->error() : m_core ? m_core->error() : m_error;
+        return m_overlay ? m_overlay->error()
+               : m_draft ? m_draft->error()
+               : m_core  ? m_core->error()
+                         : m_error;
     }
     ConfigStore *core() const { return m_core; }
     bool dirty() const { return m_overlay ? m_overlay->dirty() : m_draft && m_draft->dirty(); }
@@ -95,6 +98,7 @@ public:
     QObject *preview();
     Q_INVOKABLE ConfigQmlStore *previewScope(const QStringList &path);
     Q_INVOKABLE QString apply(const QJSValue &callback = {});
+    Q_INVOKABLE QString stageReset(const QVariantList &paths, const QJSValue &callback = {});
     Q_INVOKABLE bool discard();
     Q_INVOKABLE QString openOverlay(const QJSValue &options, const QJSValue &callback = {});
     Q_INVOKABLE QString resetOverrides(const QJSValue &callback = {});

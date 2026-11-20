@@ -462,6 +462,7 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
     QList<QPair<QPointer<ConfigOverlayEditor>, ConfigOverlayEditor::InstalledChange>>
         overlayNotifications;
     QList<ConfigChangePublisher::Change> preparations{{m_changes.get(), changed}};
+    ConfigDraftState::install(this, packet, preparations);
     for (const auto &p : packet.overlays) {
         if (packet.result && packet.result->operation == "openOverlay" &&
             packet.result->status == "opened" && p.editorId == packet.result->editorId &&

@@ -33,6 +33,13 @@ The following describes production key provenance and the audited boundaries.
 | 19 | Uncertain own publications | Worker-owned source/owner keys retain exact output and predecessor preimages, attempted intent IDs and a minimal owned request/group/attempt snapshot, not an input or overlay graph. Watch admission and Retry share the record; successful confirmation retires or causally advances it, and group release removes its owner record. |
 | 20 | Admitted editor Apply recovery | The worker owns checked edits, selected raw-source facts and causal fences for a weakly held draft/frozen-overlay witness. A one-shot command hands off immutable accepted metadata before ordered completion; only an atomic invalidation flag is shared later. Consumers keep their checked edits, not raw source graphs. Confirmed own IO advances only verified causal fences. Expired witnesses are reclaimed on publication; discard/detach cannot cancel admitted persistence. |
 
+Staged draft removal retains frozen/current candidate layers only on the worker.
+The worker applies the complete checked optional-valued edit map and returns only
+selected immutable presentations. Private QObject child state routes lifetime,
+request and epoch-fenced replies without changing exported class layout; it owns
+no raw layers, source graph or evaluator. Staging creates no input/intent,
+persistence or application projection effect.
+
 Environment/descriptor compilation has temporary lookup tables over its inputs;
 only owned output paths/values and the frozen schema cross the compilation
 boundary. ConfigDescriptor remains an application construction value; ConfigSchema

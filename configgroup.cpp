@@ -92,6 +92,8 @@ quint64 ConfigStore::importProfile(const QString &file, const QList<ConfigPath> 
 }
 void ConfigWorker::processGroup(const ConfigCommand &inputCommand) {
     auto command = inputCommand;
+    if (command.selectsPublication() && !prepareSelected(command))
+        return;
     const auto input = command.input.value_or(ConfigInput{});
     const bool retry = command.applyAttempt && command.applyAttempt->expected;
     auto fences = input.fences;

@@ -40,6 +40,9 @@ strict captures despite a new file inode/mtime. See [strict files](docs/strict-f
 
 Runtime instance writers use [live overlays](docs/overlay-editors.md#runtime-live-writers-050).
 Shared edits feed [draft preview views](docs/editors-profiles.md#live-preview-views-050).
+Draft `stageReset(paths, callback)` (unreleased additive 0.5.x API) previews native
+user-override removal without touching the store or files until Apply; Discard
+keeps it cancelable. Existing store Reset and overlay unset stay unchanged.
 Overlay [placementToken](docs/overlay-editors.md#handles-receipts-and-lifetime) tracks observable row moves.
 [`copyValue`](docs/worker-qml.md#explicit-detached-copies-050) provides detached mutable copies without losing exact numeric atoms.
 BINDABLE state and checked namespace bindings share coherent
