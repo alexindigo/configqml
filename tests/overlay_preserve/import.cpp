@@ -8,6 +8,7 @@
 #include <QJsonObject>
 #include <QQmlComponent>
 #include <QQmlEngine>
+#include <QRegularExpression>
 #include <QTimer>
 #include <cstdio>
 #include <memory>
@@ -67,8 +68,10 @@ int main(int argc, char **argv) {
                             .toObject();
     if (!stored.contains("count") || stored.value("count").toInt(-1) != 0 ||
         !stored.contains("pages") || !stored.value("pages").toArray().isEmpty() ||
-        !stored.value("opaque").toObject().contains("wide") ||
-        !bytes.contains("18446744073709551615"))
+        !stored.value("opaque").toObject().value("wide").isDouble() ||
+        !QRegularExpression(QStringLiteral("\"wide\"\\s*:\\s*18446744073709551615(?=\\s*[,}])"))
+             .match(QString::fromUtf8(bytes))
+             .hasMatch())
         return 9;
     std::puts(cold ? "INSTALLED_QML_COLD: PASS" : "INSTALLED_QML_PRESERVATION: PASS");
 }

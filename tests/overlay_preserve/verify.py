@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-or-later
-"""Installed-prefix/old-client/ABI proof. Run only in an authorized project VM."""
+"""Installed-prefix/old-client/ABI proof. Run only in an authorized project VM.
+
+Prerequisites: the caller installs prefix-base and prefix-candidate and retains
+consumer-base/{layout,overlay-preserve,import-only}, built against prefix-base
+before candidate installation. Never rebuild those retained baseline witnesses
+against the candidate. This driver builds only the new candidate consumers.
+"""
 import hashlib
 import json
 import os
@@ -28,6 +34,10 @@ def main():
     subprocess.run(["systemd-detect-virt", "--vm"], check=True)
     baseline = workspace / "prefix-base"
     candidate = workspace / "prefix-candidate"
+    for name in ("layout", "overlay-preserve", "import-only"):
+        binary = workspace / "consumer-base" / name
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            raise RuntimeError(f"missing retained baseline consumer: {binary}")
     output = workspace / "artifacts" / "installed-abi"
     output.mkdir(exist_ok=False)
     environment = os.environ.copy()
