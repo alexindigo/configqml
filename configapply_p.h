@@ -15,6 +15,7 @@ struct ConfigApplyWitness {
 struct ConfigApplyAttempt {
     QString ownerId;
     bool publicationFence = false;
+    bool selectedPublication = false;
     std::shared_ptr<ConfigApplyWitness> expected, admitted;
 };
 struct ConfigApplyCapture {

@@ -38,6 +38,7 @@ struct ConfigWorkerPacket {
     // Absent means unchanged; an engaged empty snapshot is authoritative.
     std::optional<ConfigGroupSnapshot> retainedGroups;
     QList<ConfigOverlayPresentation> overlays;
+    QList<ConfigDraftPresentation> drafts;
     QMap<ConfigPath, QMap<quint64, ConfigModelPlan>> models;
     qint64 planningNanos = 0;
 };
@@ -68,7 +69,11 @@ struct ConfigCommand {
     QString editorId;
     QMap<ConfigPath, std::optional<QVariant>> overlayEdits;
     std::shared_ptr<const ConfigDraftPreview> preview;
+    std::shared_ptr<const ConfigDraftRequest> draft;
     std::shared_ptr<ConfigApplyAttempt> applyAttempt;
+    bool selectsPublication() const {
+        return operation == "saveSelected" || (applyAttempt && applyAttempt->selectedPublication);
+    }
     QList<ConfigEvidenceReference> preflightEvidence;
 };
 struct ConfigPendingIntent {
@@ -124,6 +129,7 @@ public:
     void overlayDetach(const QString &editorId);
     void overlayScopeClosed(const std::shared_ptr<std::atomic_bool> &lifetime);
     void draftPreview(const std::shared_ptr<const ConfigDraftPreview> &preview);
+    void releaseDraft(const std::shared_ptr<std::atomic_bool> &lifetime);
     void overlayControl(const std::function<void(ConfigWorker &)> &message);
     void holdOverlayLeases(bool hold);
     qsizetype heldOverlayLeases() const { return m_overlayPaused.size(); }
@@ -204,6 +210,18 @@ private:
     void armWatches();
     void scheduleAutoSave();
     void processGroup(const ConfigCommand &command);
+    void resolveDraft(const ConfigCommand &command);
+    QList<ConfigDraftPresentation> draftPresentations();
+    QMap<ConfigPath, QVariant>
+    draftCandidate(const ConfigLayers &base, const QList<ConfigPath> &paths,
+                   const QMap<ConfigPath, std::optional<QVariant>> &edits, QString &error) const;
+    struct DraftCapture {
+        std::shared_ptr<const ConfigDraftRequest> request;
+        std::shared_ptr<const ConfigLayers> frozen;
+        QMap<ConfigPath, QVariant> frozenValues, liveValues;
+    };
+    QMap<QString, DraftCapture> m_draftCaptures;
+    QList<ConfigDraftPresentation> m_draftPackets;
     void overlayCommand(const ConfigCommand &command);
     void overlayAcquire(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
     void overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransaction> &transaction);

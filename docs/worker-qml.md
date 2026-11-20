@@ -254,6 +254,22 @@ notification and coherent publication; they do not defer it to a timer.
 
 ## Value-copy and tooling boundaries
 
+Draft facades additionally expose `stageReset(paths, callback)` as an unreleased
+additive 0.5.x operation. Paths are relative to the facade and must be a nonempty
+array of selected declared leaves/namespaces; `[[]]` explicitly selects the draft's
+existing leaves. The asynchronous result has operation `stageReset`, status
+`staged | failed`, identity and value-free errors, not persistence coverage.
+Only Apply can publish that removal. No staging call enters ordinary setters,
+store Reset, save, intent allocation or projection-effect delivery.
+
+Worker resolution holds the draft busy. A later accepted set with removal intent
+still present triggers another full worker candidate resolution; the setter
+signature stays synchronous, attempted input survives failure, and Apply cannot
+use an unchecked candidate. Native `draft.error()` and the draft facade's error
+report candidate-resolution failure. Draft values, live preview and preview-scope
+overlay bases share native candidate semantics, not default literals or absent
+nullopt placeholders. See [staged removal](editors-profiles.md#staged-writable-user-override-removal-unreleased-05x).
+
 Property-origin list/index/length/mutator edits, attached JS local references,
 atomic record nested edits and namespace leaf writes reach real setters. A QML
 `property var/list` copy, component copy or raw Repeater modelData is detached:

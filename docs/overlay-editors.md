@@ -49,6 +49,14 @@ draft Apply/discard or destruction closes existing preview scopes and produces
 Error/`overlay-owner`, never implicit retargeting. See
 [editors-profiles.md](editors-profiles.md#live-preview-views-050).
 
+For draft `stageReset`, that base is the native complete removal candidate, not
+absence or a schema-default substitute. Removing a final user key can reactivate
+`fallbackFor` for every selected inherited leaf, while unknown raw siblings keep
+it suppressed. Later sets and foreign publications re-evaluate the same worker
+resolver. Frozen draft values keep their checked baseline; the overlay's live
+base follows current unedited inputs without thawing the draft's Apply fences.
+Staging itself never publishes the shared store or the placement owner.
+
 Value paths are arrays of exactly `{key: string}` or `{index: integer}` segments.
 Indices are nonnegative safe integers; policy-only `{each:true}` is not an edit
 address. Keys are opaque, with no dot/slash interpretation. Nested screen-like

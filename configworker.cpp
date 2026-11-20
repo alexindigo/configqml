@@ -508,6 +508,7 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
     m_previous.generation = m_generation;
     m_previous.inputPrefix = m_prefix;
     checkApplyCaptures();
+    packet.drafts = draftPresentations();
     overlayNotify();
     packet.admitted = std::make_shared<const ConfigSnapshot>(m_previous);
     packet.sourceStates = m_sourceStates;
@@ -708,6 +709,10 @@ void ConfigWorker::process(const ConfigCommand &command) {
         draftPreview(command.preview);
         return;
     }
+    if (command.draft) {
+        resolveDraft(command);
+        return;
+    }
     if (command.operation == "retainGroup" || command.operation == "saveGroup" ||
         command.operation == "retryGroup" || command.operation == "releaseGroup") {
         retainedGroupCommand(command);
@@ -828,7 +833,7 @@ void ConfigWorker::freezeOrdinary(const QString &id, const ConfigJsonTransaction
         }
 }
 void ConfigWorker::beginSave(const ConfigCommand &command) {
-    if (command.operation == "saveSelected" && !prepareSelected(command))
+    if (command.selectsPublication() && !prepareSelected(command))
         return;
     m_autoTimer->stop();
     m_json->beginPublication();
@@ -904,7 +909,7 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
                 quint64 through = 0;
                 for (const auto &intent : intents)
                     if (!reserved(path) &&
-                        (command.operation != "saveSelected" ||
+                        (!command.selectsPublication() ||
                          std::any_of(
                              command.selection.cbegin(), command.selection.cend(),
                              [&](const auto &selection) { return startsWith(path, selection); })) &&
@@ -918,7 +923,7 @@ void ConfigWorker::beginSave(const ConfigCommand &command) {
     for (const auto &id : m_pendingEvidence.keys())
         if ((command.groupToken.isEmpty() ||
              m_groups.value(command.groupToken).bases.contains(id)) &&
-            (command.operation != "saveSelected" ||
+            (!command.selectsPublication() ||
              std::any_of(command.selection.cbegin(), command.selection.cend(),
                          [&](const auto &selection) {
                              const auto prefix = m_routes.value(id).prefix;
@@ -1188,7 +1193,7 @@ void ConfigWorker::finishSave() {
     if (m_saveResult.status.isEmpty())
         m_saveResult.status = m_savePublished ? "saved" : "nothing_to_save";
     if (m_saveResult.status != "failed" && m_save.groupToken.isEmpty() &&
-        m_save.operation != "saveSelected" && m_saveResult.excludedGroups.isEmpty())
+        !m_save.selectsPublication() && m_saveResult.excludedGroups.isEmpty())
         m_saveResult.coveredRevisions = m_revisions;
     const bool refusal = m_unresolvedSave && m_saveResult.status != "failed";
     if (refusal) {
@@ -1244,7 +1249,7 @@ void ConfigWorker::finishSave() {
     }
     post(publish(m_saveResult));
     m_busy = false;
-    if (m_save.operation == "saveSelected" && !m_dirty.isEmpty())
+    if (m_save.selectsPublication() && !m_dirty.isEmpty())
         scheduleAutoSave();
     if (closing)
         m_closed = true;

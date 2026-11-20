@@ -135,6 +135,7 @@ private:
     friend class ConfigWorker;
     friend class ConfigStoreTestAccess;
     friend class ConfigDraft;
+    friend class ConfigDraftState;
     friend class ConfigStoreHandle;
     friend class ConfigOverlayEditor;
     quint64 overlayRequest(ConfigOverlayEditor *editor, const QString &operation, QObject *context,

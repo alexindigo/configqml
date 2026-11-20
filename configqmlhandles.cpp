@@ -178,6 +178,22 @@ QString ConfigQmlStore::apply(const QJSValue &function) {
     ConfigConsumerGuard(this).invoke([&] { id = m_draft->apply(this, callback(function)); });
     return QString::number(id);
 }
+QString ConfigQmlStore::stageReset(const QVariantList &paths, const QJSValue &function) {
+    if (!m_core || !m_draft || !m_writable || m_isPreview || m_overlay || m_draft->busy()) {
+        reject({}, "not-an-idle-draft");
+        return {};
+    }
+    bool ok = false;
+    QList<ConfigPath> selection;
+    ConfigConsumerGuard boundary(this);
+    if (!boundary.invoke([&] { selection = selectedPaths(paths, &ok); }) || !m_core || !m_draft)
+        return {};
+    if (!ok || paths.isEmpty())
+        selection.clear();
+    quint64 id = 0;
+    boundary.invoke([&] { id = m_draft->stageReset(selection, this, callback(function)); });
+    return QString::number(id);
+}
 bool ConfigQmlStore::discard() {
     if (!m_draft || !m_core)
         return false;

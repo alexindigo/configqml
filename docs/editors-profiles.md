@@ -90,6 +90,55 @@ Successful apply refreshes the preview from the settled effective store. Apply's
 normal save covers the already-reported store prefix, including earlier accepted
 user writes. Autosave never sees un-applied draft edits.
 
+### Staged writable-user override removal (unreleased 0.5.x)
+
+Drafts expose the explicit asynchronous operation
+`stageReset(paths, callback)` (native: `stageReset(const QList<ConfigPath> &,
+QObject *context = nullptr, ConfigStore::Callback = {})`). It removes selected
+user overrides from a temporary candidate, not from the store or files:
+
+```qml
+const editor = shared.draft([["settings"]]);
+editor.stageReset([["settings", "width"]], function(result) {
+    // operation: "stageReset", status: "staged" or "failed"; not a save receipt.
+});
+// editor.discard() cancels; editor.apply(callback) publishes.
+```
+
+The selection must be nonempty; `[[]]` explicitly selects all leaves already
+selected by this draft. Namespace expansion never widens that draft selection
+and never removes unknown namespace siblings. Invalid, duplicate, outside-draft,
+nonwritable and atomic-member paths fail the entire stage without replacing any
+prior edits. Paths on QML scoped drafts are relative to the facade, while native
+draft paths remain absolute. Store, readonly, detached, overlay and preview
+facades do not support staging. Existing `reset` and overlay `unset` are unchanged.
+
+Only the ordered worker resolves the complete set/removal candidate through the
+native layers. A Reset can reveal legacy values, defaults, a higher-layer mask
+or true absence, and removing a final user key can reactivate whole-source
+`fallbackFor`. Unknown user siblings still suppress that fallback. Reset of an
+atomic Record/List/Map removes that entire setting, not its displayed children.
+Null and explicit equal/default-valued sets are values, never deletion tokens.
+
+While resolution is busy, Apply, further writes/Reset and discard are refused.
+After Reset, a later explicit set replaces removal intent and can change source
+fallback for other removed leaves, even without an open preview scope. That set
+is accepted synchronously; worker resolution holds busy until the complete
+checked presentation is installed. Failed resolution retains attempted input and
+the last checked removal presentation; Apply cannot use an unchecked candidate.
+
+Frozen removed values retain their checked candidate after a foreign change;
+live preview and preview-backed overlays resolve current unedited inputs with
+the same checked edits. Foreign publication still conflicts with Apply: preview
+refresh never thaws its fences. Untouched frozen values keep their prior behavior.
+
+Apply carrying removal intent (including its admitted-work Retry) publishes only
+the edited selection through the existing selected-save owner. Unrelated pending
+ordinary work and retained/stopped groups remain unpublished. Overlapping retained
+reservations refuse before admission; truthful per-source partial/uncertain
+outcomes and the existing admission witness still govern Retry. Drafts without
+removal keep their existing ordinary publication behavior.
+
 ### Live preview views (0.5.0)
 
 `draft.values` retains its frozen baseline. `draft.preview` is a separate,

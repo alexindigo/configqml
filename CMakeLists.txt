@@ -29,7 +29,7 @@ add_library(configqml_core SHARED configvalue.cpp configvalue.h configschema.cpp
 target_sources(configqml_core PRIVATE configprojection_p.h configprojection.cpp
     configprojection.h configsourceprojection_p.h configevidence_p.h configevidence.cpp configworkerevidence.cpp configsourceprovenance.cpp configapply_p.h configapply.cpp configchange_p.h
     configrecordlistpolicy.h configrecordlistpolicy.cpp configrecordlistcommands.cpp configretainedgroup.cpp
-    configlistmodel.h configlistmodel.cpp configdraft.h configdraft.cpp configgroup.cpp
+    configlistmodel.h configlistmodel.cpp configdraft.h configdraft.cpp configdraftpreview.cpp configgroup.cpp
     configstorehandle.h configstorehandle.cpp configmigration.cpp configjsonbackup.cpp
     configjsonpublication_p.h configjsonpublication.cpp)
 target_sources(configqml_core PRIVATE configoverlayeditor.h configoverlayeditor.cpp
@@ -129,7 +129,7 @@ include(CTest)
 if(BUILD_TESTING)
     configure_file(tests/generator.cmake.in test-generator.cmake @ONLY)
     find_package(Qt6 6.12 REQUIRED COMPONENTS Test Gui)
-    foreach(suite compact_events projections fallback_layers startup_policy record_list_policy record_list_containers unknown_data source_events retained_groups save_selected strict_conflicts pending_rebase evidence_backlog empty_shards overlay_editor string_pattern)
+    foreach(suite compact_events projections fallback_layers startup_policy record_list_policy record_list_containers unknown_data source_events retained_groups save_selected draft_reset strict_conflicts pending_rebase evidence_backlog empty_shards overlay_editor string_pattern)
         add_executable(test_${suite} tests/test_${suite}.cpp)
         target_link_libraries(test_${suite} PRIVATE configqml::core Qt6::Test)
         add_test(NAME ${suite} COMMAND test_${suite})
@@ -235,6 +235,18 @@ if(BUILD_TESTING)
             QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
             QML_EDITOR_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_editors.qml")
         add_test(NAME qml_editors COMMAND test_qml_editors)
+        add_executable(test_qml_draft_reset tests/test_qml_draft_reset.cpp)
+        target_link_libraries(test_qml_draft_reset PRIVATE configqml::configqml Qt6::Test)
+        target_compile_definitions(test_qml_draft_reset PRIVATE
+            QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
+            DRAFT_RESET_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_draft_reset.qml"
+            DRAFT_RESET_SHAPES="${CMAKE_CURRENT_SOURCE_DIR}/tests/staged_reset/shapes.qml")
+        add_test(NAME qml_draft_reset COMMAND test_qml_draft_reset)
+        add_test(NAME draft_reset_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
+            ${_configqml_qmllint_args} -I ${CMAKE_CURRENT_BINARY_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_draft_reset.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/staged_reset/baseline.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/staged_reset/shapes.qml)
         add_test(NAME editors_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
             ${_configqml_qmllint_args} -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_editors.qml)
         add_executable(test_qml_models tests/test_qml_models.cpp)
