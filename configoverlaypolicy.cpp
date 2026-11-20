@@ -114,18 +114,27 @@ static bool schemaEqual(const ConfigDescriptor &descriptor, const QVariant &a, c
 }
 QVariantMap overlayDifference(const ConfigSchema &schema, const QVariantMap &base,
                               const QVariantMap &edited, const QVariantMap &original) {
-    QVariantMap result;
-    const auto fields = schema.descriptor({})->fields;
-    for (auto it = original.cbegin(); it != original.cend(); ++it)
-        if (!fields.contains(it.key()))
-            result[it.key()] = it.value();
-    for (auto it = edited.cbegin(); it != edited.cend(); ++it) {
-        const auto descriptor = fields.constFind(it.key());
-        if (descriptor == fields.cend())
+    // Retain the private complete-authored-value symbol for binary compatibility.
+    // Overlay commands use the explicit-edit overload, never their presentation.
+    QMap<ConfigPath, std::optional<QVariant>> edits;
+    for (const auto &path : schema.leaves())
+        edits[path] = valueAt(edited, path);
+    return overlayDifference(schema, base, edits, original);
+}
+QVariantMap overlayDifference(const ConfigSchema &schema, const QVariantMap &base,
+                              const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                              const QVariantMap &original) {
+    auto result = original;
+    for (auto it = edits.cbegin(); it != edits.cend(); ++it) {
+        const auto descriptor = schema.descriptor(it.key());
+        if (!descriptor || descriptor->type == ConfigDescriptor::Type::Group)
             continue;
-        if (!base.contains(it.key()) ||
-            !schemaEqual(descriptor.value(), it.value(), base.value(it.key())))
-            result[it.key()] = it.value();
+        const auto inherited = valueAt(base, it.key());
+        if (!it.value() || (inherited && schemaEqual(*descriptor, *it.value(), *inherited))) {
+            if (valueAt(result, it.key()))
+                removeValue(result, it.key());
+        } else
+            putValue(result, it.key(), *it.value());
     }
     return result;
 }

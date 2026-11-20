@@ -94,6 +94,9 @@ bool overlayPlacementMoved(const QVariant &before, const QVariant &after,
                            const QList<ConfigValueSelector> &address, const QString &overrideKey);
 QVariantMap overlayDifference(const ConfigSchema &schema, const QVariantMap &base,
                               const QVariantMap &edited, const QVariantMap &original);
+QVariantMap overlayDifference(const ConfigSchema &schema, const QVariantMap &base,
+                              const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                              const QVariantMap &original);
 std::optional<QVariant> overlayAt(const QVariant &value, const QList<ConfigValueSelector> &path);
 std::optional<QVariant> overlayReplace(const QVariant &value,
                                        const QList<ConfigValueSelector> &path,

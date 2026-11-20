@@ -129,7 +129,7 @@ include(CTest)
 if(BUILD_TESTING)
     configure_file(tests/generator.cmake.in test-generator.cmake @ONLY)
     find_package(Qt6 6.12 REQUIRED COMPONENTS Test Gui)
-    foreach(suite compact_events projections fallback_layers startup_policy record_list_policy record_list_containers unknown_data source_events retained_groups save_selected strict_conflicts pending_rebase evidence_backlog empty_shards overlay_editor string_pattern)
+    foreach(suite compact_events projections fallback_layers startup_policy record_list_policy record_list_containers unknown_data source_events retained_groups save_selected strict_conflicts pending_rebase evidence_backlog empty_shards overlay_editor overlay_preserve string_pattern)
         add_executable(test_${suite} tests/test_${suite}.cpp)
         target_link_libraries(test_${suite} PRIVATE configqml::core Qt6::Test)
         add_test(NAME ${suite} COMMAND test_${suite})
@@ -194,6 +194,9 @@ if(BUILD_TESTING)
             add_test(NAME ${suite}_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
                 ${_configqml_qmllint_args} -I ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_${suite}.qml)
         endforeach()
+        add_test(NAME overlay_preserve_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
+            ${_configqml_qmllint_args} -I ${CMAKE_CURRENT_BINARY_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/overlay_preserve/consumer.qml)
         get_target_property(_qmllint Qt6::qmllint IMPORTED_LOCATION)
         add_test(NAME qml_lint_policy COMMAND ${CMAKE_COMMAND}
             -DQMLLINT=$<TARGET_FILE:Qt6::qmllint>

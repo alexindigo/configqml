@@ -501,21 +501,10 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         return;
     }
     const auto &source = liveWrite ? t->captured : *t->original;
-    auto edited = overlayMerge(source.baseValues, source.overrides).toMap();
-    for (auto it = t->edits.cbegin(); it != t->edits.cend(); ++it)
-        if (it.value())
-            putValue(edited, it.key(), *it.value());
-        else {
-            const auto inherited = liveWrite ? valueAt(source.baseValues, it.key()) : std::nullopt;
-            if (inherited)
-                putValue(edited, it.key(), *inherited);
-            else
-                removeValue(edited, it.key());
-        }
     const auto difference =
         t->operation == "overlayReset"
             ? QVariantMap{}
-            : overlayDifference(source.schema, source.baseValues, edited, source.overrides);
+            : overlayDifference(source.schema, source.baseValues, t->edits, source.overrides);
     auto record = overlayAt(t->captured.ownerValue, t->captured.rawEntryPath)->toMap();
     if (difference.isEmpty())
         record.remove(t->selection.overrideKey);
