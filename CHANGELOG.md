@@ -2,12 +2,25 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-21
+
 ### Fixed
 
 Retained QML bindings now observe optional leaves becoming absent in namespaces
 created after their owner is ready. Shared bindable initialization covers live
 Reset, staged Reset/Apply, draft previews, overlay unset and external file changes;
 absence remains distinct from null, false, zero and empty values.
+
+- Initialize shared namespace publication state and emit each changed leaf's
+  notification once, including Reset, Apply, overlay unset and external removal
+  (`59b7b3b`). Public API, ABI and persistence semantics remain unchanged.
+
+### Verification
+
+Installed consumer setup now requires an explicit import root instead of silently
+falling back to ambient QML modules. Normal runtime behavior is unchanged.
+
+- Refuse an empty installed QML import-root argument (`e44be63`).
 
 ## [0.5.2] - 2026-11-19
 
@@ -327,7 +340,8 @@ failures. Normal source and installed consumer behavior remain unchanged.
 - Native/QML quick starts, executable standalone examples, complete shipped
   contracts and technical release gates.
 
-[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/alexindigo/configqml/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/alexindigo/configqml/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/alexindigo/configqml/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/alexindigo/configqml/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/alexindigo/configqml/compare/v0.4.0...v0.5.0

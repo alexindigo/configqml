@@ -40,7 +40,7 @@ strict captures despite a new file inode/mtime. See [strict files](docs/strict-f
 
 Runtime instance writers use [live overlays](docs/overlay-editors.md#runtime-live-writers-050).
 Shared edits feed [draft preview views](docs/editors-profiles.md#live-preview-views-050).
-Draft `stageReset(paths, callback)` (unreleased additive 0.5.x API) previews native
+Draft `stageReset(paths, callback)` (since 0.5.2) previews native
 user-override removal without touching the store or files until Apply; Discard
 keeps it cancelable. Existing store Reset and overlay unset stay unchanged.
 Overlay [placementToken](docs/overlay-editors.md#handles-receipts-and-lifetime) tracks observable row moves.
@@ -51,7 +51,7 @@ Bounded [evidence backlogs](docs/strict-files.md) retain acquired bytes across f
 
 ## Install
 
-Arch Linux package: `qt6-configqml` (AUR; publication follows the first release).
+Arch Linux package: `qt6-configqml` (AUR).
 It depends on `qt6-base` and `qt6-declarative`, with CMake and make for building.
 Rebuild on Qt minor bumps: the isolated QML metadata adapter uses private QtCore
 API and currently requires exact Qt **6.12.0**. See
@@ -74,7 +74,7 @@ Use C++17 and Qt **6.12** on Linux. The production target links only Qt Core;
 Qt Test is used by the test executables. With an installed package:
 
 ```cmake
-find_package(configqml 0.5.2 REQUIRED COMPONENTS Core)
+find_package(configqml 0.5.3 REQUIRED COMPONENTS Core)
 target_link_libraries(myapp PRIVATE configqml::core)
 ```
 
