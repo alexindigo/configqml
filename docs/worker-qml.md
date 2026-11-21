@@ -59,6 +59,13 @@ sequence and path generation. An outstanding latest local write therefore rolls
 back to authoritative state before its failure callback; stale failures still
 cannot erase newer pending input. Retained evidence is separate from getters.
 
+Dynamic namespaces start their bindable publication state at the same effective
+value as their getter, including namespaces opened after the owner is Ready.
+Optional-leaf removal to `undefined` and later reappearance notify retained QML
+bindings just like present-value changes. This applies to scopes, drafts, live
+previews and both editor/live overlays, independent of how the change entered
+the native owner. Absence remains distinct from null, false, zero and empty values.
+
 A known higher-layer mask keeps the effective getter unchanged. For example,
 masked `push(4); push(5)` over `[3,1,2]` records `[3,1,2,4]` then `[3,1,2,5]` in
 the user layer, with `maskedBy` and `description: "masked by <layer>"`. Unmasked
