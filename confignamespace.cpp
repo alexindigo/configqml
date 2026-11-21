@@ -8,6 +8,7 @@
 #include <QQmlEngine>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 
 namespace configqml {
 // Compatibility bindables route binding-produced writes through the real setter.
@@ -15,7 +16,14 @@ namespace configqml {
 class ConfigNamespaceValue final : public QObject {
 public:
     ConfigNamespaceValue(ConfigQmlStore *store, ConfigPath path, QObject *parent)
-        : QObject(parent), m_store(store), m_path(std::move(path)) {}
+        : QObject(parent), m_store(store), m_path(std::move(path)) {
+        // Handles may be constructed after their owner is already Ready. The
+        // publication property must start at the same effective value as the
+        // getter, or its first transition to absence compares equal to the
+        // default-invalid QVariant and leaves existing binding observers stale.
+        prepare();
+        m_notify = false;
+    }
     QVariant read() const {
         (void)m_published.value();
         return m_store->read(m_path);
@@ -27,14 +35,17 @@ public:
     QUntypedBindable bindable();
     void prepare() {
         const auto value = m_store->read(m_path);
+        m_notify |= m_published.valueBypassingBindings() != value;
         m_value.setValueBypassingBindings(value);
         m_published.setValue(value);
     }
+    bool takeNotification() { return std::exchange(m_notify, false); }
 
 private:
     ConfigQmlStore *m_store;
     ConfigPath m_path;
     QProperty<QVariant> m_published;
+    bool m_notify = false;
     Q_OBJECT_COMPAT_PROPERTY_WITH_ARGS(ConfigNamespaceValue, QVariant, m_value,
                                        &ConfigNamespaceValue::write, nullptr,
                                        &ConfigNamespaceValue::read, QVariant())
@@ -106,7 +117,7 @@ public:
         for (const auto &path : paths)
             if (path.size() == m_path.size() + 1 && startsWith(path, m_path)) {
                 const auto index = m_names.indexOf(path.last());
-                if (index >= 0 && !m_groups[index] &&
+                if (index >= 0 && !m_groups[index] && m_properties[index]->takeNotification() &&
                     !boundary.invoke([&] { QMetaObject::activate(this, m_meta, index, nullptr); }))
                     return;
             }
