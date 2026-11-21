@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+Retained QML bindings now observe optional leaves becoming absent in namespaces
+created after their owner is ready. Shared bindable initialization covers live
+Reset, staged Reset/Apply, draft previews, overlay unset and external file changes;
+absence remains distinct from null, false, zero and empty values.
+
 ## [0.5.2] - 2026-11-19
 
 ### Added

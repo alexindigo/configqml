@@ -238,6 +238,15 @@ if(BUILD_TESTING)
             QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
             QML_EDITOR_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_editors.qml")
         add_test(NAME qml_editors COMMAND test_qml_editors)
+        add_executable(test_qml_absent_notification tests/test_qml_absent_notification.cpp)
+        target_link_libraries(test_qml_absent_notification PRIVATE configqml::configqml Qt6::Test)
+        target_compile_definitions(test_qml_absent_notification PRIVATE
+            QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
+            ABSENT_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_absent_notification.qml")
+        add_test(NAME qml_absent_notification COMMAND test_qml_absent_notification)
+        add_test(NAME absent_notification_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
+            ${_configqml_qmllint_args} -I ${CMAKE_CURRENT_BINARY_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_absent_notification.qml)
         add_executable(test_qml_draft_reset tests/test_qml_draft_reset.cpp)
         target_link_libraries(test_qml_draft_reset PRIVATE configqml::configqml Qt6::Test)
         target_compile_definitions(test_qml_draft_reset PRIVATE
