@@ -16,6 +16,14 @@
 #include <utility>
 using namespace configqml;
 
+namespace configqml {
+struct ConfigQmlStoreTestAccess {
+    static bool hasScriptPresentation(const ConfigQmlStore &store, const ConfigPath &path) {
+        return store.m_scriptPresentations.contains(path);
+    }
+};
+} // namespace configqml
+
 static_assert(
     std::is_same_v<decltype(std::declval<ConfigQmlStore &>().listModel({})), ConfigListModel *>);
 static_assert(
@@ -30,6 +38,29 @@ class QmlModelsTest : public QObject {
                 {"nested", QVariantMap{{"n", n}, {"items", QVariantList{1, 2}}}}};
     }
 private slots:
+    void collectionPreparationDoesNotReadPresentation() {
+        QQmlEngine engine;
+        engine.addImportPath(QML_IMPORT_ROOT);
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QML_MODEL_FIXTURE));
+        std::unique_ptr<QObject> root(component.create());
+        QVERIFY2(root, qPrintable(component.errorString()));
+        auto *store = root->property("store").value<ConfigQmlStore *>();
+        QTRY_VERIFY(store->ready());
+        QVERIFY(!ConfigQmlStoreTestAccess::hasScriptPresentation(*store, {"rows"}));
+        QVERIFY(store->read({"rows"}).isValid());
+        QVERIFY(ConfigQmlStoreTestAccess::hasScriptPresentation(*store, {"rows"}));
+        QVERIFY(store->write({"rows"}, QVariantList{row("new", "New", 9)}).accepted);
+        QVERIFY(!ConfigQmlStoreTestAccess::hasScriptPresentation(*store, {"rows"}));
+        QTRY_COMPARE(store->listModel({"rows"})->rowCount(), 1);
+        QVERIFY(!ConfigQmlStoreTestAccess::hasScriptPresentation(*store, {"rows"}));
+        const auto presented = store->read({"rows"}).toList();
+        QCOMPARE(presented.size(), 1);
+        QCOMPARE(presented.first().toMap().value("title").toString(), QString("New"));
+        QCOMPARE(presented.first().toMap().value("wide").toString(),
+                 QString("18446744073709551615"));
+        QVERIFY(ConfigQmlStoreTestAccess::hasScriptPresentation(*store, {"rows"}));
+        QCOMPARE(store->read({"rows"}), QVariant(presented));
+    }
     void borrowedModelKeys() {
         QQmlEngine engine;
         engine.addImportPath(QML_IMPORT_ROOT);

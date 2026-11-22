@@ -139,6 +139,9 @@ signals:
 
 private:
     friend class ConfigQmlOverlay;
+    friend struct ConfigQmlStoreTestAccess;
+    friend class ConfigNamespaceValue;
+    QVariant readValue(const ConfigPath &path, bool presentation) const;
     ConfigStore::Callback callback(const QJSValue &function);
     QJSEngine *scriptEngine() const;
     void reject(const ConfigPath &path, const QString &code);

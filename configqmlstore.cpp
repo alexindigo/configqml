@@ -264,21 +264,27 @@ ConfigStore::Callback ConfigQmlStore::callback(const QJSValue &function) {
         }
     }};
 }
-QVariant ConfigQmlStore::read(const ConfigPath &path) const {
+QVariant ConfigQmlStore::readValue(const ConfigPath &path, bool presentation) const {
     if (m_isPreview && !ready())
         return {};
     if (!m_core && !m_overlay)
         return {};
+    if (m_isPreview)
+        return presentation ? m_previewDraft->previewPresentation(path)
+                            : m_previewDraft->previewValue(path);
+    if (m_overlay)
+        return presentation ? m_overlay->presentation(path) : m_overlay->value(path);
+    if (m_draft)
+        return presentation ? m_draft->presentation(path) : m_draft->value(path);
+    return presentation ? m_core->presentation(path) : m_core->value(path);
+}
+QVariant ConfigQmlStore::read(const ConfigPath &path) const {
+    if ((m_isPreview && !ready()) || (!m_core && !m_overlay))
+        return {};
     const auto cached = m_scriptPresentations.constFind(path);
     if (cached != m_scriptPresentations.cend())
         return cached.value();
-    QVariant value;
-    if (m_isPreview)
-        value = m_previewDraft->previewPresentation(path);
-    else if (m_overlay)
-        value = m_overlay->presentation(path);
-    else if (m_core)
-        value = m_draft ? m_draft->presentation(path) : m_core->presentation(path);
+    const auto value = readValue(path, true);
     auto *engine = scriptEngine();
     if (!engine)
         return value;

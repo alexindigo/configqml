@@ -170,6 +170,13 @@ value. The first read builds it once; subsequent getters return shared value
 storage without walking or converting the list/map again. Stale publications and
 equal/masked writes cannot invalidate the visible presentation incorrectly.
 
+Namespace binding preparation compares cached native effective values, including
+absence, without reading or rebuilding a collection's script presentation. All
+live, frozen, preview and overlay adapters select the same native owner facts;
+only an actual getter requests presentation. An unread collection stays lazy
+through both local ingress and worker publication, while bound readers still
+observe the installed value before notifications and completion.
+
 Core schema validation owns, normalizes and validates in one schema-directed
 traversal. The QML adapter exposes a synchronous input view, not an intermediate
 QVariantList/QVariantMap tree for Core to recapture. Only the final admitted

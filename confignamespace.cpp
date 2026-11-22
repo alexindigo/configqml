@@ -34,7 +34,10 @@ public:
     }
     QUntypedBindable bindable();
     void prepare() {
-        const auto value = m_store->read(m_path);
+        // Publication compares cached native facts, not a script presentation.
+        // read() supplies the independently cached presentation only when read;
+        // tracking a binding or delivering NOTIFY must not convert a collection.
+        const auto value = m_store->readValue(m_path, false);
         m_notify |= m_published.valueBypassingBindings() != value;
         m_value.setValueBypassingBindings(value);
         m_published.setValue(value);
