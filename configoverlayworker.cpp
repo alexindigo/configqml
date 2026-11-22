@@ -128,7 +128,13 @@ bool ConfigWorker::overlayBlocked(const ConfigCommand &command) const {
             for (const auto &path : paths)
                 if (overlaps(path, selected))
                     return true;
-    // A bypass may never overtake an earlier command touching the same path.
+    // A bypass may never overtake independent earlier work touching the same
+    // path. A lease must, however, pass the complete queue dependency chain of
+    // an admission reservation: an earlier save can wait for that admission,
+    // with later disjoint inputs waiting behind the save. Source preflight can
+    // widen this lease to their paths (including a root legacy source). Waiting
+    // behind those indirectly reserved inputs would make admission wait on itself.
+    QList<ConfigPath> awaitingAdmission;
     for (const auto &earlier : m_queue) {
         if (&earlier == &command)
             break;
@@ -138,8 +144,14 @@ bool ConfigWorker::overlayBlocked(const ConfigCommand &command) const {
             for (const auto &transaction : m_overlayTransactions)
                 for (const auto &path : selected)
                     reserved |= overlaps(path, transaction->selection.ownerPath);
-        if (reserved)
-            continue; // Earlier work is itself awaiting an asynchronous admission.
+        if (leaseCommand)
+            for (const auto &waiting : awaitingAdmission)
+                for (const auto &path : selected)
+                    reserved |= overlaps(path, waiting);
+        if (reserved) {
+            awaitingAdmission.append(selected);
+            continue; // This command cannot run until an admission completes.
+        }
         for (const auto &a : selected)
             for (const auto &b : paths)
                 if (overlaps(a, b))

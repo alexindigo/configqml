@@ -163,6 +163,11 @@ through common checked admission/intent recording. Self/cyclic dependence fails
 Leases release by ordered messages after admission, before publication IO. No
 blocking cross-worker wait, nested event loop or handshake timeout is introduced.
 Close, detach, scope destruction and worker failure explicitly cancel the leases.
+Lease scheduling follows queue dependencies transitively: work behind a save
+waiting for overlay admission cannot itself prevent that admission's lease.
+This matters when preflight includes a root legacy source alongside writable
+shards. Independent earlier work and existing leases retain their ordering;
+ordinary concurrent writes and selected/full saves are not suppressed.
 This is not external-writer CAS or a two-file transaction; normal source preflight,
 strict-preimage, reservations, masks and publication evidence still apply.
 

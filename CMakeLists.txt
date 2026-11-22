@@ -189,11 +189,13 @@ if(BUILD_TESTING)
         add_dependencies(test_qml_generic_primitives configqmlplugin)
         target_compile_definitions(test_qml_generic_primitives PRIVATE
             QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
-            GENERIC_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_generic_primitives.qml")
+            GENERIC_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_generic_primitives.qml"
+            OVERLAY_COMPLETION_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_overlay_completion.qml")
         add_test(NAME qml_generic_primitives COMMAND test_qml_generic_primitives)
         add_test(NAME generic_primitives_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
             ${_configqml_qmllint_args} -I ${CMAKE_CURRENT_BINARY_DIR}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_generic_primitives.qml)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_generic_primitives.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_overlay_completion.qml)
         add_executable(test_qml_compact_events tests/test_qml_compact_events.cpp)
         add_dependencies(test_qml_compact_events configqmlplugin)
         target_link_libraries(test_qml_compact_events PRIVATE configqml::configqml Qt6::Test Qt6::QmlPrivate)

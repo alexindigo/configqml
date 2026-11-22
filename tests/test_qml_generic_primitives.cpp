@@ -16,6 +16,99 @@ using namespace configqml;
 class QmlGenericPrimitivesTest : public QObject {
     Q_OBJECT
 private slots:
+    void shardedMainEffectCompletion() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        compat::put(directory.filePath("settings.json"), "{}");
+        compat::put(
+            directory.filePath("bar.json"),
+            "{\"widgets\":{\"left\":[{\"id\":\"x\",\"instanceSettings\":{\"opaque\":\"selected\"}},"
+            "{\"id\":\"x\",\"instanceSettings\":{\"idleSeconds\":600,\"opaque\":\"sibling\"}},"
+            "{\"id\":\"x\",\"instanceSettings\":{\"opaque\":\"inherited\"}}]}}");
+        compat::put(directory.filePath("idle.json"),
+                    "{\"customCommands\":\"[]\",\"opaque\":false}");
+        compat::put(directory.filePath("hooks.json"),
+                    "{\"screenLock\":\"\",\"screenUnlock\":\"\"}");
+        QQmlEngine engine;
+        engine.addImportPath(QML_IMPORT_ROOT);
+        QQmlComponent component(&engine, QUrl::fromLocalFile(OVERLAY_COMPLETION_FIXTURE));
+        std::unique_ptr<QObject> root(
+            component.createWithInitialProperties({{"directory", directory.path()}}));
+        QVERIFY2(root, qPrintable(component.errorString()));
+        QTRY_VERIFY2(root->property("ready").toBool(),
+                     qPrintable(root->property("startupError").toString()));
+        QSignalSpy setup(root.get(), SIGNAL(setupFinished()));
+        QVERIFY(QMetaObject::invokeMethod(root.get(), "setup"));
+        QTRY_COMPARE(setup.size(), 1);
+        QCOMPARE(root->property("failure").toString(), QString());
+        QSignalSpy quit(root.get(), SIGNAL(quitFinished()));
+        QVERIFY(QMetaObject::invokeMethod(root.get(), "quit"));
+        QTRY_COMPARE(quit.size(), 1);
+        QSignalSpy effects(root.get(), SIGNAL(effectsFinished()));
+        QVERIFY(QMetaObject::invokeMethod(root.get(), "effects", Q_ARG(bool, false)));
+        QTRY_COMPARE(effects.size(), 1);
+        auto *owner = root->property("owner").value<ConfigQmlStore *>();
+        QVERIFY(owner);
+        ConfigStoreTestAccess::run(*owner->core(), [](auto &w) { w.holdInputs(true); });
+        QSignalSpy restored(root.get(), SIGNAL(restoreFinished()));
+        QVERIFY(QMetaObject::invokeMethod(root.get(), "restore"));
+        QCOMPARE(root->property("pending").toInt(), 1);
+        QVERIFY(root->property("boundEnabled").toBool());
+        ConfigStoreTestAccess::run(*owner->core(), [](auto &w) { w.holdInputs(false); });
+        QTRY_COMPARE_WITH_TIMEOUT(restored.size(), 1, 3000);
+        QTRY_COMPARE(effects.size(), 2);
+        QCOMPARE(root->property("pending").toInt(), 0);
+        QCOMPARE(root->property("restoredBinding").toInt(), 1);
+        QCOMPARE(root->property("failure").toString(), QString());
+        QCOMPARE(engine.toScriptValue(root->property("requests")).property("length").toInt(), 4);
+        QCOMPARE(engine.toScriptValue(root->property("callbacks")).toVariant(),
+                 engine.toScriptValue(root->property("requests")).toVariant());
+        const auto requests = engine.toScriptValue(root->property("requests"));
+        QVariantList expectedSignals;
+        for (int i = 1; i <= requests.property(3).toString().toInt(); ++i)
+            expectedSignals.append(QString::number(i));
+        QCOMPARE(engine.toScriptValue(root->property("signalsSeen")).toVariant().toList(),
+                 expectedSignals);
+        const auto bar =
+            ConfigJsonCodec().decode(compat::bytes(directory.filePath("bar.json")), "bar").raw;
+        const auto expectedBar =
+            ConfigJsonCodec()
+                .decode("{\"widgets\":{\"left\":[{\"id\":\"x\",\"instanceSettings\":{\"opaque\":"
+                        "\"selected\",\"idleSeconds\":450}},"
+                        "{\"id\":\"x\",\"instanceSettings\":{\"idleSeconds\":600,\"opaque\":"
+                        "\"sibling\"}},"
+                        "{\"id\":\"x\",\"instanceSettings\":{\"opaque\":\"inherited\"}}]}}",
+                        "bar")
+                .raw;
+        QCOMPARE(bar, expectedBar);
+        QCOMPARE(
+            ConfigJsonCodec().decode(compat::bytes(directory.filePath("idle.json")), "idle").raw,
+            (QVariantMap{{"customCommands", "[1]"}, {"opaque", false}}));
+        QCOMPARE(
+            ConfigJsonCodec().decode(compat::bytes(directory.filePath("hooks.json")), "hooks").raw,
+            (QVariantMap{{"screenLock", "kill"}, {"screenUnlock", "kill"}}));
+        QCOMPARE(compat::bytes(directory.filePath("settings.json")), QByteArray("{}"));
+        QMap<QString, QByteArray> persisted;
+        for (const auto &name : {"settings.json", "bar.json", "idle.json", "hooks.json"})
+            persisted[name] = compat::bytes(directory.filePath(name));
+        QCOMPARE(compat::request(*owner->core(), [&] { return owner->core()->close(); }).status,
+                 QString("nothing_to_save"));
+        root.reset();
+        QQmlEngine coldEngine;
+        coldEngine.addImportPath(QML_IMPORT_ROOT);
+        QQmlComponent coldComponent(&coldEngine, QUrl::fromLocalFile(OVERLAY_COMPLETION_FIXTURE));
+        std::unique_ptr<QObject> cold(coldComponent.createWithInitialProperties(
+            {{"directory", directory.path()}, {"readOnlySetup", true}}));
+        QVERIFY2(cold, qPrintable(coldComponent.errorString()));
+        QTRY_VERIFY(cold->property("ready").toBool());
+        QSignalSpy coldSetup(cold.get(), SIGNAL(setupFinished()));
+        QVERIFY(QMetaObject::invokeMethod(cold.get(), "setup"));
+        QTRY_COMPARE(coldSetup.size(), 1);
+        QVERIFY(cold->property("boundEnabled").toBool());
+        QCOMPARE(cold->property("failure").toString(), QString());
+        for (auto it = persisted.cbegin(); it != persisted.cend(); ++it)
+            QCOMPARE(compat::bytes(directory.filePath(it.key())), it.value());
+    }
     void pendingReplyImmediateConnectionAndRetention() {
         ConfigStoreOptions options;
         options.autoSave = false;
