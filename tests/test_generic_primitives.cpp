@@ -4,6 +4,7 @@
 #include "configjsoncodec.h"
 #include "configreadprojection.h"
 #include "configpendingreply_p.h"
+#include "confighandle_p.h"
 #include "configstorehandle.h"
 #include "storeprobe.h"
 #include <QSignalSpy>
@@ -18,6 +19,96 @@ using T = D::Type;
 class GenericPrimitivesTest : public QObject {
     Q_OBJECT
 private slots:
+    void generatedSelectionUsesDeclarations() {
+        auto absent = D(T::String);
+        absent.optional = true;
+        auto record = D::leaf(T::Record, QVariantMap{{"inside", 1}});
+        record.fields = {{"inside", D::leaf(T::SafeInteger, 0)}};
+        // This schema represents a plugin unknown at library build time. Lookup
+        // must use declarations even when no value/default has ever existed.
+        ConfigSchema schema(D::group(
+            {{"plugin.with/slashes", D::group({{"absent", absent},
+                                               {"read", D::leaf(T::Boolean, false)},
+                                               {"__proto__", record},
+                                               {"constructor", D::leaf(T::String, QString())}})},
+             {"outside", D::leaf(T::SafeInteger, 0)}}));
+        auto selected = ConfigSelection::capture(schema, {{}}, schema.leaves(),
+                                                 ConfigSelection::Target::UserLayer, "selection");
+        selected.lifetime = std::make_shared<std::atomic_bool>(true);
+        auto root = ConfigHandleSelection::capture(selected);
+        QVERIFY(root.valid());
+        QCOMPARE(root.scopes(), QStringList({"plugin.with/slashes"}));
+        QCOMPARE(root.fields(), QStringList({"outside"}));
+        const auto plugin = root.scope({"plugin.with/slashes"});
+        QVERIFY(plugin.valid());
+        QCOMPARE(plugin.fields(), QStringList({"__proto__", "absent", "constructor", "read"}));
+        QVERIFY(plugin.scopes().isEmpty());
+        const auto field = plugin.scope({"absent"});
+        QVERIFY(field.valid());
+        QCOMPARE(field.selection().target, selected.target);
+        QVERIFY(field.selection().matchesSchema(schema));
+        QCOMPARE(field.selection().lifetime, selected.lifetime);
+        QVERIFY(field.descriptor()->optional);
+        QVERIFY(!field.descriptor()->defaultValue);
+        QVERIFY(field.fields().isEmpty());
+        QVERIFY(field.scopes().isEmpty());
+        QVERIFY(!plugin.scope({"__proto__", "inside"}).valid());
+        QVERIFY(!root.scope({"plugin", "with/slashes"}).valid());
+        QVERIFY(!root.scope({"unknown"}).valid());
+        // Mutable copies cannot rewrite retained schema, capability or key data.
+        auto copied = *plugin.descriptor();
+        copied.fields.clear();
+        QCOMPARE(plugin.fields().size(), 4);
+        auto widened = field.selection();
+        widened.target = ConfigSelection::Target::RuntimeLayer;
+        QCOMPARE(field.selection().target, ConfigSelection::Target::UserLayer);
+    }
+    void generatedSelectionNeverWidens() {
+        ConfigSchema schema(D::group({{"a", D::group({{"first", D::leaf(T::SafeInteger, 1)},
+                                                      {"second", D::leaf(T::SafeInteger, 2)}})},
+                                      {"b", D::group({{"third", D::leaf(T::SafeInteger, 3)}})}}));
+        auto selected = ConfigSelection::capture(schema, {{"a", "first"}, {"b"}}, schema.leaves(),
+                                                 ConfigSelection::Target::ReadOnly, "selection");
+        auto root = ConfigHandleSelection::capture(selected);
+        const auto a = root.scope({"a"});
+        QVERIFY(a.valid());
+        QCOMPARE(a.fields(), QStringList({"first"}));
+        QCOMPARE(a.selection().leaves, QList<ConfigPath>({{"a", "first"}}));
+        QCOMPARE(a.selection().target, ConfigSelection::Target::ReadOnly);
+        QVERIFY(!a.scope({"second"}).valid());
+        QVERIFY(!a.scope({"b"}).valid());
+        const auto unionSelection = root.select({{"a"}, {"b", "third"}});
+        QVERIFY(unionSelection.valid());
+        QCOMPARE(unionSelection.selection().leaves, selected.leaves);
+        QCOMPARE(unionSelection.descriptor()->fields.value("a").fields.keys(),
+                 QStringList({"first"}));
+        QVERIFY(!root.select({}).valid());
+        QVERIFY(!root.select({{"a"}, {"a"}}).valid());
+        QVERIFY(!root.select({{"a", "second"}}).valid());
+        QVERIFY(!root.select({{"missing"}}).scope({}).valid());
+        auto bad = selected;
+        bad.leaves.append({"a", "first", "member"});
+        QVERIFY(!ConfigHandleSelection::capture(bad).valid());
+        auto replacement =
+            ConfigSelection::capture(ConfigSchema(*schema.descriptor({})), {{}}, schema.leaves(),
+                                     ConfigSelection::Target::ReadOnly, "selection");
+        replacement.schemaIdentity = selected.schemaIdentity;
+        QCOMPARE(ConfigHandleSelection::capture(replacement).error(), QString("handle-schema"));
+    }
+    void generatedSelectionOwnsBorrowedPaths() {
+        ConfigSchema schema(
+            D::group({{"group", D::group({{"field", D::leaf(T::String, QString())}})}}));
+        auto selection = ConfigSelection::capture(
+            schema, {{}}, schema.leaves(), ConfigSelection::Target::RuntimeLayer, "selection");
+        auto root = ConfigHandleSelection::capture(selection);
+        QChar groupStorage[] = {QChar('g'), QChar('r'), QChar('o'), QChar('u'), QChar('p')};
+        const auto group = QString::fromRawData(groupStorage, 5);
+        auto scoped = root.scope({group});
+        groupStorage[0] = QChar('x');
+        QCOMPARE(scoped.prefix(), ConfigPath({"group"}));
+        QCOMPARE(scoped.fields(), QStringList({"field"}));
+        QCOMPARE(scoped.selection().target, ConfigSelection::Target::RuntimeLayer);
+    }
     void pendingRefusalIsQueued() {
         std::unique_ptr<ConfigPendingReply> reply(
             ConfigPendingReplyState::refuse("unsupported-operation", "selection"));

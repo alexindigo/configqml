@@ -37,7 +37,8 @@ target_sources(configqml_core PRIVATE configoverlayeditor.h configoverlayeditor.
 target_sources(configqml_core PRIVATE configselection_p.h configedit_p.h
     configcandidate_p.h configcandidate.cpp configobservation.h configobservation_p.h
     configobservation.cpp configreadprojection.h configreadprojection_p.h configreadprojection.cpp
-    configpendingreply.h configpendingreply_p.h configpendingreply.cpp)
+    configpendingreply.h configpendingreply_p.h configpendingreply.cpp
+    confighandle_p.h confighandle.cpp)
 target_sources(configqml_core PRIVATE configworktiming_p.h configworktiming.cpp)
 add_library(configqml::core ALIAS configqml_core)
 set_target_properties(configqml_core PROPERTIES EXPORT_NAME core

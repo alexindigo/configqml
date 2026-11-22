@@ -182,3 +182,23 @@ payloads are engine-GC-reclaimable. Callbacks retain only guarded native pointer
 not engine values or a store-owned reply registry. Schema handles, edit opening,
 selected writer verbs, frozen-handle reads and their full compatibility matrix
 remain subsequent Phase 2/3 work.
+
+## Generated-handle selection foundation (Phase 2 increment)
+
+The private `ConfigHandleSelection` describes a generated handle's schema
+namespace and narrowed P1 selection. Group/leaf lookup and disjoint selections
+reuse the existing validator and retain schema identity, target, owner and lifetime.
+Opaque path segments, optional defaultless fields and names such as `read` or
+`__proto__` are declarations, never verb dispatch or inferred persisted fields.
+Records/Maps/Lists remain atomic leaves, including their declared descriptors.
+
+Child lookup and group expansion are restricted to the parent's allowed leaves;
+neither can widen a read-only target or a selected union. Invalid/empty/duplicate
+selections stay invalid rather than falling back to root. The selected descriptor
+contains only allowed declared children and is detached from caller mutation.
+This foundation performs no IO, value resolution, worker capture or input.
+
+It is not the public generated QObject graph yet. Lazy handle materialization,
+new native/QML root accessors, all reply-returning verbs and selected edit-session
+Apply/discard remain required; those adapters will use this identity instead of
+adding a parallel selection validator or configuration cache.
