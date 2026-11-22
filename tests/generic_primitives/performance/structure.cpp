@@ -22,6 +22,56 @@ using namespace configqml;
 class LayerStructureTest : public QObject {
     Q_OBJECT
 private slots:
+    void projectionLowerAssembly_data() { oneNamespaceAssembly_data(); }
+    void projectionLowerAssembly() {
+        QFETCH(int, leaves);
+        using D = ConfigDescriptor;
+        QMap<QString, D> fields;
+        QVariantMap raw, expected;
+        for (int i = 0; i < leaves; ++i) {
+            const auto key = "field" + QString::number(i);
+            fields[key] = D::leaf(D::Type::SafeInteger, 1);
+            raw[key] = 4;
+            expected[key] = qint64(4);
+        }
+        const ConfigSchema schema(D::group({{"group", D::group(fields)}}));
+        ConfigProjectionSpec projection;
+        projection.projectionId = "upper";
+        projection.sourceIds = {"upper"};
+        int calls = 0;
+        QVariantMap capturedLower;
+        projection.transform = [&](const ConfigProjectionInput &input) {
+            ++calls;
+            capturedLower = input.lowerValues;
+            ConfigProjectionResult result;
+            result.values = input.values;
+            result.compatibilityRaw = input.compatibilityRaw;
+            return result;
+        };
+        individualWrites = 0;
+        ConfigLayers layers(schema,
+                            {{"lower",
+                              ConfigLayerKind::File,
+                              ConfigAdmissionPolicy::FieldFallback,
+                              {{"lower", {"group"}, raw}},
+                              true},
+                             {"upper",
+                              ConfigLayerKind::File,
+                              ConfigAdmissionPolicy::FieldFallback,
+                              {{"upper", {"group"}, {{"field0", 8}}}},
+                              false}},
+                            {projection});
+        const auto perLeafWrites = individualWrites;
+        QVERIFY(layers.valid());
+        QCOMPARE(calls, 1);
+        QCOMPARE(capturedLower, expected);
+        expected["field0"] = qint64(8);
+        QCOMPARE(layers.effective(), (QVariantMap{{"group", expected}}));
+        QCOMPARE(layers.source("lower", "lower")->raw, raw);
+        qInfo() << "PROJECTION_TREE_STRUCTURE leaves=" << leaves
+                << "individual_writes=" << perLeafWrites;
+        QCOMPARE(perLeafWrites, quint64(0));
+    }
     void typedAtomicAndOpaqueLeaves() {
         using D = ConfigDescriptor;
         using T = D::Type;

@@ -227,6 +227,12 @@ leaf in every candidate/publication pass. `compare-performance.py` reports match
 legacy-workflow distributions separately from new handle/reply measurements and
 the unchanged caller/model budgets; its marker does not assert domain activation.
 
+Source projection uses that same namespace assembler for each lower-layer cut.
+The selected transform still receives the complete preceding layers (not earlier
+sources from its own layer), and source admission, rejection rollback and effects
+retain their existing ordering. Neither effective reads nor projection inputs
+rebuild a shared namespace one leaf at a time.
+
 The shared worker candidate resolver accepts explicit user-layer and runtime-layer
 selections. Both enter ConfigLayers' one transactional edit path: all checked
 set/remove operations are applied before source projections run once on the whole

@@ -171,6 +171,31 @@ QList<QPair<QString, ConfigDiagnostic>> ConfigLayers::takeProjectionDiagnostics(
     return diagnostics;
 }
 namespace {
+using EffectiveLeaf = QMap<ConfigPath, QVariant>::const_iterator;
+QVariantMap assembleNamespaces(EffectiveLeaf &leaf, const EffectiveLeaf &end,
+                               const ConfigPath &prefix) {
+    QVariantMap result;
+    while (leaf != end && startsWith(leaf.key(), prefix)) {
+        const auto key = leaf.key().at(prefix.size());
+        if (leaf.key().size() == prefix.size() + 1) {
+            // An atomic Record/Map/List is a value, never a namespace to merge.
+            result.insert(key, leaf.value());
+            ++leaf;
+        } else {
+            const auto nested = assembleNamespaces(leaf, end, prefix + ConfigPath{key});
+            result.insert(key, nested);
+        }
+    }
+    return result;
+}
+QMap<ConfigPath, QVariant> defaultLeaves(const ConfigSchema &schema) {
+    QMap<ConfigPath, QVariant> values;
+    const auto defaults = schema.defaults();
+    for (const auto &path : schema.leaves())
+        if (const auto value = valueAt(defaults, path))
+            values.insert(path, *value);
+    return values;
+}
 QVariantMap sourceOverlay(const ConfigDescriptor &descriptor, QVariantMap lower,
                           const QVariantMap &raw) {
     for (auto it = raw.cbegin(); it != raw.cend(); ++it) {
@@ -188,6 +213,7 @@ QList<ConfigDiagnostic> ConfigLayers::projectSources(const QList<LayerState> *pr
                                                      bool local) {
     QList<ConfigDiagnostic> failures;
     auto lower = m_schema.defaults();
+    auto lowerLeaves = defaultLeaves(m_schema);
     for (qsizetype layerIndex = 0; layerIndex < m_layers.size(); ++layerIndex) {
         auto &layer = m_layers[layerIndex];
         const auto lowerBefore = lower;
@@ -365,11 +391,12 @@ QList<ConfigDiagnostic> ConfigLayers::projectSources(const QList<LayerState> *pr
             }
             m_projectionDiagnostics.append(layerWarnings);
         }
-        lower = lowerBefore;
         for (const auto &state : layer.sources)
             if (participates(state))
                 for (auto it = state.admitted.cbegin(); it != state.admitted.cend(); ++it)
-                    putValue(lower, it.key(), it->value);
+                    lowerLeaves.insert(it.key(), it->value);
+        auto leaf = lowerLeaves.cbegin();
+        lower = assembleNamespaces(leaf, lowerLeaves.cend(), {});
     }
     return failures;
 }
@@ -554,36 +581,13 @@ ConfigOperation ConfigLayers::replaceAllSources(const QMap<QString, QList<Config
     return result;
 }
 
-namespace {
-using EffectiveLeaf = QMap<ConfigPath, QVariant>::const_iterator;
-QVariantMap assembleNamespaces(EffectiveLeaf &leaf, const EffectiveLeaf &end,
-                               const ConfigPath &prefix) {
-    QVariantMap result;
-    while (leaf != end && startsWith(leaf.key(), prefix)) {
-        const auto key = leaf.key().at(prefix.size());
-        if (leaf.key().size() == prefix.size() + 1) {
-            // An atomic Record/Map/List is a value, never a namespace to merge.
-            result.insert(key, leaf.value());
-            ++leaf;
-        } else {
-            const auto nested = assembleNamespaces(leaf, end, prefix + ConfigPath{key});
-            result.insert(key, nested);
-        }
-    }
-    return result;
-}
-} // namespace
 QVariantMap ConfigLayers::effective() const {
     if (!valid())
         return {};
     // Capture precedence by declared leaf, then construct each namespace once.
     // Repeated putValue on a shared nested map would detach/copy that namespace
     // for every leaf, making every candidate and publication quadratic in width.
-    QMap<ConfigPath, QVariant> values;
-    const auto defaults = m_schema.defaults();
-    for (const auto &path : m_schema.leaves())
-        if (const auto value = valueAt(defaults, path))
-            values.insert(path, *value);
+    auto values = defaultLeaves(m_schema);
     for (const auto &layer : m_layers)
         for (const auto &source : layer.sources)
             if (participates(source))

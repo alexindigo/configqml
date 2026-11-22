@@ -92,7 +92,7 @@ def main():
             raise RuntimeError("performance fixture escaped its matched library")
     write_json(output / "inputs.json", metadata)
     structural = run(output, "candidate-effective-structure", [output / "candidate-fixture/layer-structure"], env=env)
-    require_marker(structural, "7 passed, 0 failed, 0 skipped")
+    require_marker(structural, "11 passed, 0 failed, 0 skipped")
     results = []
     span_names = ("reset_dispatch_ns", "reset_e2e_ns", "set_ingress_ns",
                   "set_completion_including_consumers_ns", "cached_getter_10000_ns")

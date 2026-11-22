@@ -46,13 +46,30 @@ old = b"""QVariantMap ConfigLayers::effective() const {
     return out;
 }
 """
+lower = b"""        for (const auto &state : layer.sources)
+            if (participates(state))
+                for (auto it = state.admitted.cbegin(); it != state.admitted.cend(); ++it)
+                    lowerLeaves.insert(it.key(), it->value);
+        auto leaf = lowerLeaves.cbegin();
+        lower = assembleNamespaces(leaf, lowerLeaves.cend(), {});"""
+old_lower = b"""        lower = lowerBefore;
+        for (const auto &state : layer.sources)
+            if (participates(state))
+                for (auto it = state.admitted.cbegin(); it != state.admitted.cend(); ++it)
+                    putValue(lower, it.key(), it->value);"""
+if original.count(lower) != 1:
+    raise RuntimeError("nonunique projection lower-tree implementation")
 try:
-    path.write_bytes(original[:begin] + old + original[finish:])
-    run(output, "mutated-build", ["cmake", "--build", build, "--parallel", "2",
-        "--target", "configqml_core"], env=env)
-    text = run(output, "mutated", [fixture / "layer-structure"], env=env, expected=4)
-    require_marker(text, "3 passed, 4 failed, 0 skipped")
-    require_marker(text, "individual_writes= 512")
+    for name, mutation, marker in [
+        ("effective", original[:begin] + old + original[finish:], "individual_writes= 512"),
+        ("projection", original.replace(lower, old_lower), "individual_writes= 1024"),
+    ]:
+        path.write_bytes(mutation)
+        run(output, name + "-mutated-build", ["cmake", "--build", build, "--parallel", "2",
+            "--target", "configqml_core"], env=env)
+        text = run(output, name + "-mutated", [fixture / "layer-structure"], env=env, expected=4)
+        require_marker(text, "7 passed, 4 failed, 0 skipped")
+        require_marker(text, marker)
 finally:
     path.write_bytes(original)
     if digest(path) != before:
@@ -60,7 +77,7 @@ finally:
     run(output, "restored-build", ["cmake", "--build", build, "--parallel", "2",
         "--target", "configqml_core"], env=env)
 text = run(output, "restored", [fixture / "layer-structure"], env=env)
-require_marker(text, "7 passed, 0 failed, 0 skipped")
+require_marker(text, "11 passed, 0 failed, 0 skipped")
 require_marker(text, "individual_writes= 0")
 write_json(output / "result.json", {"source_sha256": before, "restored_sha256": digest(path),
     "old_reconstruction_rejected": True, "typed_atomic_and_opaque_trees_preserved": True})
