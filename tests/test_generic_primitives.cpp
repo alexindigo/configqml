@@ -17,6 +17,159 @@ using T = D::Type;
 class GenericPrimitivesTest : public QObject {
     Q_OBJECT
 private slots:
+    void explicitCandidateTargets_data() {
+        QTest::addColumn<bool>("runtime");
+        QTest::newRow("user") << false;
+        QTest::newRow("runtime") << true;
+    }
+    void explicitCandidateTargets() {
+        QFETCH(bool, runtime);
+        const ConfigSchema schema(D::group({{"a", D::leaf(T::SafeInteger, 1)},
+                                            {"b", D::leaf(T::SafeInteger, 2)},
+                                            {"c", D::leaf(T::SafeInteger, 3)}}));
+        ConfigLayers base(
+            schema, {{"user",
+                      ConfigLayerKind::File,
+                      ConfigAdmissionPolicy::FieldFallback,
+                      {{"user", {}, {{"a", 4}, {"b", 5}, {"unknown", "user-owned"}}}},
+                      true},
+                     {"runtime",
+                      ConfigLayerKind::Runtime,
+                      ConfigAdmissionPolicy::FieldFallback,
+                      {{"runtime", {}, {{"a", 8}, {"c", 9}, {"unknown", "runtime-owned"}}}}}});
+        const auto target =
+            runtime ? ConfigSelection::Target::RuntimeLayer : ConfigSelection::Target::UserLayer;
+        const auto selection =
+            ConfigSelection::capture(schema, {{}}, schema.leaves(), target, "edit-selection");
+        auto batch = ConfigEditBatch::capture(selection, {{{"a"}, std::nullopt}, {{"b"}, 6}});
+        batch.sequence = 17;
+        QList<ConfigInput> admitted;
+        const auto candidate = resolveCandidate(base, batch, {}, {}, [&](const ConfigInput &input) {
+            admitted.append(input);
+            return QString();
+        });
+        QVERIFY2(candidate.valid(), qPrintable(candidate.error));
+        QCOMPARE(admitted.size(), 2);
+        QCOMPARE(admitted[0].kind,
+                 runtime ? ConfigInput::Kind::ClearRuntime : ConfigInput::Kind::Reset);
+        QCOMPARE(admitted[1].kind, runtime ? ConfigInput::Kind::Runtime : ConfigInput::Kind::User);
+        QCOMPARE(admitted[0].sequence, quint64(17));
+        const auto a = candidate.facts.value({"a"}), b = candidate.facts.value({"b"});
+        QVERIFY(a.targetPresent);
+        QCOMPARE(b.targetPresent, !runtime);
+        QCOMPARE(a.effective.toInt(), runtime ? 4 : 8);
+        QCOMPARE(b.effective.toInt(), 6);
+        QCOMPARE(a.maskedBy, runtime ? QString() : QString("runtime"));
+        QCOMPARE(candidate.facts.value({"c"}).targetPresent, runtime);
+        QVERIFY(a.edited && b.edited);
+        QVERIFY(!candidate.facts.value({"c"}).edited);
+        const QString targetId = runtime ? "runtime" : "user";
+        auto expected = base.source(targetId, targetId)->raw;
+        expected.remove("a");
+        expected["b"] = qint64(6);
+        QCOMPARE(candidate.layers->source(targetId, targetId)->raw, expected);
+        const QString otherId = runtime ? "user" : "runtime";
+        QCOMPARE(candidate.layers->source(otherId, otherId)->raw,
+                 base.source(otherId, otherId)->raw);
+        QCOMPARE(base.value({"a"})->toInt(), 8);
+        QCOMPARE(base.value({"b"})->toInt(), 5);
+        QCOMPARE(base.info({"a"}).intentRevision, quint64(0));
+        QVERIFY(base.takeProjectionEffects().isEmpty());
+    }
+    void runtimeCandidateRefusalIsAtomic() {
+        const ConfigSchema schema(
+            D::group({{"a", D::leaf(T::SafeInteger, 1)}, {"b", D::leaf(T::SafeInteger, 2)}}));
+        ConfigSource source{"runtime", {}, {{"a", 4}, {"b", 5}}};
+        source.unknownData = ConfigUnknownData::Strict;
+        ConfigLayers base(schema, {{"runtime",
+                                    ConfigLayerKind::Runtime,
+                                    ConfigAdmissionPolicy::FieldFallback,
+                                    {source}}});
+        const auto selection = ConfigSelection::capture(
+            schema, {{}}, schema.leaves(), ConfigSelection::Target::RuntimeLayer, "edit-selection");
+        const auto batch = ConfigEditBatch::capture(selection, {{{"a"}, 6}, {{"b"}, 7}});
+        int checked = 0;
+        const auto refused = resolveCandidate(base, batch, {}, {}, [&](const ConfigInput &input) {
+            ++checked;
+            return input.path == ConfigPath{"b"} ? QString("policy-refused") : QString();
+        });
+        QCOMPARE(checked, 2);
+        QCOMPARE(refused.error, QString("policy-refused"));
+        QVERIFY(!refused.layers);
+        QCOMPARE(base.source("runtime", "runtime")->raw, source.raw);
+        QCOMPARE(base.info({"a"}).intentRevision, quint64(0));
+        const auto invalid =
+            ConfigEditBatch::capture(selection, {{{"a"}, 6}, {{"b"}, "wrong-type"}});
+        QVERIFY(!invalid.error.isEmpty());
+        checked = 0;
+        QVERIFY(!resolveCandidate(base, invalid, {}, {}, [&](const ConfigInput &) {
+                     ++checked;
+                     return QString();
+                 }).valid());
+        QCOMPARE(checked, 0);
+        const ConfigLayers missing(schema, {});
+        QCOMPARE(resolveCandidate(missing, batch, {}, {}).error, QString("no-write-target"));
+        const auto removed = ConfigEditBatch::capture(selection, {{{"a"}, std::nullopt}});
+        QCOMPARE(resolveCandidate(missing, removed, {}, {}).error, QString("no-runtime-target"));
+    }
+    void candidateProjectsWholeBatch_data() {
+        QTest::addColumn<bool>("runtime");
+        QTest::addColumn<int>("b");
+        QTest::newRow("user-complete-candidate") << false << 2;
+        QTest::newRow("user-invalid-final-candidate") << false << 3;
+        QTest::newRow("runtime-complete-candidate") << true << 2;
+        QTest::newRow("runtime-keeps-file-projection-input") << true << 3;
+    }
+    void candidateProjectsWholeBatch() {
+        QFETCH(bool, runtime);
+        QFETCH(int, b);
+        auto integer = D::leaf(T::SafeInteger, 1);
+        integer.admissionPolicy = D::AdmissionPolicy::Strict;
+        const ConfigSchema schema(D::group({{"a", integer}, {"b", integer}}));
+        int projections = 0;
+        ConfigProjectionSpec projection{
+            "pair", {"user"}, {}, [&](const ConfigProjectionInput &input) {
+                ++projections;
+                auto values = input.values;
+                if (input.raw.value("a") != input.raw.value("b"))
+                    values["a"] = false;
+                return ConfigProjectionResult{values, input.compatibilityRaw, {}, {}};
+            }};
+        const QVariantMap raw{{"a", 1}, {"b", 1}};
+        ConfigLayers base(schema,
+                          {{"user",
+                            ConfigLayerKind::File,
+                            ConfigAdmissionPolicy::FieldFallback,
+                            {{"user", {}, raw}},
+                            true},
+                           {"runtime",
+                            ConfigLayerKind::Runtime,
+                            ConfigAdmissionPolicy::FieldFallback,
+                            {{"runtime", {}, raw}}}},
+                          {projection});
+        QVERIFY(base.valid());
+        QVERIFY(!base.takeProjectionEffects().isEmpty()); // Initial source acquisition event.
+        projections = 0;
+        const auto selection = ConfigSelection::capture(
+            schema, {{}}, schema.leaves(),
+            runtime ? ConfigSelection::Target::RuntimeLayer : ConfigSelection::Target::UserLayer,
+            "edit-selection");
+        const auto candidate = resolveCandidate(
+            base, ConfigEditBatch::capture(selection, {{{"a"}, 2}, {{"b"}, b}}), {}, {});
+        QCOMPARE(projections, 1); // Never evaluate the inconsistent intermediate a=2,b=1.
+        QCOMPARE(candidate.valid(), runtime || b == 2);
+        if (candidate.valid()) {
+            QCOMPARE(candidate.facts.value({"a"}).effective.toInt(), runtime ? 2 : 1);
+            QCOMPARE(candidate.facts.value({"b"}).effective.toInt(), runtime ? b : 1);
+        } else {
+            QVERIFY(!candidate.error.isEmpty());
+            QVERIFY(!candidate.layers);
+        }
+        QCOMPARE(base.source("runtime", "runtime")->raw, raw);
+        QCOMPARE(base.source("user", "user")->raw, raw);
+        QCOMPARE(base.info({"a"}).intentRevision, quint64(0));
+        QVERIFY(base.takeProjectionEffects().isEmpty());
+    }
     void mixedDraftPending() {
         ConfigStoreOptions options;
         options.autoSave = false;

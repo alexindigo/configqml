@@ -118,3 +118,29 @@ resolution counts and no candidate reacquisition on control-only publications or
 cached getters. Existing timing/sanitizer policy is unchanged. This initial guard
 is not a claim of completed full matched-Arch or expanded handle/reply performance
 qualification.
+
+## Explicit candidate targets
+
+The shared worker candidate resolver accepts explicit user-layer and runtime-layer
+selections. Both enter ConfigLayers' one transactional edit path: all checked
+set/remove operations are applied before source projections run once on the whole
+candidate. Admission uses the target's existing User/Reset or Runtime/ClearRuntime
+input kinds. A refusal discards the candidate without changing the real layers,
+intent, files or application effects. Runtime selection never implies persistence.
+
+Target presence describes the selected target's raw contribution, not the winning
+layer or an inferred user route. A runtime candidate does not report its own
+runtime contribution as a higher-layer mask. Untouched target contributions and
+all other layers remain owned; removing declared leaves does not erase unknown
+namespace siblings.
+
+| # | Entry | Shared dispatch |
+|---|---|---|
+| 1 | Existing `ConfigLayers::applyEdits` | User-target transaction, retaining its existing public signature and projection/rollback behavior |
+| 2 | `resolveCandidate`, user or checked record-slot selection | Same user-target transaction over worker-owned candidate layers |
+| 3 | `resolveCandidate`, explicit runtime selection | Same transaction with runtime write/erase routing, no user write or disk route |
+| 4 | Existing single-value layer/scope writers | Existing checked write/erase owners also used by the transaction; namespace Reset retains its deliberately broad legacy meaning |
+
+This target adapter is a Phase 2 increment, not the generated-handle/reply surface
+or completion of all facade routing. New handle construction will select runtime
+explicitly; the compatibility APIs have not changed.

@@ -815,6 +815,11 @@ ConfigWriteResult ConfigLayers::setUser(const ConfigPath &path, const QVariant &
     return write(ownPath(path), value, false);
 }
 ConfigWriteResult ConfigLayers::applyEdits(const QMap<ConfigPath, std::optional<QVariant>> &edits) {
+    return applyTargetEdits(edits, false);
+}
+ConfigWriteResult
+ConfigLayers::applyTargetEdits(const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                               bool runtime) {
     auto candidate = *this;
     candidate.m_deferProjections = true;
     QString writable;
@@ -823,7 +828,8 @@ ConfigWriteResult ConfigLayers::applyEdits(const QMap<ConfigPath, std::optional<
             writable = layer.descriptor.id;
     ConfigWriteResult result;
     for (auto it = edits.cbegin(); it != edits.cend(); ++it) {
-        result = it.value() ? candidate.setUser(it.key(), *it.value())
+        result = it.value() ? candidate.write(ownPath(it.key()), *it.value(), runtime)
+                 : runtime  ? candidate.clearRuntime(it.key())
                             : candidate.reset(it.key(), writable);
         if (!result.accepted)
             return result;

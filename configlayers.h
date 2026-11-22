@@ -112,6 +112,9 @@ public:
 
 private:
     friend class ConfigWorker;
+    friend struct ConfigLayerEditAccess;
+    ConfigWriteResult applyTargetEdits(const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                                       bool runtime);
     void removeTransientLayers();
     struct AdmittedValue {
         QVariant value;

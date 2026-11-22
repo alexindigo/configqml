@@ -2,6 +2,22 @@
 #include "configcandidate_p.h"
 
 namespace configqml {
+// The layer engine remains the only transaction/target owner. This private
+// adapter adds runtime batches without enlarging its released public surface.
+struct ConfigLayerEditAccess {
+    static ConfigWriteResult apply(ConfigLayers &layers,
+                                   const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                                   bool runtime) {
+        return layers.applyTargetEdits(edits, runtime);
+    }
+    static ConfigRoute route(const ConfigLayers &layers, const ConfigPath &path, bool runtime) {
+        for (const auto &layer : layers.m_layers)
+            if (runtime ? layer.descriptor.kind == ConfigLayerKind::Runtime
+                        : layer.descriptor.writable)
+                return layers.route(path, layer.descriptor.id);
+        return {};
+    }
+};
 bool ConfigSelection::matchesSchema(const ConfigSchema &other) const {
     return schemaIdentity == other.m_identity;
 }
@@ -96,16 +112,21 @@ ConfigCandidate resolveCandidate(const ConfigLayers &base, const ConfigEditBatch
     if (result.error.isEmpty() && !batch.selection.matchesSchema(base.schema()))
         result.error = "edit-schema";
     if (result.error.isEmpty() && batch.selection.target != ConfigSelection::Target::UserLayer &&
-        batch.selection.target != ConfigSelection::Target::RecordSlot)
+        batch.selection.target != ConfigSelection::Target::RecordSlot &&
+        batch.selection.target != ConfigSelection::Target::RuntimeLayer)
         result.error = "edit-target";
     if (!result.error.isEmpty())
         return result;
     auto candidate = std::make_unique<ConfigLayers>(base);
     const auto edits = batch.layerEdits();
+    const bool runtime = batch.selection.target == ConfigSelection::Target::RuntimeLayer;
     if (admission)
         for (auto it = edits.cbegin(); it != edits.cend(); ++it) {
             ConfigInput input;
-            input.kind = it.value() ? ConfigInput::Kind::User : ConfigInput::Kind::Reset;
+            input.kind =
+                runtime
+                    ? (it.value() ? ConfigInput::Kind::Runtime : ConfigInput::Kind::ClearRuntime)
+                    : (it.value() ? ConfigInput::Kind::User : ConfigInput::Kind::Reset);
             input.sequence = batch.sequence;
             input.path = it.key();
             input.value = it.value().value_or(QVariant());
@@ -113,7 +134,7 @@ ConfigCandidate resolveCandidate(const ConfigLayers &base, const ConfigEditBatch
             if (!result.error.isEmpty())
                 return result;
         }
-    const auto outcome = candidate->applyEdits(edits);
+    const auto outcome = ConfigLayerEditAccess::apply(*candidate, edits, runtime);
     if (!outcome.accepted) {
         result.error =
             outcome.errors.isEmpty() ? QString("admission") : outcome.errors.first().code;
@@ -124,8 +145,9 @@ ConfigCandidate resolveCandidate(const ConfigLayers &base, const ConfigEditBatch
         ConfigCandidateFact fact;
         fact.effective = valueAt(effective, path).value_or(QVariant());
         const auto info = candidate->info(path);
-        fact.maskedBy = info.maskedBy;
-        const auto source = base.source(info.route.layerId, info.route.sourceId);
+        fact.maskedBy = runtime ? QString() : info.maskedBy;
+        const auto target = ConfigLayerEditAccess::route(base, path, runtime);
+        const auto source = base.source(target.layerId, target.sourceId);
         fact.targetPresent = source && bool(valueAt(source->raw, path.mid(source->prefix.size())));
         const auto operation = batch.operations.constFind(path);
         if (operation != batch.operations.cend()) {
