@@ -1,0 +1,18 @@
+cmake_minimum_required(VERSION 3.21)
+project(configqml_generic_red LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(configqml 0.5.3 REQUIRED COMPONENTS Qml)
+find_package(Qt6 6.12 REQUIRED COMPONENTS Qml)
+if(NOT EXISTS "${CONFIGQML_BASELINE_SOURCE}/configworker_p.h")
+    message(FATAL_ERROR "CONFIGQML_BASELINE_SOURCE must name the exact v0.5.3 source tree")
+endif()
+if(NOT EXISTS "${CONFIGQML_IMPORT_ROOT}/ConfigQml/qmldir")
+    message(FATAL_ERROR "CONFIGQML_IMPORT_ROOT must name the installed baseline QML root")
+endif()
+add_executable(configqml-generic-red main.cpp)
+target_link_libraries(configqml-generic-red PRIVATE configqml::configqml Qt6::Qml)
+target_include_directories(configqml-generic-red PRIVATE "${CONFIGQML_BASELINE_SOURCE}")
+target_compile_definitions(configqml-generic-red PRIVATE
+    RED_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/stale-reader.qml"
+    RED_IMPORT_ROOT="${CONFIGQML_IMPORT_ROOT}")
