@@ -592,6 +592,75 @@ private slots:
         QTest::newRow("runtime-complete-candidate") << true << 2;
         QTest::newRow("runtime-keeps-file-projection-input") << true << 3;
     }
+    void emptyCandidateUsesAdmittedState_data() {
+        QTest::addColumn<int>("target");
+        QTest::newRow("user") << int(ConfigSelection::Target::UserLayer);
+        QTest::newRow("runtime") << int(ConfigSelection::Target::RuntimeLayer);
+        QTest::newRow("record-slot") << int(ConfigSelection::Target::RecordSlot);
+    }
+    void emptyCandidateUsesAdmittedState() {
+        QFETCH(int, target);
+        const ConfigSchema schema(D::group(
+            {{"count", D::leaf(T::SafeInteger, 1)}, {"other", D::leaf(T::SafeInteger, 2)}}));
+        int projections = 0;
+        ConfigProjectionSpec projection{
+            "project", {"user"}, {}, [&](const ConfigProjectionInput &input) {
+                ++projections;
+                auto values = input.values;
+                values["other"] = 7;
+                return ConfigProjectionResult{values, input.compatibilityRaw, {}, {}};
+            }};
+        const QVariantMap raw{{"count", 4}, {"unknown", "preserved"}};
+        ConfigLayers base(schema,
+                          {{"user",
+                            ConfigLayerKind::File,
+                            ConfigAdmissionPolicy::FieldFallback,
+                            {{"user", {}, raw}},
+                            true},
+                           {"runtime",
+                            ConfigLayerKind::Runtime,
+                            ConfigAdmissionPolicy::FieldFallback,
+                            {{"runtime", {}, {{"count", 9}}}}}},
+                          {projection});
+        QVERIFY(base.valid());
+        QCOMPARE(projections, 1);
+        base.takeProjectionEffects();
+        const auto before = base.effective();
+        auto selection = ConfigSelection::capture(schema, {{}}, schema.leaves(),
+                                                  ConfigSelection::Target(target), "selection");
+        selection.lifetime = std::make_shared<std::atomic_bool>(true);
+        projections = 0;
+        int admissions = 0;
+        const auto candidate = resolveCandidate(base, ConfigEditBatch::capture(selection, {}), {},
+                                                {}, [&](const ConfigInput &) {
+                                                    ++admissions;
+                                                    return QString("unexpected-edit");
+                                                });
+        QVERIFY2(candidate.valid(), qPrintable(candidate.error));
+        QCOMPARE(candidate.layers->effective(), before);
+        QCOMPARE(candidate.facts.value({"count"}).effective.toInt(), 9);
+        QCOMPARE(candidate.facts.value({"other"}).effective.toInt(), 7);
+        QVERIFY(candidate.facts.value({"count"}).targetPresent);
+        QVERIFY(!candidate.facts.value({"other"}).targetPresent);
+        QVERIFY(!candidate.facts.value({"count"}).edited);
+        QCOMPARE(candidate.facts.value({"count"}).maskedBy,
+                 target == int(ConfigSelection::Target::RuntimeLayer) ? QString()
+                                                                      : QString("runtime"));
+        QCOMPARE(candidate.layers->source("user", "user")->raw, raw);
+        QCOMPARE(candidate.layers->info({"count"}).intentRevision, quint64(0));
+        QVERIFY(candidate.layers->takeProjectionEffects().isEmpty());
+        QCOMPARE(admissions, 0);
+        QCOMPARE(projections, 0); // A read of admitted facts is not a local transaction.
+        *selection.lifetime = false;
+        QCOMPARE(resolveCandidate(base, ConfigEditBatch::capture(selection, {}), {}, {}).error,
+                 QString("edit-closed"));
+        const ConfigSchema foreign(*schema.descriptor({}));
+        selection.lifetime.reset();
+        const ConfigLayers foreignBase(foreign, {});
+        QCOMPARE(
+            resolveCandidate(foreignBase, ConfigEditBatch::capture(selection, {}), {}, {}).error,
+            QString("edit-schema"));
+    }
     void candidateProjectsWholeBatch() {
         QFETCH(bool, runtime);
         QFETCH(int, b);

@@ -134,11 +134,16 @@ ConfigCandidate resolveCandidate(const ConfigLayers &base, const ConfigEditBatch
             if (!result.error.isEmpty())
                 return result;
         }
-    const auto outcome = ConfigLayerEditAccess::apply(*candidate, edits, runtime);
-    if (!outcome.accepted) {
-        result.error =
-            outcome.errors.isEmpty() ? QString("admission") : outcome.errors.first().code;
-        return result;
+    // An empty edit algebra observes the already admitted cut. Re-admitting its
+    // raw sources would rerun transforms without an input change; selected facts
+    // and current record-list projection still follow the common path below.
+    if (!edits.isEmpty()) {
+        const auto outcome = ConfigLayerEditAccess::apply(*candidate, edits, runtime);
+        if (!outcome.accepted) {
+            result.error =
+                outcome.errors.isEmpty() ? QString("admission") : outcome.errors.first().code;
+            return result;
+        }
     }
     const auto effective = candidate->effective(); // Resolve the batch once, not per selected leaf.
     for (const auto &path : batch.selection.leaves) {

@@ -240,6 +240,11 @@ candidate. Admission uses the target's existing User/Reset or Runtime/ClearRunti
 input kinds. A refusal discards the candidate without changing the real layers,
 intent, files or application effects. Runtime selection never implies persistence.
 
+An empty candidate batch reads the existing admitted cut rather than running a
+local edit transaction or rerunning source transforms. Selection/schema/lifetime
+checks still apply, and selected facts still pass through current record-list
+metadata projection. This does not alter the public layer `applyEdits` contract.
+
 Target presence describes the selected target's raw contribution, not the winning
 layer or an inferred user route. A runtime candidate does not report its own
 runtime contribution as a higher-layer mask. Untouched target contributions and
