@@ -190,6 +190,7 @@ private slots:
         QVERIFY2(root, qPrintable(component.errorString()));
         auto *store = root->property("store").value<ConfigQmlStore *>();
         QTRY_VERIFY(store->ready());
+        ConfigStoreTestAccess::measureCallerWork(*store->core());
         QQuickWindow window;
         auto *item = qobject_cast<QQuickItem *>(root.get());
         item->setParentItem(window.contentItem());
@@ -197,17 +198,19 @@ private slots:
         window.show();
         auto *repeater = root->property("repeater").value<QObject *>();
         QElapsedTimer initial;
+        const ConfigThreadWorkTimer initialWorkTimer;
         initial.start();
         QMetaObject::invokeMethod(root.get(), "populate", Q_ARG(int, 1000));
         const auto initialIngress = initial.nsecsElapsed();
+        const auto initialWork = initialWorkTimer.finish();
+        initialWork.report("qml-model-initial-ingress");
         QTRY_COMPARE(repeater->property("count").toInt(), 1000);
         qInfo("BUDGET QML write rows=1000 ingress_us=%lld publication_library_us=%lld",
               initialIngress / 1000,
               ConfigStoreTestAccess::publicationLibraryNanos(*store->core()) / 1000);
         if (enforceModelBudgets)
-            QVERIFY(initialIngress +
-                        ConfigStoreTestAccess::publicationLibraryNanos(*store->core()) <
-                    16000000);
+            QVERIFY((initialWork + ConfigStoreTestAccess::publicationWork(*store->core()))
+                        .within(16000000));
         QTest::qWait(100); // Let ListView finish its asynchronous offscreen cache population.
         const auto created = root->property("created").toInt();
         const auto destroyed = root->property("destroyed").toInt();
@@ -216,9 +219,11 @@ private slots:
         QSignalSpy inserted(model, &QAbstractItemModel::rowsInserted);
         QSignalSpy removed(model, &QAbstractItemModel::rowsRemoved);
         QElapsedTimer timer;
+        const ConfigThreadWorkTimer rotateWorkTimer;
         timer.start();
         QMetaObject::invokeMethod(root.get(), "rotateRows");
-        const auto ingressNs = timer.nsecsElapsed();
+        const auto rotateWork = rotateWorkTimer.finish();
+        rotateWork.report("qml-model-rotate-ingress");
         const auto ingressMillis = timer.elapsed();
         QTRY_COMPARE(model->data(model->index(0, 0), Qt::UserRole + 1).toString(),
                      QString("row-1"));
@@ -240,11 +245,14 @@ private slots:
               timer.elapsed(), ingressMillis,
               ConfigStoreTestAccess::worstPublicationNanos(*store->core()) / 1000);
         if (enforceModelBudgets)
-            QVERIFY(ingressNs + ConfigStoreTestAccess::publicationLibraryNanos(*store->core()) <
-                    16000000);
+            QVERIFY((rotateWork + ConfigStoreTestAccess::publicationWork(*store->core()))
+                        .within(16000000));
         timer.restart();
+        const ConfigThreadWorkTimer reverseWorkTimer;
         QMetaObject::invokeMethod(root.get(), "reverseRows");
         const auto reverseIngress = timer.nsecsElapsed();
+        const auto reverseWork = reverseWorkTimer.finish();
+        reverseWork.report("qml-model-reverse-ingress");
         QTRY_COMPARE(model->data(model->index(0, 0), Qt::UserRole + 1).toString(),
                      QString("row-0"));
         QCOMPARE(reset.size(), 1);
@@ -262,7 +270,8 @@ private slots:
         const auto viewNs = ConfigStoreTestAccess::modelNotificationNanos(*native);
         const auto planning = ConfigStoreTestAccess::planningNanos(*store->core());
         if (enforceModelBudgets) {
-            QVERIFY(reverseIngress + apply < 16000000);
+            QVERIFY((reverseWork + ConfigStoreTestAccess::publicationWork(*store->core()))
+                        .within(16000000));
             QVERIFY(planning < 50000000);
         }
         QTest::qWait(100);
@@ -327,6 +336,7 @@ private slots:
         QVERIFY2(root, qPrintable(component.errorString()));
         auto *store = root->property("store").value<ConfigQmlStore *>();
         QTRY_VERIFY(store->ready());
+        ConfigStoreTestAccess::measureCallerWork(*store->core());
         QQuickWindow window;
         auto *item = qobject_cast<QQuickItem *>(root.get());
         item->setParentItem(window.contentItem());
@@ -339,9 +349,12 @@ private slots:
         qint64 maximum = 0;
         for (int iteration = 0; iteration < 4; ++iteration) {
             QElapsedTimer timer;
+            const ConfigThreadWorkTimer callerWork;
             timer.start();
             QVERIFY(QMetaObject::invokeMethod(root.get(), "rotateRows"));
             const auto ingress = timer.nsecsElapsed();
+            const auto ingressWork = callerWork.finish();
+            ingressWork.report("qml-margin-rotate-ingress");
             QTRY_COMPARE(model->data(model->index(0, 0), Qt::UserRole + 1).toString(),
                          QString("row-%1").arg(iteration + 1));
             const auto publication = ConfigStoreTestAccess::publicationLibraryNanos(*store->core());
@@ -351,12 +364,16 @@ private slots:
                   iteration, ingress / 1000, publication / 1000, (ingress + publication) / 1000,
                   enforceModelBudgets);
             if (enforceModelBudgets)
-                QVERIFY(ingress + publication < 16000000);
+                QVERIFY((ingressWork + ConfigStoreTestAccess::publicationWork(*store->core()))
+                            .within(16000000));
         }
         QElapsedTimer timer;
+        const ConfigThreadWorkTimer callerWork;
         timer.start();
         QVERIFY(QMetaObject::invokeMethod(root.get(), "insertRow"));
         const auto ingress = timer.nsecsElapsed();
+        const auto ingressWork = callerWork.finish();
+        ingressWork.report("qml-margin-insert-ingress");
         QTRY_COMPARE(model->rowCount(), 1001);
         const auto publication = ConfigStoreTestAccess::publicationLibraryNanos(*store->core());
         QCOMPARE(qobject_cast<ConfigListModel *>(model)->indexOfRow("inserted"), 500);
@@ -364,7 +381,8 @@ private slots:
               "max_rotation_sum_us=%lld enforce=%d",
               ingress / 1000, publication / 1000, maximum / 1000, enforceModelBudgets);
         if (enforceModelBudgets)
-            QVERIFY(ingress + publication < 16000000);
+            QVERIFY((ingressWork + ConfigStoreTestAccess::publicationWork(*store->core()))
+                        .within(16000000));
         item->setParentItem(nullptr);
     }
 };

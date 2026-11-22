@@ -5,6 +5,7 @@
 #include "configconsumer_p.h"
 #include "configchange_p.h"
 #include "configreadprojection_p.h"
+#include "configworktiming_p.h"
 #include "configlistmodel.h"
 #include <QThread>
 #include <QUuid>
@@ -382,6 +383,7 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
         QMetaObject::invokeMethod(this, [this, packet] { receive(packet); }, Qt::QueuedConnection);
         return;
     }
+    const ConfigWorkPublication callerWork(this, !packet.models.isEmpty());
     QElapsedTimer publicationTimer;
     publicationTimer.start();
     if (!packet.models.isEmpty())

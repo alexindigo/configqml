@@ -410,15 +410,24 @@ private slots:
         o.layers = {layer};
         o.autoSave = false;
         ConfigStore store(o);
+        Probe::measureCallerWork(store);
         QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
         QSignalSpy done(&store, &ConfigStore::completed);
         QElapsedTimer timer;
         qint64 worst = 0;
+        ConfigThreadWorkSample worstWork;
+        bool validWork = true;
         for (int i = 1; i <= 100; ++i) {
+            const ConfigThreadWorkTimer callerWork;
             timer.start();
             store.setUser({"s0", "a"}, i);
             store.save();
             worst = qMax(worst, timer.nsecsElapsed());
+            const auto sample = callerWork.finish();
+            sample.report("json-ingress-save");
+            validWork &= sample.valid;
+            if (!worstWork.valid || sample.charged() > worstWork.charged())
+                worstWork = sample;
         }
         QTRY_COMPARE_WITH_TIMEOUT(done.size(), 200, 15000);
         QTest::qWait(100); // Deliver actual file/directory hints.
@@ -442,8 +451,8 @@ private slots:
         qInfo("JSON burst GUI ingress+save max us %.3f; publication max us %.3f enforce=%d",
               worst / 1000.0, publication / 1000.0, enforceModelBudgets);
         if (enforceModelBudgets) {
-            QVERIFY(worst < 16000000);
-            QVERIFY(publication < 16000000);
+            QVERIFY(validWork && worstWork.within(16000000));
+            QVERIFY(Probe::worstPublicationWork(store).within(16000000));
         }
         // External reload reaches the consumer and leaves all other sections alone.
         QVERIFY(writeFile(dir.filePath("s1.json"), "{\"a\":42}"));

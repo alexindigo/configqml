@@ -194,10 +194,14 @@ private slots:
         QTemporaryDir dir;
         Fixture f(dir.path());
         QTRY_VERIFY(f.store->ready());
+        ConfigStoreTestAccess::measureCallerWork(*f.store->core());
         QElapsedTimer timer;
+        const ConfigThreadWorkTimer callerWork;
         timer.start();
         f.call("budget");
         const auto ingress = timer.nsecsElapsed();
+        const auto ingressWork = callerWork.finish();
+        ingressWork.report("qml-draft-ingress");
         QTRY_COMPARE(f.number("calls"), 1);
         QCOMPARE(f.receipt().value("status").toString(), QString("saved"));
         QCOMPARE(f.number("rows"), 1000);
@@ -209,7 +213,8 @@ private slots:
         qInfo("draft 1000 QML preparation+ingress=%lldus publication=%lldus", ingress / 1000,
               publication / 1000);
         if (enforceModelBudgets)
-            QVERIFY(ingress + publication < 16000000);
+            QVERIFY((ingressWork + ConfigStoreTestAccess::publicationWork(*f.store->core()))
+                        .within(16000000));
         Fixture reopened(dir.path());
         QTRY_VERIFY(reopened.store->ready());
         QCOMPARE(reopened.number("rows"), 1000);

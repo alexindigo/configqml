@@ -217,3 +217,20 @@ same single Qt reset primitive as a plain-reset timing control, with no extra
 per-row notifications or delegate-model layout tricks. Timing output reports both
 controls; view/delegate construction and application code are not mislabeled as
 library-only work or a full-shell 16ms guarantee.
+
+Caller-thread work budgets use CLOCK_THREAD_CPUTIME_ID, the thread's own
+`/proc/thread-self/schedstat` run-queue wait, and getrusage(RUSAGE_THREAD) switch
+counts. Every opt-in test sample reports wall, CPU, run-queue, blocked, voluntary
+and involuntary switches. Blocked is max(0, wall - CPU - run-queue), clamped only
+for accounting read skew. Both CPU and CPU + blocked must remain below the same
+16 ms budget. Only runnable queue wait is excluded: lock, worker, IO and fsync
+blocking remain charged latency. Wall spans are still reported, not discarded.
+The existing synchronous model-notification boundary is subtracted componentwise
+from publication accounting; view/delegate work remains separately reported.
+
+These probes are private and opt-in, with no released object-layout change and
+no procfs reads for ordinary consumers. The thread_work test proves a busy loop
+and a blocking wait each fail the gate, a real same-CPU scheduler delay does not,
+the old wall-only gate rejects that scheduling delay, and a CPU-only mutant
+incorrectly accepts blocking. Its short FIFO scheduling child requires guest
+sudo and restores the parent's affinity. No application thread waits are mocked.

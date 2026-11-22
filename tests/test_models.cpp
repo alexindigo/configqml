@@ -504,6 +504,7 @@ private slots:
         QFETCH(int, count);
         QFETCH(bool, keyed);
         ConfigStore store(options());
+        Probe::measureCallerWork(store);
         QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
         const ConfigPath path{keyed ? "map" : "rows"};
         auto *model = keyed ? store.keyedModel(path) : store.listModel(path);
@@ -515,10 +516,13 @@ private slots:
             map.insert(key, rows.last());
         }
         auto submit = [&](const QVariant &value, const char *operation) {
+            const ConfigThreadWorkTimer callerWork;
             QElapsedTimer clock;
             clock.start();
             const auto input = store.setUser(path, value);
             const auto ingress = clock.nsecsElapsed();
+            const auto ingressWork = callerWork.finish();
+            ingressWork.report(operation);
             QVERIFY(input.accepted);
             QTRY_COMPARE(store.info(path).workerCovered, input.inputSequence);
             const auto apply = Probe::publicationLibraryNanos(store);
@@ -529,7 +533,8 @@ private slots:
                   planning / 1000, enforceModelBudgets);
             if (enforceModelBudgets) {
                 if (count == 1000)
-                    QVERIFY2(ingress + apply < 16000000, "library event exceeded 16ms");
+                    QVERIFY2((ingressWork + Probe::publicationWork(store)).within(16000000),
+                             "library CPU plus blocked time exceeded 16ms");
                 QVERIFY2(planning < (count == 1000 ? 50000000 : 500000000),
                          "worker exceeded reconciliation budget");
             }
@@ -565,15 +570,19 @@ private slots:
         QVERIFY(model->indexOfRow("extra") >= 0);
         // Presentations are shared across every facade and never reconverted per getter.
         QElapsedTimer reads;
+        const ConfigThreadWorkTimer readWorkTimer;
         reads.start();
         for (int i = 0; i < 1000; ++i)
             QVERIFY(store.presentation(path).isValid());
         const auto readNs = reads.nsecsElapsed();
+        const auto readWork = readWorkTimer.finish();
+        readWork.report("cached-presentations");
         qInfo("BUDGET %s cached-presentations rows=%d 1000_getters_us=%lld", keyed ? "map" : "list",
               count, readNs / 1000);
         if (enforceModelBudgets && count == 1000)
-            QVERIFY(readNs < 16000000);
+            QVERIFY(readWork.within(16000000));
         QElapsedTimer nodes;
+        const ConfigThreadWorkTimer nodeWorkTimer;
         nodes.start();
         for (int i = 0; i < 1000; ++i) {
             const auto node =
@@ -582,10 +591,12 @@ private slots:
             QVERIFY(node.get("n").value().isValid());
         }
         const auto nodeNs = nodes.nsecsElapsed();
+        const auto nodeWork = nodeWorkTimer.finish();
+        nodeWork.report("nested-nodes");
         qInfo("BUDGET %s nested-nodes rows=%d 1000_traversals_us=%lld", keyed ? "map" : "list",
               count, nodeNs / 1000);
         if (enforceModelBudgets && count == 1000)
-            QVERIFY(nodeNs < 16000000);
+            QVERIFY(nodeWork.within(16000000));
     }
 };
 QTEST_MAIN(ModelsTest)

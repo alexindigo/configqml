@@ -1645,16 +1645,20 @@ private slots:
     }
     void thousandRowDraftBudget() {
         ConfigStore store(options());
+        ConfigStoreTestAccess::measureCallerWork(store);
         QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
         auto *draft = store.draft({{"a", "rows"}});
         QVariantList rows;
         for (int i = 0; i < 1000; ++i)
             rows.append(i);
         QElapsedTimer timer;
+        const ConfigThreadWorkTimer callerWork;
         timer.start();
         QVERIFY(draft->setValue({"a", "rows"}, rows).accepted);
         const auto id = draft->apply();
         const auto ingress = timer.nsecsElapsed();
+        const auto ingressWork = callerWork.finish();
+        ingressWork.report("native-draft-ingress");
         QSignalSpy results(&store, &ConfigStore::completed);
         QTRY_VERIFY(!results.isEmpty());
         QCOMPARE(results.last().first().value<ConfigResult>().requestId, id);
@@ -1664,7 +1668,7 @@ private slots:
         qInfo("draft 1000 native ingress=%lldus publication=%lldus", ingress / 1000,
               publication / 1000);
         if (enforceModelBudgets)
-            QVERIFY(ingress + publication < 16000000);
+            QVERIFY((ingressWork + ConfigStoreTestAccess::publicationWork(store)).within(16000000));
     }
 };
 QTEST_GUILESS_MAIN(EditorsTest)

@@ -38,6 +38,7 @@ target_sources(configqml_core PRIVATE configselection_p.h configedit_p.h
     configcandidate_p.h configcandidate.cpp configobservation.h configobservation_p.h
     configobservation.cpp configreadprojection.h configreadprojection_p.h configreadprojection.cpp
     configpendingreply.h configpendingreply_p.h configpendingreply.cpp)
+target_sources(configqml_core PRIVATE configworktiming_p.h configworktiming.cpp)
 add_library(configqml::core ALIAS configqml_core)
 set_target_properties(configqml_core PROPERTIES EXPORT_NAME core
     VERSION ${PROJECT_VERSION} SOVERSION ${_configqml_soversion} INSTALL_RPATH "$ORIGIN")
@@ -137,7 +138,7 @@ include(CTest)
 if(BUILD_TESTING)
     configure_file(tests/generator.cmake.in test-generator.cmake @ONLY)
     find_package(Qt6 6.12 REQUIRED COMPONENTS Test Gui)
-    foreach(suite generic_primitives generic_performance compact_events projections fallback_layers startup_policy record_list_policy record_list_containers unknown_data source_events retained_groups save_selected draft_reset strict_conflicts pending_rebase evidence_backlog empty_shards overlay_editor overlay_preserve string_pattern)
+    foreach(suite thread_work generic_primitives generic_performance compact_events projections fallback_layers startup_policy record_list_policy record_list_containers unknown_data source_events retained_groups save_selected draft_reset strict_conflicts pending_rebase evidence_backlog empty_shards overlay_editor overlay_preserve string_pattern)
         add_executable(test_${suite} tests/test_${suite}.cpp)
         target_link_libraries(test_${suite} PRIVATE configqml::core Qt6::Test)
         add_test(NAME ${suite} COMMAND test_${suite})

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
+#include "configworktiming_p.h"
 #include "configworker_p.h"
 #include "configshutdown_p.h"
 #include "configchange_p.h"
@@ -123,6 +124,15 @@ public:
         };
     }
     static qint64 planningNanos(const ConfigStore &store) { return store.m_lastPlanningNanos; }
+    static void measureCallerWork(ConfigStore &store) { ConfigWorkTiming::enable(&store); }
+    static ConfigThreadWorkSample publicationWork(ConfigStore &store) {
+        const auto state = ConfigWorkTiming::get(&store);
+        return state ? state->lastModel : ConfigThreadWorkSample{};
+    }
+    static ConfigThreadWorkSample worstPublicationWork(ConfigStore &store) {
+        const auto state = ConfigWorkTiming::get(&store);
+        return state ? state->worst : ConfigThreadWorkSample{};
+    }
     static qint64 publicationLibraryNanos(const ConfigStore &store) {
         return store.m_lastLibraryPublicationNanos;
     }
