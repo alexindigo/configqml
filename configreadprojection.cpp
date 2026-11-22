@@ -3,6 +3,7 @@
 #include "configworker_p.h"
 #include "configshutdown_p.h"
 #include "configstorehandle.h"
+#include "confighandle_p.h"
 #include <QUuid>
 
 namespace configqml {
@@ -31,7 +32,7 @@ ConfigReadProjection *ConfigReadProjectionState::create(QObject *owner, ConfigSt
     auto *projection = new ConfigReadProjection(owner);
     projection->setObjectName(name);
     projection->d->store = store;
-    if (store && owner != store) {
+    if (store && (owner != store || name != "_configqml_read_projection")) {
         get(store)->d->views.removeIf([](const auto &entry) { return !entry; });
         get(store)->d->views.append(projection);
     }
@@ -44,6 +45,58 @@ ConfigReadProjection *ConfigReadProjectionState::create(QObject *owner, ConfigSt
         QObject::connect(store, &QObject::destroyed, projection, [projection] {
             QMetaObject::invokeMethod(
                 projection, [projection] { projection->d->invalidate(); }, Qt::QueuedConnection);
+        });
+    return projection;
+}
+ConfigReadProjection *ConfigReadProjectionState::select(ConfigReadProjection *source,
+                                                        const ConfigHandleSelection &selection,
+                                                        QObject *owner) {
+    if (!source || !owner || owner->thread() != source->thread() || !selection.valid())
+        return nullptr;
+    const auto &parent = *source->d;
+    if (!parent.live())
+        return nullptr;
+    const auto identity = selection.selection();
+    const auto schema = parent.overlay ? parent.overlay->schema() : parent.store->schema();
+    if (!identity.matchesSchema(schema) || !startsWith(selection.prefix(), parent.prefix))
+        return nullptr;
+    for (const auto &path : identity.leaves)
+        if (!parent.paths.contains(path))
+            return nullptr;
+    auto *projection =
+        create(owner, parent.store,
+               "_configqml_selected_projection_" + QUuid::createUuid().toString(QUuid::Id128));
+    auto &state = *projection->d;
+    state.source = source;
+    state.sourceLifetime = parent.lifetime;
+    state.handle = parent.handle;
+    state.overlay = parent.overlay;
+    state.draft = parent.draft;
+    state.preview = parent.preview;
+    state.frozen = parent.frozen;
+    state.prefix = selection.prefix();
+    state.paths = identity.leaves;
+    state.order = parent.order;
+    state.coveredSequence = parent.coveredSequence;
+    state.installed = ConfigObservationAccess::select(parent.installed, state.paths, state.prefix);
+    state.completed = ConfigObservationAccess::select(parent.completed, state.paths, state.prefix);
+    if (state.preview && state.draft)
+        state.selectedPreviewLifetime = state.draft->m_previewLifetime;
+    QObject::connect(source, &QObject::destroyed, projection,
+                     [projection] { projection->d->invalidate(); });
+    if (state.handle)
+        QObject::connect(state.handle, &ConfigStoreHandle::detached, projection,
+                         [projection] { projection->d->invalidate(); });
+    if (state.overlay)
+        QObject::connect(state.overlay, &ConfigOverlayEditor::stateChanged, projection,
+                         [projection] {
+                             if (!projection->d->live())
+                                 projection->d->invalidate();
+                         });
+    if (state.draft)
+        QObject::connect(state.draft, &ConfigDraft::previewScopesClosed, projection, [projection] {
+            if (!projection->d->live())
+                projection->d->invalidate();
         });
     return projection;
 }
@@ -116,12 +169,11 @@ ConfigReadProjection *ConfigReadProjectionState::get(ConfigDraft *draft, bool pr
 void ConfigReadProjectionState::refresh(ConfigDraft *draft) {
     if (!draft->m_store)
         return;
-    for (const auto &name : {"_configqml_read_projection", "_configqml_preview_projection"})
-        if (auto *projection =
-                draft->findChild<ConfigReadProjection *>(name, Qt::FindDirectChildrenOnly)) {
+    for (const auto &projection : get(draft->m_store)->d->views)
+        if (projection && projection->d->draft == draft && projection->d->live()) {
             auto &state = *projection->d;
-            state.installed =
-                ConfigObservationAccess::select(get(draft->m_store)->d->completed, draft->paths());
+            state.installed = ConfigObservationAccess::select(get(draft->m_store)->d->completed,
+                                                              state.paths, state.prefix);
             state.completed = state.installed;
             state.changed = false;
         }
@@ -150,7 +202,15 @@ ConfigReadProjectionState::eligible(ConfigOverlayEditor *overlay,
 bool ConfigReadProjectionState::live() const {
     return store && store->status() == ConfigStore::Status::Ready &&
            (!handle || handle->attached()) && (!overlay || overlay->ready()) &&
-           (!draft || draft->valid()) && *lifetime;
+           (!draft || draft->valid()) && *lifetime &&
+           (!sourceLifetime || (*sourceLifetime && source && source->d->live())) &&
+           (!selectedPreviewLifetime || *selectedPreviewLifetime);
+}
+ConfigReadProjectionState *ConfigReadProjectionState::origin() {
+    auto *state = this;
+    while (state->source)
+        state = state->source->d.get();
+    return state;
 }
 bool ConfigReadProjectionState::available(ConfigReadProjection *projection) {
     return projection && projection->d->live();
@@ -160,8 +220,11 @@ void ConfigReadProjectionState::stage(ConfigOverlayEditor *overlay) {
         return;
     auto *projection = get(overlay);
     auto &state = *projection->d;
-    state.installed = ConfigObservationAccess::pending(state.installed, overlay->m_edits);
     ++state.editEpoch;
+    for (const auto &view : get(overlay->m_store)->d->views)
+        if (view && view->d->overlay == overlay && view->d->live())
+            view->d->installed =
+                ConfigObservationAccess::pending(view->d->installed, overlay->m_edits);
     auto request = std::make_shared<ConfigReadRequest>();
     request->projectionId = state.id;
     request->overlayId = overlay->editorId();
@@ -175,9 +238,10 @@ void ConfigReadProjectionState::stage(ConfigOverlayEditor *overlay) {
     overlay->m_store->m_owner->dispatch(command);
 }
 void ConfigReadProjectionState::stage(ConfigDraft *draft) {
-    for (const auto &name : {"_configqml_read_projection", "_configqml_preview_projection"})
-        if (auto *projection =
-                draft->findChild<ConfigReadProjection *>(name, Qt::FindDirectChildrenOnly)) {
+    if (!draft->m_store)
+        return;
+    for (const auto &projection : get(draft->m_store)->d->views)
+        if (projection && projection->d->draft == draft && projection->d->live()) {
             auto &state = *projection->d;
             state.installed = ConfigObservationAccess::pending(state.installed, draft->m_edits);
         }
@@ -187,8 +251,8 @@ QList<ConfigPath> ConfigReadProjectionState::pending(quint64 covered) const {
     if (overlay) {
         for (auto it = overlay->m_editSequences.cbegin(); it != overlay->m_editSequences.cend();
              ++it)
-            if (it.value() > covered)
-                result.append(it.key());
+            if (it.value() > covered && paths.contains(it.key()))
+                result.append(it.key().mid(prefix.size()));
     } else if (store)
         for (const auto &path : paths)
             if (store->info(path).latestInput > covered)
@@ -203,7 +267,7 @@ ConfigObservation ConfigReadProjection::observation() const { return d->complete
 quint64 ConfigReadProjection::synchronize(const ConfigObservation &after, QObject *context,
                                           ReadCallback callback) {
     Q_ASSERT(QThread::currentThread() == thread());
-    if (d->preview && d->draft && !d->handle)
+    if (d->preview && d->draft && !d->handle && !d->sourceLifetime)
         ConfigReadProjectionState::get(d->draft, true);
     const auto id = ++d->next;
     d->requests.insert(id, {after, context ? context : this, std::move(callback), false, {}});
@@ -246,7 +310,7 @@ quint64 ConfigReadProjection::synchronize(const ConfigObservation &after, QObjec
     return id;
 }
 void ConfigReadProjectionState::receive(const ConfigReadCapture &capture) {
-    if (capture.editEpoch && capture.editEpoch != editEpoch)
+    if (capture.editEpoch && capture.editEpoch != origin()->editEpoch)
         return;
     const auto error = !capture.error.isEmpty() ? capture.error
                        : capture.snapshot.valid() && !capture.snapshot.observation().valid()
@@ -256,7 +320,7 @@ void ConfigReadProjectionState::receive(const ConfigReadCapture &capture) {
         requests[capture.requestId].captured = true;
         requests[capture.requestId].error = error;
     }
-    if (!*lifetime || (handle && !handle->attached()) ||
+    if (!*lifetime || (sourceLifetime && !live()) || (handle && !handle->attached()) ||
         (overlay && (overlay->status() == ConfigOverlayEditor::Status::Error ||
                      overlay->status() == ConfigOverlayEditor::Status::Closed)) ||
         (store && store->status() != ConfigStore::Status::Ready)) {
@@ -266,7 +330,7 @@ void ConfigReadProjectionState::receive(const ConfigReadCapture &capture) {
     }
     if (!error.isEmpty() || capture.order <= order || !capture.snapshot.valid())
         return;
-    installed = capture.snapshot;
+    installed = ConfigObservationAccess::select(capture.snapshot, paths, prefix);
     order = capture.order;
     coveredSequence = capture.coveredSequence;
     changed = true;
@@ -290,11 +354,21 @@ void ConfigReadProjectionState::install(ConfigStore *store, const ConfigWorkerPa
         for (const auto &capture : packet.reads)
             if (capture.projectionId == state.id)
                 state.receive(capture);
+            else if (state.sourceLifetime && capture.editEpoch &&
+                     capture.projectionId == state.origin()->id) {
+                auto selected = capture;
+                selected.requestId = 0;
+                state.receive(selected);
+            }
         if (state.overlay)
             for (const auto &presentation : packet.overlays)
                 if (presentation.editorId == state.overlay->editorId() &&
-                    presentation.read.snapshot.valid())
-                    state.receive(presentation.read);
+                    presentation.read.snapshot.valid()) {
+                    auto capture = presentation.read;
+                    if (capture.projectionId != state.id)
+                        capture.requestId = 0;
+                    state.receive(capture);
+                }
         if (state.draft)
             for (const auto &presentation : packet.drafts)
                 if (presentation.request->id == ConfigDraftState::get(state.draft)->id()) {

@@ -210,3 +210,20 @@ It is not the public generated QObject graph yet. Lazy handle materialization,
 new native/QML root accessors, all reply-returning verbs and selected edit-session
 Apply/discard remain required; those adapters will use this identity instead of
 adding a parallel selection validator or configuration cache.
+
+## Selected read projections (Phase 2 increment)
+
+A selected projection narrows an existing store, scoped, draft, preview or
+overlay projection to a generated-handle identity. It is created privately from
+that parent projection and the identity above; it never widens the parent's
+leaves, namespace prefix, schema identity, target or lifetime.
+
+| # | Behavior | Contract |
+|---|---|---|
+| 1 | Capture | Only the selected sources are preflighted. A corrupt disjoint source does not fail a selected leaf read, while a root read still fails. |
+| 2 | Composed overlays | Owner/base capture and atomic cuts stay complete. Each selected receiver narrows facts and logical coverage, so a sibling's token does not cover it. Request IDs are projection-local and correlate only with the initiating projection. |
+| 3 | Candidates | Draft and overlay candidates and pending edits come from the same worker candidate as the parent; there is no second evaluator. Frozen selected reads refuse with `read-frozen`; Discard returns them to the committed state. |
+| 4 | Lifetime | Parent detach, destruction or preview closure invalidates the selected projection and fails its pending reads. Retained snapshots stay readable. |
+
+This is still private plumbing for the generated handle graph. Public handle
+objects, root accessors and handle verbs remain required subsequent work.

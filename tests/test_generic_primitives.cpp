@@ -3,6 +3,7 @@
 #include "configdraft.h"
 #include "configjsoncodec.h"
 #include "configreadprojection.h"
+#include "configreadprojection_p.h"
 #include "configpendingreply_p.h"
 #include "confighandle_p.h"
 #include "configstorehandle.h"
@@ -19,6 +20,148 @@ using T = D::Type;
 class GenericPrimitivesTest : public QObject {
     Q_OBJECT
 private slots:
+    void selectedProjectionPreflightsOnlyItsSources() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const auto aFile = directory.filePath("a.json"), bFile = directory.filePath("b.json");
+        compat::put(aFile, "{\"count\":3}");
+        compat::put(bFile, "{\"count\":9}");
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema =
+            ConfigSchema(D::group({{"a", D::group({{"count", D::leaf(T::SafeInteger, 1)}})},
+                                   {"b", D::group({{"count", D::leaf(T::SafeInteger, 2)}})}}));
+        options.layers = {{"user",
+                           ConfigLayerKind::File,
+                           ConfigAdmissionPolicy::FieldFallback,
+                           {{"a", {"a"}, {}}, {"b", {"b"}, {}}},
+                           true}};
+        options.jsonFiles = {{"user", "a", aFile}, {"user", "b", bFile}};
+        ConfigStore store(options);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QObject presentation;
+        const auto identity = ConfigHandleSelection::capture(
+            ConfigSelection::capture(options.schema, {{"a"}}, options.schema.leaves(),
+                                     ConfigSelection::Target::ReadOnly, "selection"),
+            {"a"});
+        auto *selected =
+            ConfigReadProjectionState::select(store.readProjection(), identity, &presentation);
+        QVERIFY(selected);
+        QCOMPARE(selected->snapshot().paths(), QList<ConfigPath>{{"count"}});
+        QCOMPARE(selected->selectedState({"count"}).value().toInt(), 3);
+        QVERIFY(!selected->selectedState({"b", "count"}).valid());
+        const auto outside = ConfigHandleSelection::capture(
+            ConfigSelection::capture(options.schema, {{"b"}}, options.schema.leaves(),
+                                     ConfigSelection::Target::ReadOnly, "selection"),
+            {"b"});
+        QVERIFY(!ConfigReadProjectionState::select(selected, outside, &presentation));
+        const ConfigSchema foreign(*options.schema.descriptor({}));
+        const auto foreignIdentity = ConfigHandleSelection::capture(
+            ConfigSelection::capture(foreign, {{"a"}}, foreign.leaves(),
+                                     ConfigSelection::Target::ReadOnly, "selection"),
+            {"a"});
+        QVERIFY(!ConfigReadProjectionState::select(store.readProjection(), foreignIdentity,
+                                                   &presentation));
+        compat::put(bFile, "{");
+        std::unique_ptr<ConfigPendingReply> read(ConfigPendingReplyState::read(selected));
+        QTRY_VERIFY(read->isFinished());
+        QVERIFY2(!read->isError(), qPrintable(read->error().code()));
+        QCOMPARE(read->value().snapshot().selectedState({"count"}).value().toInt(), 3);
+        std::unique_ptr<ConfigPendingReply> root(
+            ConfigPendingReplyState::read(store.readProjection()));
+        QTRY_VERIFY(root->isFinished());
+        QVERIFY(root->isError());
+        QCOMPARE(root->error().code(), QString("read-acquisition"));
+        compat::put(bFile, "{\"count\":9}");
+        QVERIFY(store.setUser({"a", "count"}, 7).accepted);
+        QTRY_COMPARE(selected->selectedState({"count"}).value().toInt(), 7);
+        QCOMPARE(selected->snapshot().paths(), QList<ConfigPath>{{"count"}});
+        QCOMPARE(compat::bytes(aFile), QByteArray("{\"count\":3}"));
+    }
+    void selectedProjectionTracksDraftCandidates() {
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema =
+            ConfigSchema(D::group({{"group", D::group({{"a", D::leaf(T::SafeInteger, 1)},
+                                                       {"b", D::leaf(T::SafeInteger, 2)}})}}));
+        options.layers = {{"user",
+                           ConfigLayerKind::File,
+                           ConfigAdmissionPolicy::FieldFallback,
+                           {{"user", {}, {{"group", QVariantMap{{"a", 4}, {"b", 5}}}}}},
+                           true}};
+        ConfigStore store(options);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *draft = store.draft({{"group"}});
+        QVERIFY(draft->valid());
+        QObject presentation;
+        const auto identity = ConfigHandleSelection::capture(
+            ConfigSelection::capture(options.schema, {{"group", "a"}}, draft->paths(),
+                                     ConfigSelection::Target::UserLayer, "selection"),
+            {"group"});
+        auto *frozen =
+            ConfigReadProjectionState::select(draft->readProjection(), identity, &presentation);
+        auto *preview =
+            ConfigReadProjectionState::select(draft->previewProjection(), identity, &presentation);
+        QVERIFY(frozen && preview);
+        QVERIFY(draft->setValue({"group", "a"}, 8).accepted);
+        QCOMPARE(frozen->selectedState({"a"}).pending(), ConfigSelectedState::Pending::Set);
+        QCOMPARE(frozen->selectedState({"a"}).authoredValue().toInt(), 8);
+        QVERIFY(!frozen->selectedState({"a"}).candidateAvailable());
+        QTRY_VERIFY(frozen->selectedState({"a"}).candidateAvailable());
+        QTRY_COMPARE(preview->selectedState({"a"}).candidateValue().toInt(), 8);
+        QCOMPARE(frozen->snapshot().paths(), QList<ConfigPath>{{"a"}});
+        QCOMPARE(preview->snapshot().paths(), QList<ConfigPath>{{"a"}});
+        QVERIFY(!preview->selectedState({"b"}).valid());
+        bool staged = false;
+        draft->stageReset({{"group", "a"}}, this, [&](const ConfigResult &result) {
+            QCOMPARE(result.status, QString("staged"));
+            staged = true;
+        });
+        QTRY_VERIFY(staged);
+        QCOMPARE(frozen->selectedState({"a"}).pending(), ConfigSelectedState::Pending::Remove);
+        QCOMPARE(frozen->selectedState({"a"}).candidateValue().toInt(), 1);
+        QCOMPARE(preview->selectedState({"a"}).candidateValue().toInt(), 1);
+        std::unique_ptr<ConfigPendingReply> refused(ConfigPendingReplyState::read(frozen));
+        QTRY_VERIFY(refused->isFinished());
+        QCOMPARE(refused->error().code(), QString("read-frozen"));
+        QVERIFY(draft->discard());
+        QTRY_COMPARE(frozen->selectedState({"a"}).pending(), ConfigSelectedState::Pending::None);
+        QCOMPARE(frozen->selectedState({"a"}).value().toInt(), 4);
+        std::unique_ptr<ConfigPendingReply> closed(ConfigPendingReplyState::read(preview));
+        QTRY_VERIFY(closed->isFinished());
+        QVERIFY(closed->isError());
+        QCOMPARE(closed->error().code(), QString("read-owner"));
+        QCOMPARE(store.value({"group", "a"}).toInt(), 4);
+        QVERIFY(store.inputs().isEmpty());
+    }
+    void selectedProjectionParentLifetime() {
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema =
+            ConfigSchema(D::group({{"a", D::group({{"count", D::leaf(T::SafeInteger, 3)}})}}));
+        ConfigStore store(options);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *scope = store.scope({"a"}, false);
+        const auto identity = ConfigHandleSelection::capture(
+            ConfigSelection::capture(options.schema, {{"a", "count"}}, options.schema.leaves(),
+                                     ConfigSelection::Target::ReadOnly, "selection"),
+            {"a"});
+        QObject presentation, scheduler;
+        auto *selected =
+            ConfigReadProjectionState::select(scope->readProjection(), identity, &presentation);
+        QVERIFY(selected);
+        QList<ConfigWorkerPacket> held;
+        std::function<void()> onHeld;
+        ConfigStoreTestAccess::holdReadReplies(store, &scheduler, held, onHeld);
+        std::unique_ptr<ConfigPendingReply> reply(ConfigPendingReplyState::read(selected));
+        QTRY_COMPARE(held.size(), 1);
+        scope->detach();
+        QTRY_VERIFY(reply->isFinished());
+        QVERIFY(reply->isError());
+        ConfigStoreTestAccess::releaseReader(store, held);
+        QVERIFY(!ConfigReadProjectionState::available(selected));
+        QCOMPARE(selected->snapshot().paths(), QList<ConfigPath>{{"count"}});
+    }
     void generatedSelectionUsesDeclarations() {
         auto absent = D(T::String);
         absent.optional = true;
@@ -931,6 +1074,69 @@ private slots:
         else {
             QCOMPARE(observed.snapshot().selectedState({"a"}).value().toInt(), expected);
             QVERIFY(ConfigObservationAccess::covers(observed.observation(), a.observation()));
+        }
+        QObject presentation, scheduler;
+        const auto identity = ConfigHandleSelection::capture(
+            ConfigSelection::capture(overlay->schema(), {{}}, overlay->schema().leaves(),
+                                     ConfigSelection::Target::RecordSlot, "selection"));
+        auto *aReader =
+            ConfigReadProjectionState::select(reader, identity.select({{"a"}}), &presentation);
+        auto *bReader =
+            ConfigReadProjectionState::select(reader, identity.select({{"b"}}), &presentation);
+        QVERIFY(aReader && bReader);
+        QCOMPARE(aReader->snapshot().paths(), QList<ConfigPath>{{"a"}});
+        QCOMPARE(bReader->snapshot().paths(), QList<ConfigPath>{{"b"}});
+        if (candidate) {
+            QVERIFY(overlay->setValue({"a"}, 7).accepted);
+            QCOMPARE(aReader->selectedState({"a"}).pending(), ConfigSelectedState::Pending::Set);
+            QVERIFY(!aReader->selectedState({"a"}).candidateAvailable());
+            QTRY_VERIFY(aReader->selectedState({"a"}).candidateAvailable());
+            QCOMPARE(aReader->selectedState({"a"}).candidateValue().toInt(), 7);
+            QCOMPARE(aReader->snapshot().paths(), QList<ConfigPath>{{"a"}});
+            QVERIFY(!aReader->selectedState({"b"}).valid());
+            QCOMPARE(bReader->snapshot().paths(), QList<ConfigPath>{{"b"}});
+            QCOMPARE(bReader->selectedState({"b"}).candidateValue().toInt(), 5);
+        } else {
+            QList<ConfigWorkerPacket> held;
+            std::function<void()> onHeld;
+            ConfigStoreTestAccess::holdReader(*owner, overlay->editorId(), &scheduler, held,
+                                              onHeld);
+            bool aCalled = false, bCalled = false;
+            ConfigReadResult aRead, bRead;
+            const auto aId = aReader->synchronize({}, this, [&](const auto &read) {
+                aRead = read;
+                aCalled = true;
+            });
+            const auto bId = bReader->synchronize({}, this, [&](const auto &read) {
+                bRead = read;
+                bCalled = true;
+            });
+            QCOMPARE(aId, bId); // IDs are projection-local, not cross-view correlation.
+            QTRY_COMPARE(held.size(), 2);
+            const auto first = held.takeFirst();
+            QCOMPARE(first.overlays.first().read.requestId, aId);
+            ConfigStoreTestAccess::inject(*owner, first);
+            QVERIFY(aCalled);
+            QCOMPARE(aRead.status(), QString("observed"));
+            QCOMPARE(aRead.snapshot().paths(), QList<ConfigPath>{{"a"}});
+            QVERIFY(!bCalled); // Sibling capture is still held independently.
+            QCOMPARE(aReader->snapshot().paths(), QList<ConfigPath>{{"a"}});
+            QCOMPARE(bReader->snapshot().paths(), QList<ConfigPath>{{"b"}});
+            QCOMPARE(reader->snapshot().paths(), overlay->schema().leaves());
+            ConfigStoreTestAccess::releaseReader(*owner, held);
+            QTRY_VERIFY(bCalled);
+            QCOMPARE(bRead.status(), QString("observed"));
+            QCOMPARE(bRead.snapshot().paths(), QList<ConfigPath>{{"b"}});
+            const auto retained = aReader->snapshot();
+            bool refused = false;
+            aReader->synchronize(bReader->observation(), this, [&](const auto &read) {
+                QCOMPARE(read.status(), QString("failed"));
+                QCOMPARE(read.error().code, QString("read-observation"));
+                refused = true;
+            });
+            QTRY_VERIFY(refused);
+            QCOMPARE(retained.selectedState({"a"}).value().toInt(), 4);
+            QVERIFY(!retained.selectedState({"b"}).valid());
         }
         QCOMPARE(compat::request(*owner, [&] { return owner->close(); }).status,
                  QString("nothing_to_save"));

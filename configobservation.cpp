@@ -240,7 +240,7 @@ ConfigObservationAccess::pending(const ConfigReadSnapshot &snapshot,
         if (!captured.d)
             continue;
         auto state = *captured.d;
-        const auto edit = edits.constFind(relative);
+        const auto edit = edits.constFind(path);
         state.pending = edit == edits.cend() ? ConfigSelectedState::Pending::None
                         : edit.value()       ? ConfigSelectedState::Pending::Set
                                              : ConfigSelectedState::Pending::Remove;

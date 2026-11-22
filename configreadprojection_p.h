@@ -9,6 +9,7 @@ class ConfigStore;
 class ConfigStoreHandle;
 class ConfigOverlayEditor;
 class ConfigDraft;
+class ConfigHandleSelection;
 struct ConfigOverlayPresentation;
 // One nestable notification fence for local ingress and worker publications.
 // QPointer storage, not a reference into an emitter that a handler may delete.
@@ -29,6 +30,8 @@ public:
     static ConfigReadProjection *get(ConfigStoreHandle *handle);
     static ConfigReadProjection *get(ConfigOverlayEditor *overlay);
     static ConfigReadProjection *get(ConfigDraft *draft, bool preview);
+    static ConfigReadProjection *select(ConfigReadProjection *source,
+                                        const ConfigHandleSelection &selection, QObject *owner);
     static void initialize(ConfigOverlayEditor *overlay, const ConfigReadCapture &capture);
     static ConfigOverlayPresentation eligible(ConfigOverlayEditor *overlay,
                                               const ConfigOverlayPresentation &presentation);
@@ -46,6 +49,7 @@ private:
     explicit ConfigReadProjectionState(ConfigReadProjection *projection);
     static ConfigReadProjection *create(QObject *owner, ConfigStore *store, const QString &name);
     bool live() const;
+    ConfigReadProjectionState *origin();
     QList<ConfigPath> pending(quint64 covered) const;
     void receive(const ConfigReadCapture &capture);
     bool prepare();
@@ -57,6 +61,8 @@ private:
     QPointer<ConfigStoreHandle> handle;
     QPointer<ConfigOverlayEditor> overlay;
     QPointer<ConfigDraft> draft;
+    QPointer<ConfigReadProjection> source;
+    std::shared_ptr<std::atomic_bool> sourceLifetime, selectedPreviewLifetime;
     bool preview = false, frozen = false;
     ConfigPath prefix;
     QList<ConfigPath> paths;
