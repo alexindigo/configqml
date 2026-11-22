@@ -232,6 +232,10 @@ and involuntary switches. Blocked is max(0, wall - CPU - run-queue), clamped onl
 for accounting read skew. Both CPU and CPU + blocked must remain below the same
 16 ms budget. Only runnable queue wait is excluded: lock, worker, IO and fsync
 blocking remain charged latency. Wall spans are still reported, not discarded.
+The CPU check always applies. The CPU + blocked check needs run-queue accounting
+(`kernel.sched_schedstats=1`); where it is unavailable the sample reports
+`runqueue_ns=unmeasured` and `CALLER_WORK_BLOCKED_NOT_MEASURED` with the reason,
+and that check is not counted as passed.
 The existing synchronous model-notification boundary is subtracted componentwise
 from publication accounting; view/delegate work remains separately reported.
 

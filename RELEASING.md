@@ -20,10 +20,16 @@ From the guest workspace with the candidate delivered into `source/`:
 
 Enable the Linux scheduler's own run-queue accounting inside the assigned test
 VM before either suite (`sudo sysctl -w kernel.sched_schedstats=1`), recording and
-restoring its previous value when closing the VM. The private caller-work probes
-fail if accounting is unavailable; they never treat missing data as zero wait.
+restoring its previous value when closing the VM. Release qualification runs the
+full gate: the 16 ms thread-CPU check and the CPU-plus-blocked check. The CPU check
+needs no scheduler accounting and always runs. Without run-queue accounting the
+blocked check is not run and every sample prints `CALLER_WORK_BLOCKED_NOT_MEASURED`
+with its reason; missing data is never treated as zero wait or as a pass. CI
+enables accounting on its runners, so every pull request runs both checks; an
+unprivileged package `check()` reports the blocked check as not measured.
 The thread_work controls use a short guest-only sudo FIFO child on one CPU to
-prove scheduler delay is distinct from blocking. Do not enable or run these
+prove scheduler delay is distinct from blocking; where accounting or passwordless
+sudo is missing they report themselves as skipped with that reason. Do not enable or run these
 controls on the physical VM host. See docs/models.md for the unchanged 16 ms CPU
 and CPU-plus-blocked budget and the separately reported wall/run-queue spans.
 

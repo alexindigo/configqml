@@ -9,12 +9,18 @@
 namespace configqml {
 // Private, opt-in measurement. Released owners acquire no data members and
 // ordinary consumers never read scheduler accounting or emit timing samples.
+// The thread-CPU gate needs no scheduler accounting and always applies. The
+// CPU + blocked gate needs own-thread run-queue accounting
+// (kernel.sched_schedstats): without it that sub-check is reported explicitly as
+// not measured, with its reason, and is never counted as a pass of that gate.
 struct ConfigThreadWorkSample {
     qint64 wall = 0, cpu = 0, runqueue = 0, voluntary = 0, involuntary = 0;
-    bool valid = false;
+    bool valid = false;               // Wall, thread CPU and context switches.
+    bool runqueueMeasured = true;     // Own-thread run-queue wait (schedstats).
+    const char *unmeasured = nullptr; // Reason when runqueueMeasured is false.
     qint64 blocked() const { return qMax(qint64(0), wall - cpu - runqueue); }
     qint64 charged() const { return cpu + blocked(); }
-    bool within(qint64 budget) const { return valid && cpu < budget && charged() < budget; }
+    bool within(qint64 budget) const;
     void report(const char *label) const;
     ConfigThreadWorkSample &operator+=(const ConfigThreadWorkSample &other);
 };
@@ -29,7 +35,8 @@ public:
 private:
     struct Stamp {
         qint64 wall = 0, cpu = 0, runqueue = 0, voluntary = 0, involuntary = 0, tid = 0;
-        bool valid = false;
+        bool valid = false, runqueueValid = false;
+        const char *unmeasured = nullptr;
     };
     static Stamp capture();
     Stamp m_start;

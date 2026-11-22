@@ -27,53 +27,89 @@ ConfigThreadWorkTimer::Stamp ConfigThreadWorkTimer::capture() {
     Stamp stamp;
     timespec wall{}, cpu{};
     rusage usage{};
-    char text[160]{};
-    const int fd = ::open("/proc/thread-self/schedstat", O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        return stamp;
-    const auto count = ::read(fd, text, sizeof(text) - 1);
-    ::close(fd);
-    unsigned long long runtime = 0, wait = 0, slices = 0;
-    if (count <= 0 || std::sscanf(text, "%llu %llu %llu", &runtime, &wait, &slices) != 3 ||
-        ::getrusage(RUSAGE_THREAD, &usage) != 0 ||
+    if (::getrusage(RUSAGE_THREAD, &usage) != 0 ||
         ::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu) != 0 ||
         ::clock_gettime(CLOCK_MONOTONIC, &wall) != 0)
         return stamp;
     stamp.wall = nanos(wall);
     stamp.cpu = nanos(cpu);
-    stamp.runqueue = qint64(wait);
     stamp.voluntary = usage.ru_nvcsw;
     stamp.involuntary = usage.ru_nivcsw;
     stamp.tid = ::gettid();
     stamp.valid = true;
+    char text[160]{};
+    const int fd = ::open("/proc/thread-self/schedstat", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        stamp.unmeasured = "schedstat-unreadable";
+        return stamp;
+    }
+    const auto count = ::read(fd, text, sizeof(text) - 1);
+    ::close(fd);
+    unsigned long long runtime = 0, wait = 0, slices = 0;
+    if (count <= 0 || std::sscanf(text, "%llu %llu %llu", &runtime, &wait, &slices) != 3) {
+        stamp.unmeasured = "schedstat-unreadable";
+        return stamp;
+    }
+    stamp.runqueue = qint64(wait);
+    stamp.runqueueValid = true;
     return stamp;
 }
 ConfigThreadWorkTimer::ConfigThreadWorkTimer() : m_start(capture()) {
-    m_start.valid &= accountingEnabled();
+    if (m_start.runqueueValid && !accountingEnabled()) {
+        // Without schedstats the kernel does not account run-queue delay.
+        m_start.runqueueValid = false;
+        m_start.unmeasured = "kernel.sched_schedstats=0";
+    }
 }
 ConfigThreadWorkSample ConfigThreadWorkTimer::finish() const {
     const auto end = capture();
     ConfigThreadWorkSample result;
     result.valid = m_start.valid && end.valid && end.tid == m_start.tid &&
                    end.wall >= m_start.wall && end.cpu >= m_start.cpu &&
-                   end.runqueue >= m_start.runqueue && end.voluntary >= m_start.voluntary &&
-                   end.involuntary >= m_start.involuntary;
+                   end.voluntary >= m_start.voluntary && end.involuntary >= m_start.involuntary;
+    result.runqueueMeasured = result.valid && m_start.runqueueValid && end.runqueueValid &&
+                              end.runqueue >= m_start.runqueue;
+    if (!result.runqueueMeasured)
+        result.unmeasured = m_start.unmeasured ? m_start.unmeasured
+                            : end.unmeasured   ? end.unmeasured
+                            : !result.valid    ? "invalid-sample"
+                                               : "schedstat-regressed";
     if (result.valid) {
         result.wall = end.wall - m_start.wall;
         result.cpu = end.cpu - m_start.cpu;
-        result.runqueue = end.runqueue - m_start.runqueue;
+        result.runqueue = result.runqueueMeasured ? end.runqueue - m_start.runqueue : 0;
         result.voluntary = end.voluntary - m_start.voluntary;
         result.involuntary = end.involuntary - m_start.involuntary;
     }
     return result;
 }
+bool ConfigThreadWorkSample::within(qint64 budget) const {
+    if (!valid || cpu >= budget)
+        return false;
+    if (runqueueMeasured)
+        return charged() < budget;
+    // Explicit, never silent: the CPU gate passed; the blocked gate was not run.
+    qInfo("CALLER_WORK_BLOCKED_NOT_MEASURED budget_ns=%lld cpu_ns=%lld wall_ns=%lld reason=%s",
+          budget, cpu, wall, unmeasured ? unmeasured : "unknown");
+    return true;
+}
 void ConfigThreadWorkSample::report(const char *label) const {
+    if (!runqueueMeasured) {
+        qInfo("CALLER_WORK %s wall_ns=%lld cpu_ns=%lld runqueue_ns=unmeasured "
+              "blocked_ns=unmeasured charged_ns=unmeasured voluntary=%lld involuntary=%lld "
+              "valid=%d runqueue_unmeasured=%s",
+              label, wall, cpu, voluntary, involuntary, valid, unmeasured ? unmeasured : "unknown");
+        return;
+    }
     qInfo("CALLER_WORK %s wall_ns=%lld cpu_ns=%lld runqueue_ns=%lld blocked_ns=%lld "
           "charged_ns=%lld voluntary=%lld involuntary=%lld valid=%d",
           label, wall, cpu, runqueue, blocked(), charged(), voluntary, involuntary, valid);
 }
 ConfigThreadWorkSample &ConfigThreadWorkSample::operator+=(const ConfigThreadWorkSample &other) {
     valid &= other.valid;
+    if (runqueueMeasured && !other.runqueueMeasured)
+        unmeasured = other.unmeasured;
+    runqueueMeasured &= other.runqueueMeasured;
     wall += other.wall;
     cpu += other.cpu;
     runqueue += other.runqueue;
@@ -85,12 +121,15 @@ ConfigThreadWorkSample operator+(ConfigThreadWorkSample a, const ConfigThreadWor
     return a += b;
 }
 ConfigThreadWorkSample operator-(const ConfigThreadWorkSample &a, const ConfigThreadWorkSample &b) {
-    return {qMax(qint64(0), a.wall - b.wall),
-            qMax(qint64(0), a.cpu - b.cpu),
-            qMax(qint64(0), a.runqueue - b.runqueue),
-            qMax(qint64(0), a.voluntary - b.voluntary),
-            qMax(qint64(0), a.involuntary - b.involuntary),
-            a.valid && b.valid};
+    ConfigThreadWorkSample result{qMax(qint64(0), a.wall - b.wall),
+                                  qMax(qint64(0), a.cpu - b.cpu),
+                                  qMax(qint64(0), a.runqueue - b.runqueue),
+                                  qMax(qint64(0), a.voluntary - b.voluntary),
+                                  qMax(qint64(0), a.involuntary - b.involuntary),
+                                  a.valid && b.valid};
+    result.runqueueMeasured = a.runqueueMeasured && b.runqueueMeasured;
+    result.unmeasured = !a.runqueueMeasured ? a.unmeasured : b.unmeasured;
+    return result;
 }
 ConfigWorkTiming *ConfigWorkTiming::get(QObject *owner) {
     return owner ? static_cast<ConfigWorkTiming *>(owner->property(propertyName).value<QObject *>())

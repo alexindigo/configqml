@@ -2,6 +2,7 @@
 #include "configworktiming_p.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QDebug>
 #include <QProcess>
 #include <QTest>
@@ -13,6 +14,14 @@
 using namespace configqml;
 namespace {
 constexpr qint64 budget = 16000000;
+bool schedulerAccounting() {
+    QFile file("/proc/sys/kernel/sched_schedstats");
+    return file.open(QIODevice::ReadOnly) && file.read(1) == "1";
+}
+QStringList captured;
+void capture(QtMsgType, const QMessageLogContext &, const QString &message) {
+    captured.append(message);
+}
 void burnCpu(qint64 ns) {
     timespec start{}, next{};
     ::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &start);
@@ -113,6 +122,33 @@ private slots:
         QVERIFY(state->lastModel.valid);
         QVERIFY(!ConfigThreadWorkSample{}.within(budget));
     }
+    void unmeasuredBlockedGateIsExplicit() {
+        // Without run-queue accounting the CPU gate still decides; the blocked
+        // gate is reported as not measured with its reason, never as passed.
+        ConfigThreadWorkSample light{40000000, 1000000, 0, 0, 0, true};
+        light.runqueueMeasured = false;
+        light.unmeasured = "kernel.sched_schedstats=0";
+        auto heavy = light;
+        heavy.cpu = budget;
+        captured.clear();
+        const auto previous = qInstallMessageHandler(capture);
+        const bool lightWithin = light.within(budget);
+        const bool heavyWithin = heavy.within(budget);
+        light.report("unmeasured-control");
+        qInstallMessageHandler(previous);
+        QVERIFY(lightWithin);
+        QVERIFY(!heavyWithin);
+        QCOMPARE(captured.size(), 2);
+        QVERIFY(captured[0].startsWith("CALLER_WORK_BLOCKED_NOT_MEASURED"));
+        QVERIFY(captured[0].contains("reason=kernel.sched_schedstats=0"));
+        QVERIFY(captured[1].contains("blocked_ns=unmeasured"));
+        QVERIFY(captured[1].contains("runqueue_unmeasured=kernel.sched_schedstats=0"));
+        // A measured sample keeps the CPU + blocked gate.
+        ConfigThreadWorkSample blocked{40000000, 1000000, 0, 0, 0, true};
+        QVERIFY(!blocked.within(budget));
+        blocked.runqueue = 39500000;
+        QVERIFY(blocked.within(budget));
+    }
     void realWorkAndScheduling_data() {
         QTest::addColumn<QString>("kind");
         QTest::addColumn<QString>("gate");
@@ -129,7 +165,20 @@ private slots:
         QFETCH(QString, kind);
         QFETCH(QString, gate);
         QFETCH(int, exit);
+        // These controls exercise the blocked/run-queue sub-check itself. Where
+        // the environment cannot measure it, say so explicitly rather than pass.
+        const bool needsRunqueue = kind == "schedule" || (kind == "block" && gate == "charged");
+        if (needsRunqueue && !schedulerAccounting())
+            QSKIP("CALLER_WORK_BLOCKED_NOT_MEASURED control: kernel.sched_schedstats=0");
+        if (kind == "schedule" && QProcess::execute("sudo", {"-n", "true"}) != 0)
+            QSKIP("CALLER_WORK_BLOCKED_NOT_MEASURED control: SCHED_FIFO contender needs "
+                  "passwordless sudo");
         QProcess child;
+        // The control child has no QtTest message handler: keep its samples in
+        // this test's output rather than a system journal.
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert("QT_FORCE_STDERR_LOGGING", "1");
+        child.setProcessEnvironment(environment);
         child.start(QCoreApplication::applicationFilePath(), {"--control", kind, gate});
         QVERIFY(child.waitForFinished(10000));
         const auto output = child.readAllStandardError() + child.readAllStandardOutput();
