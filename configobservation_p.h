@@ -11,6 +11,9 @@ struct ConfigObservationDependency {
     quint64 incarnation = 0, delivery = 0;
     QList<ConfigPath> paths;
     QByteArray targetIdentity;
+    // Logical declarations within an atomic record-slot target. Storage paths
+    // remain the actual owner/base dependency cuts, never nested write routes.
+    std::optional<QList<ConfigPath>> logicalPaths;
     QString previewId;
     std::shared_ptr<std::atomic_bool> previewLifetime;
     quint64 previewEpoch = 0;
@@ -78,6 +81,8 @@ class ConfigObservationAccess {
 public:
     static ConfigObservation observation(QList<ConfigObservationDependency> dependencies);
     static const QList<ConfigObservationDependency> &dependencies(const ConfigObservation &token);
+    static ConfigObservation withLogicalSelection(const ConfigObservation &token,
+                                                  const QList<ConfigPath> &paths);
     static bool covers(const ConfigObservation &installed, const ConfigObservation &after);
     static bool applicable(const ConfigObservation &selection, const ConfigObservation &after);
     static ConfigSelectedState state(ConfigSelectedStateData data);

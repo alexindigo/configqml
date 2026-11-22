@@ -483,6 +483,8 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
     if (t->original && t->selection.mode != ConfigOverlayMode::Editor &&
         t->error == "overlay-selection")
         t->error = "overlay-identity";
+    t->captured.observation = ConfigObservationAccess::withLogicalSelection(
+        t->captured.observation, t->captured.schema.leaves());
     auto p = presentation(t->editorId, t->captured);
     if (t->error.isEmpty())
         t->error = p.error;

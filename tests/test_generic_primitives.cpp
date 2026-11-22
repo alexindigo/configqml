@@ -820,6 +820,122 @@ private slots:
                 << 3 << ownerFirst << true << true << false << true;
         }
     }
+    void composedSelectedCoverage_data() {
+        QTest::addColumn<bool>("ownerFirst");
+        QTest::addColumn<bool>("candidate");
+        QTest::newRow("owner-first-view") << true << false;
+        QTest::newRow("base-first-view") << false << false;
+        QTest::newRow("owner-first-candidate") << true << true;
+        QTest::newRow("base-first-candidate") << false << true;
+    }
+    void composedSelectedCoverage() {
+        QFETCH(bool, ownerFirst);
+        QFETCH(bool, candidate);
+        ConfigStoreOptions baseOptions;
+        baseOptions.autoSave = false;
+        baseOptions.schema =
+            ConfigSchema(D::group({{"settings", D::group({{"a", D::leaf(T::SafeInteger, 1)},
+                                                          {"b", D::leaf(T::SafeInteger, 2)}})}}));
+        auto row = D(T::Record);
+        row.fields = {{"id", D::leaf(T::String, QString())}};
+        ConfigStoreOptions ownerOptions;
+        ownerOptions.autoSave = false;
+        ownerOptions.schema = ConfigSchema(D::group({{"rows", D::list(row, {})}}));
+        ownerOptions.layers = {
+            {"user",
+             ConfigLayerKind::File,
+             ConfigAdmissionPolicy::FieldFallback,
+             {{"user",
+               {},
+               {{"rows",
+                 QVariantList{QVariantMap{
+                     {"id", "x"}, {"instanceSettings", QVariantMap{{"a", 4}, {"b", 5}}}}}}}}},
+             true}};
+        std::unique_ptr<ConfigStore> base, owner;
+        if (ownerFirst) {
+            owner = std::make_unique<ConfigStore>(ownerOptions);
+            base = std::make_unique<ConfigStore>(baseOptions);
+        } else {
+            base = std::make_unique<ConfigStore>(baseOptions);
+            owner = std::make_unique<ConfigStore>(ownerOptions);
+        }
+        QTRY_COMPARE(base->status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(owner->status(), ConfigStore::Status::Ready);
+        ConfigOverlayOptions options;
+        options.base = base->scope({"settings"}, false);
+        options.ownerPath = {"rows"};
+        options.ownerGeneration = owner->info({"rows"}).publicationGeneration;
+        options.entryPath = {{ConfigValueSelector::Kind::Index, {}, 0}};
+        options.identityPath = {{ConfigValueSelector::Kind::Key, "id", 0}};
+        options.identityValue = "x";
+        options.overrideKey = "instanceSettings";
+        options.mode = candidate ? ConfigOverlayMode::Editor : ConfigOverlayMode::View;
+        const auto opened = compat::request(*owner, [&] { return owner->openOverlay(options); });
+        QCOMPARE(opened.status, QString("opened"));
+        auto *overlay = ConfigStoreTestAccess::overlay(*owner, opened.editorId);
+        auto *reader = overlay->readProjection();
+        if (candidate) {
+            QVERIFY(overlay->setValue({"a"}, 6).accepted);
+            QTRY_VERIFY(reader->selectedState({"a"}).candidateAvailable());
+            QCOMPARE(reader->selectedState({"a"}).candidateValue().toInt(), 6);
+        }
+        const int expected = candidate ? 6 : 4;
+        const auto whole = reader->snapshot();
+        const auto a = ConfigObservationAccess::select(whole, {{"a"}});
+        const auto b = ConfigObservationAccess::select(whole, {{"b"}});
+        QCOMPARE(a.paths(), QList<ConfigPath>{{"a"}});
+        QCOMPARE(a.selectedState({"a"}).value().toInt(), expected);
+        QVERIFY(!a.selectedState({"b"}).valid());
+        const auto wholeDependencies = ConfigObservationAccess::dependencies(whole.observation());
+        QCOMPARE(wholeDependencies.size(), 2);
+        qsizetype targeted = 0;
+        for (const auto &dependency : wholeDependencies)
+            if (!dependency.targetIdentity.isEmpty()) {
+                ++targeted;
+                QVERIFY(dependency.logicalPaths.has_value());
+                QCOMPARE(*dependency.logicalPaths, (QList<ConfigPath>{{"a"}, {"b"}}));
+            }
+        QCOMPARE(targeted, qsizetype(1));
+        // Atomic owner/base cuts must not be replaced by logical setting paths.
+        for (const auto &selected : {a, b}) {
+            const auto dependencies = ConfigObservationAccess::dependencies(selected.observation());
+            QCOMPARE(dependencies.size(), wholeDependencies.size());
+            for (qsizetype i = 0; i < dependencies.size(); ++i) {
+                QCOMPARE(dependencies[i].incarnation, wholeDependencies[i].incarnation);
+                QCOMPARE(dependencies[i].delivery, wholeDependencies[i].delivery);
+                QCOMPARE(dependencies[i].paths, wholeDependencies[i].paths);
+                QCOMPARE(dependencies[i].targetIdentity, wholeDependencies[i].targetIdentity);
+                QCOMPARE(dependencies[i].previewId, wholeDependencies[i].previewId);
+                QCOMPARE(dependencies[i].previewLifetime, wholeDependencies[i].previewLifetime);
+                QCOMPARE(dependencies[i].previewEpoch, wholeDependencies[i].previewEpoch);
+            }
+        }
+        QVERIFY(!ConfigObservationAccess::applicable(b.observation(), a.observation()));
+        QVERIFY(!ConfigObservationAccess::applicable(a.observation(), b.observation()));
+        QVERIFY(!ConfigObservationAccess::covers(a.observation(), whole.observation()));
+        QVERIFY(ConfigObservationAccess::covers(whole.observation(), a.observation()));
+        QVERIFY(ConfigObservationAccess::covers(a.observation(), a.observation()));
+        const auto restricted = ConfigObservationAccess::select(a, {{"a"}, {"b"}});
+        QCOMPARE(restricted.paths(), a.paths());
+        QVERIFY(!ConfigObservationAccess::covers(restricted.observation(), whole.observation()));
+        bool called = false;
+        ConfigReadResult observed;
+        reader->synchronize(a.observation(), this, [&](const auto &result) {
+            observed = result;
+            called = true;
+        });
+        QTRY_VERIFY(called);
+        QCOMPARE(observed.status(), candidate ? QString("failed") : QString("observed"));
+        if (candidate)
+            QCOMPARE(observed.error().code, QString("read-frozen"));
+        else {
+            QCOMPARE(observed.snapshot().selectedState({"a"}).value().toInt(), expected);
+            QVERIFY(ConfigObservationAccess::covers(observed.observation(), a.observation()));
+        }
+        QCOMPARE(compat::request(*owner, [&] { return owner->close(); }).status,
+                 QString("nothing_to_save"));
+        QVERIFY(!a.observation().valid());
+    }
     void heldRuntimeRead() {
         QFETCH(int, value);
         QFETCH(bool, ownerFirst);

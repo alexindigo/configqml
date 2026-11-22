@@ -89,6 +89,14 @@ Committed target coverage survives editor closure while its owner lives. Staged
 coverage additionally names its edit lifetime/epoch and cannot acknowledge a
 committed runtime read.
 
+Composed observations retain two independent kinds of coverage: the actual
+atomic owner/base storage cuts, and the selected declared leaves within the
+checked record-slot target. Narrowing a snapshot narrows logical coverage, never
+its atomic storage dependency paths. A sibling leaf cannot certify another
+leaf merely because both use the same record; a reader of the selected superset
+can cover it. Candidate tokens keep their preview lifetime/epoch under the same
+selection operation. These identities do not create nested persistence routes.
+
 Two acknowledgments are intentional: a saved/current writer does not mean a
 different runtime view has installed the result. Equal/no-edit/no-token cases
 still acknowledge without fake value notifications. A recoverable read failure

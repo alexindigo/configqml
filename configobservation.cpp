@@ -89,6 +89,14 @@ ConfigObservationAccess::dependencies(const ConfigObservation &token) {
     static const QList<ConfigObservationDependency> empty;
     return token.d ? token.d->dependencies : empty;
 }
+ConfigObservation ConfigObservationAccess::withLogicalSelection(const ConfigObservation &token,
+                                                                const QList<ConfigPath> &paths) {
+    auto dependencies = ConfigObservationAccess::dependencies(token);
+    for (auto &dependency : dependencies)
+        if (!dependency.targetIdentity.isEmpty())
+            dependency.logicalPaths = paths;
+    return observation(std::move(dependencies));
+}
 namespace {
 bool contains(const ConfigObservationDependency &have, const ConfigObservationDependency &need) {
     if (have.incarnation != need.incarnation ||
@@ -102,6 +110,13 @@ bool contains(const ConfigObservationDependency &have, const ConfigObservationDe
     for (const auto &path : need.paths)
         if (!have.paths.contains(path))
             return false;
+    if (!have.targetIdentity.isEmpty() && need.logicalPaths) {
+        if (!have.logicalPaths)
+            return false;
+        for (const auto &path : *need.logicalPaths)
+            if (!have.logicalPaths->contains(path))
+                return false;
+    }
     return true;
 }
 } // namespace
@@ -203,11 +218,13 @@ ConfigReadSnapshot ConfigObservationAccess::select(const ConfigReadSnapshot &sna
     }
     data.prefix = prefix;
     auto dependencies = ConfigObservationAccess::dependencies(data.observation);
-    // A one-owner projection's token covers only its declared selection. Composed
-    // projections retain their actual atomic owner and base dependency cuts.
-    if (!sameSelection && dependencies.size() == 1) {
-        dependencies.first().paths = data.selection;
-        data.observation = observation(dependencies);
+    if (!sameSelection) {
+        // Ordinary projections select actual declared storage leaves. Composed
+        // projections narrow logical coverage without rewriting atomic cuts.
+        if (dependencies.size() == 1 && dependencies.first().targetIdentity.isEmpty())
+            dependencies.first().paths = data.selection;
+        data.observation =
+            withLogicalSelection(observation(std::move(dependencies)), data.selection);
     }
     return ConfigObservationAccess::snapshot(std::move(data));
 }
