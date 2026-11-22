@@ -360,6 +360,7 @@ static bool sameConfirmedContent(const QVariant &a, const QVariant &b) {
 }
 ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &result, bool initial) {
     ConfigWorkerPacket packet;
+    packet.deliveryGeneration = ++m_deliveryGeneration;
     auto &groups = packet.retainedGroups.emplace();
     for (const auto &capture : m_groups) {
         auto info = capture.info;
@@ -391,6 +392,8 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
         m_overlayDelivered[it.key()] = metadata;
     }
     packet.overlays = std::move(m_overlayPackets);
+    for (auto &presentation : packet.overlays)
+        presentation.deliveryGeneration = packet.deliveryGeneration;
     m_overlayPackets.clear();
     packet.result = result;
     packet.snapshot.generation = ++m_generation;
@@ -410,26 +413,15 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
                 revisions.append(QString::number(m_listRevisions.value(policy.policyId)));
         if (!m_listInputs.contains(path) || m_listInputs.value(path) != *value ||
             m_listMetadataKeys.value(path) != revisions) {
-            QVariant projectedValue = *value;
-            QString error;
-            for (const auto &policy : m_listPolicies) {
-                if (policy.path != path)
-                    continue;
-                const auto projected = projectRecordLists(
-                    policy, m_listMetadata.value(policy.policyId), projectedValue);
-                if (!projected.error.isEmpty()) {
-                    error = projected.error;
-                    break;
-                }
-                projectedValue = projected.value;
-            }
-            if (!error.isEmpty()) {
-                packet.error = error;
+            const auto projected =
+                projectCandidateLeaf(path, *value, m_listPolicies, m_listMetadata);
+            if (!projected.ok()) {
+                packet.error = projected.errors.first().code;
                 packet.terminal = !initial;
             } else {
                 m_listInputs[path] = *value;
                 m_listMetadataKeys[path] = revisions;
-                m_listOutputs[path] = projectedValue;
+                m_listOutputs[path] = projected.value;
             }
         }
         if (m_layers->info(path).maskedBy.isEmpty() && m_listOutputs.contains(path))
@@ -511,6 +503,28 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
     packet.drafts = draftPresentations();
     overlayNotify();
     packet.admitted = std::make_shared<const ConfigSnapshot>(m_previous);
+    if (!result || result->operation != "reload" || result->status != "failed")
+        packet.readSnapshot = readSnapshot(m_options.schema.leaves(), packet.admitted);
+    if (result && result->status != "failed") {
+        if (!result->editorId.isEmpty() && m_overlayCaptures.contains(result->editorId))
+            packet.completionObservation = m_overlayCaptures.value(result->editorId).observation;
+        else {
+            QList<ConfigPath> paths;
+            for (const auto &covered : result->coverage)
+                if (!paths.contains(covered.path))
+                    paths.append(covered.path);
+            if (paths.isEmpty() && result->requestId == m_save.requestId &&
+                !m_save.selection.isEmpty())
+                paths = ConfigSelection::capture(
+                            m_options.schema, m_save.selection, m_options.schema.leaves(),
+                            ConfigSelection::Target::ReadOnly, "read-selection")
+                            .leaves;
+            packet.completionObservation =
+                ConfigObservationAccess::select(packet.readSnapshot,
+                                                paths.isEmpty() ? m_options.schema.leaves() : paths)
+                    .observation();
+        }
+    }
     packet.sourceStates = m_sourceStates;
     for (auto &state : *packet.sourceStates)
         state.fallbackState = m_layers->fallbackState(state.sourceId);
@@ -692,6 +706,13 @@ void ConfigWorker::process(const ConfigCommand &command) {
     if (!command.input || command.input->kind != ConfigInput::Kind::Group || m_failed || m_closed)
         coverInput(command);
     if (m_failed || m_closed || !m_layers->valid()) {
+        if (command.read) {
+            ConfigWorkerPacket packet;
+            packet.reads.append(
+                {command.read->projectionId, command.read->requestId, 0, 0, {}, "read-owner"});
+            post(packet);
+            return;
+        }
         auto result = resultFor(command);
         result.status = "failed";
         result.error = {m_closed ? "store-closed" : "worker-stopped", {}, command.operation};
@@ -699,6 +720,10 @@ void ConfigWorker::process(const ConfigCommand &command) {
         post(publish(result));
         if (command.operation == "close")
             m_closed = true;
+        return;
+    }
+    if (command.operation == "overlayCandidate") {
+        overlayCandidate(command);
         return;
     }
     if (command.operation.startsWith("overlay") || command.operation == "openOverlay") {
@@ -711,6 +736,10 @@ void ConfigWorker::process(const ConfigCommand &command) {
     }
     if (command.draft) {
         resolveDraft(command);
+        return;
+    }
+    if (command.operation == "synchronize") {
+        synchronizeRead(command);
         return;
     }
     if (command.operation == "retainGroup" || command.operation == "saveGroup" ||

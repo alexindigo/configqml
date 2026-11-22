@@ -4,6 +4,7 @@
 #include "configshutdown_p.h"
 #include "configconsumer_p.h"
 #include "configchange_p.h"
+#include "configreadprojection_p.h"
 #include "configlistmodel.h"
 #include <QThread>
 #include <QUuid>
@@ -18,6 +19,7 @@ ConfigStore::ConfigStore(const ConfigStoreOptions &options, QObject *parent)
     : QObject(parent), m_schema(options.schema),
       m_storeId(options.storeId.isEmpty() ? QUuid::createUuid().toString() : options.storeId) {
     m_changes = std::make_unique<ConfigChangePublisher>();
+    readProjection();
     m_storeId = QString(m_storeId.constData(), m_storeId.size());
     qRegisterMetaType<ConfigResult>();
     qRegisterMetaType<ConfigInput>();
@@ -300,6 +302,7 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
             m_presentations.remove(path);
     }
     // Owned input, sequence, queueing and cache installation all precede consumer reentry.
+    const ConfigPublicationScope publication(this);
     if (changed && ConfigChangePublisher::prepare(this, {{m_changes.get(), {path}}}))
         boundary.invoke([&] { emit valuesChanged({path}); });
     return handle;
@@ -477,6 +480,7 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
             }
         }
     }
+    ConfigReadProjectionState::install(this, packet);
     if (packet.sourceStates)
         m_sourceStates = *packet.sourceStates;
     // Preparation invokes bindings and property handlers too. A nested event
@@ -499,7 +503,6 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
             acknowledgements[it.key()] = it->generation;
         }
     }
-    m_publishingModels = false;
     m_owner->acknowledgeModels(acknowledgements);
     if (packet.admitted && !boundary.invoke([&] { emit published(); }))
         return;
@@ -521,11 +524,17 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
         return;
     if (statusChange && !boundary.invoke([&] { emit statusChanged(); }))
         return;
+    if (!boundary.invoke([&] { ConfigReadProjectionState::complete(this); }))
+        return;
+    m_publishingModels = false;
+    if (!boundary.invoke([&] { ConfigReadProjectionState::deliver(this); }))
+        return;
     if (packet.result) {
         if (packet.result->operation == "close" && !m_threadStopped) {
             m_worker = nullptr;
             m_closeResult = packet.result;
-        } else if (!boundary.invoke([&] { receiveResult(*packet.result); }))
+        } else if (!boundary.invoke(
+                       [&] { receiveCompletion({*packet.result, packet.completionObservation}); }))
             return;
     }
     if (packet.sourceError && !boundary.invoke([&] {
@@ -541,8 +550,14 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
     if (!packet.models.isEmpty())
         m_lastLibraryPublicationNanos = publicationTimer.nsecsElapsed() - modelNotifications;
 }
-void ConfigStore::receiveResult(const ConfigResult &input) {
-    const auto result = m_schema.diagnostics().sanitize(input);
+void ConfigStore::receiveResult(const ConfigResult &input) { receiveCompletion({input, {}}); }
+void ConfigStore::receiveCompletion(const ConfigCompletion &completion) {
+    if (m_publishingModels) {
+        QMetaObject::invokeMethod(
+            this, [this, completion] { receiveCompletion(completion); }, Qt::QueuedConnection);
+        return;
+    }
+    const auto result = m_schema.diagnostics().sanitize(completion.result);
     if (result.requestId < m_nextCompletion || !m_pending.contains(result.requestId))
         return;
     if (result.operation == "retainGroup" && result.status == "failed") {
@@ -552,7 +567,7 @@ void ConfigStore::receiveResult(const ConfigResult &input) {
             else
                 ++it;
     }
-    m_results[result.requestId] = result;
+    m_results[result.requestId] = {result, completion.observation};
     deliver();
 }
 void ConfigStore::deliver() {
@@ -561,7 +576,8 @@ void ConfigStore::deliver() {
     m_delivering = true;
     ConfigConsumerGuard boundary(this);
     while (m_results.contains(m_nextCompletion)) {
-        const auto result = m_results.take(m_nextCompletion);
+        const auto completion = m_results.take(m_nextCompletion);
+        const auto &result = completion.result;
         auto pending = m_pending.take(m_nextCompletion++); // Detach before arbitrary reentry.
         if (result.operation == "openOverlay") {
             const auto presentation = m_overlayPresentations.take(result.requestId);
@@ -589,16 +605,21 @@ void ConfigStore::deliver() {
         }
         if (!boundary.invoke([&] { emit completed(result); }))
             return;
+        if (!boundary.invoke(
+                [&] { ConfigReadProjectionState::operation(readProjection(), completion); }))
+            return;
         if (result.operation == "autosave" && !boundary.invoke([&] { emit autoSaved(result); }))
             return;
         if (pending.context && pending.callback) {
             if (pending.context->thread() == QThread::currentThread())
-                boundary.invoke([&] { pending.callback(result); });
+                boundary.invoke([&] { invokeCompletion(pending.callback, completion); });
             else
                 QMetaObject::invokeMethod(
                     pending.context,
-                    [context = pending.context, callback = std::move(pending.callback), result] {
-                        ConfigConsumerGuard(context).invoke([&] { callback(result); });
+                    [context = pending.context, callback = std::move(pending.callback),
+                     completion] {
+                        ConfigConsumerGuard(context).invoke(
+                            [&] { invokeCompletion(callback, completion); });
                     },
                     Qt::QueuedConnection);
         }

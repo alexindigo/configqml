@@ -2,6 +2,7 @@
 #include "configdraft.h"
 #include "configdraft_p.h"
 #include "configshutdown_p.h"
+#include "configreadprojection_p.h"
 #include <QUuid>
 
 namespace configqml {
@@ -22,16 +23,16 @@ DraftRegistry *registry(ConfigStore *store) {
     return result;
 }
 void deliver(const QPointer<QObject> &target, const ConfigStore::Callback &callback,
-             const ConfigResult &result) {
+             const ConfigCompletion &completion) {
     if (!target || !callback)
         return;
     if (target->thread() == QThread::currentThread())
-        callback(result);
+        invokeCompletion(callback, completion);
     else
         QMetaObject::invokeMethod(
             target,
-            [target, callback, result] {
-                ConfigConsumerGuard(target).invoke([&] { callback(result); });
+            [target, callback, completion] {
+                ConfigConsumerGuard(target).invoke([&] { invokeCompletion(callback, completion); });
             },
             Qt::QueuedConnection);
 }
@@ -75,21 +76,43 @@ void ConfigDraftState::reset() {
     m_valuesPending = false;
     m_frozen.clear();
     m_live.clear();
+    m_frozenRead = m_liveRead = {};
     m_error.clear();
+}
+void ConfigDraftState::capture(const QMap<ConfigPath, std::optional<QVariant>> &edits) {
+    resolveRequest(edits, false, nullptr, {}, {}, true);
 }
 quint64 ConfigDraftState::resolve(const QMap<ConfigPath, std::optional<QVariant>> &edits,
                                   bool stage, QObject *context, ConfigStore::Callback callback,
                                   const QString &failure) {
+    return resolveRequest(edits, stage, context, std::move(callback), failure, false);
+}
+quint64 ConfigDraftState::resolveRequest(const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                                         bool stage, QObject *context,
+                                         ConfigStore::Callback callback, const QString &failure,
+                                         bool control) {
     auto *store = m_draft->m_store.data();
     const QPointer<QObject> target(context ? context : m_draft);
     const QPointer<ConfigDraft> draft(m_draft);
-    const auto id = store->registerRequest(this, [draft, target, callback](const ConfigResult &r) {
-        if (draft)
-            deliver(target, callback, r);
-    });
-    const auto operation = stage ? QString("stageReset") : QString("draftRefresh");
+    const auto id =
+        control ? 0
+                : store->registerRequest(
+                      this, ConfigPairedCallback{[draft, target,
+                                                  callback](const ConfigCompletion &completion) {
+                          if (!draft)
+                              return;
+                          if (ConfigReadProjectionState::operation(draft->readProjection(),
+                                                                   completion) &&
+                              draft)
+                              deliver(target, callback, completion);
+                      }});
+    const auto operation = control ? QString("draftCapture")
+                           : stage ? QString("stageReset")
+                                   : QString("draftRefresh");
     if (!failure.isEmpty() || !store->m_accepting ||
         store->status() != ConfigStore::Status::Ready) {
+        if (control)
+            return 0;
         ConfigResult result;
         result.requestId = id;
         result.storeId = store->m_storeId;
@@ -109,13 +132,18 @@ quint64 ConfigDraftState::resolve(const QMap<ConfigPath, std::optional<QVariant>
     for (const auto &path : request->paths)
         request->ingress[path] = store->m_owner->overlayEndpoint()->revision(path);
     request->edits = edits;
+    request->previewId = m_draft->m_previewId;
+    request->previewLifetime = m_draft->m_previewLifetime;
+    request->previewEpoch = m_previewEpoch + 1;
     ConfigCommand command{id, store->m_sequence, operation, {}};
     command.draft = request;
-    m_pending = id;
-    m_pendingStage = stage;
-    m_previousSettled = m_settled;
-    m_settled = false;
-    m_draft->m_busy = true;
+    if (!control) {
+        m_pending = id;
+        m_pendingStage = stage;
+        m_previousSettled = m_settled;
+        m_settled = false;
+        m_draft->m_busy = true;
+    }
     if (!store->m_owner->dispatch(command)) {
         ConfigWorkerPacket packet;
         ConfigResult result;
@@ -142,8 +170,7 @@ void ConfigDraftState::install(ConfigStore *store, const ConfigWorkerPacket &pac
             continue;
         auto *state = static_cast<ConfigDraftState *>(object.data());
         auto *draft = state->m_draft;
-        if (p.request->lifetime != state->m_lifetime || !*state->m_lifetime ||
-            p.request->epoch != state->m_epoch || p.generation <= state->m_generation)
+        if (!state->current(*p.request) || p.generation <= state->m_generation)
             continue;
         if (p.requestId && p.requestId != state->m_pending)
             continue;
@@ -152,13 +179,15 @@ void ConfigDraftState::install(ConfigStore *store, const ConfigWorkerPacket &pac
         if (p.error.isEmpty()) {
             state->m_frozen = p.frozen;
             state->m_live = p.live;
+            state->m_frozenRead = p.frozenRead;
+            state->m_liveRead = p.liveRead;
             if (p.requestId)
                 draft->m_edits = p.request->edits;
             state->m_removals = removals(draft->m_edits);
             state->m_acceptedEpoch = state->m_epoch;
             state->m_settled = true;
             state->m_valuesPending |= bool(p.requestId);
-        } else
+        } else if (p.requestId)
             state->m_settled =
                 p.requestId && state->m_pendingStage ? state->m_previousSettled : false;
         if (p.requestId) {
@@ -201,31 +230,14 @@ quint64 ConfigDraft::stageReset(const QList<ConfigPath> &selection, QObject *con
                                 ConfigStore::Callback callback) {
     if (!valid() || m_busy)
         return 0;
-    QString error;
-    QSet<ConfigPath> seen, selected;
-    if (selection.isEmpty())
-        error = "draft-selection";
-    for (const auto &path : selection) {
-        const auto descriptor = m_schema.descriptor(path);
-        if (!descriptor || seen.contains(path)) {
-            error = "draft-selection";
-            break;
-        }
-        seen.insert(ownPath(path));
-        bool found = false;
-        for (const auto &leaf : paths())
-            if (startsWith(leaf, path)) {
-                selected.insert(leaf);
-                found = true;
-            }
-        if (!found)
-            error = "draft-selection";
-    }
+    const ConfigPublicationScope publication(m_store);
+    const auto selected = ConfigSelection::capture(
+        m_schema, selection, paths(), ConfigSelection::Target::UserLayer, "draft-selection");
     auto edits = m_edits;
-    for (const auto &path : selected)
+    for (const auto &path : selected.leaves)
         edits[path] = std::nullopt;
-    const auto id =
-        ConfigDraftState::get(this)->resolve(edits, true, context, std::move(callback), error);
+    const auto id = ConfigDraftState::get(this)->resolve(edits, true, context, std::move(callback),
+                                                         selected.error);
     if (prepareChanges({}))
         ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
     return id;
@@ -235,22 +247,51 @@ QMap<ConfigPath, QVariant>
 ConfigWorker::draftCandidate(const ConfigLayers &base, const QList<ConfigPath> &paths,
                              const QMap<ConfigPath, std::optional<QVariant>> &edits,
                              QString &error) const {
-    auto candidate = base;
-    const auto outcome = candidate.applyEdits(edits);
-    if (!outcome.accepted) {
-        error =
-            outcome.errors.isEmpty() ? QString("draft-resolution") : outcome.errors.first().code;
+    auto selection = ConfigSelection::capture(
+        base.schema(), paths, paths, ConfigSelection::Target::UserLayer, "draft-selection");
+    selection.owner = m_endpoint;
+    const auto candidate = resolveCandidate(base, ConfigEditBatch::capture(selection, edits),
+                                            m_listPolicies, m_listMetadata);
+    if (!candidate.valid()) {
+        error = candidate.error;
         return {};
     }
-    QMap<ConfigPath, QVariant> values;
-    for (const auto &path : paths) {
-        const auto edit = edits.constFind(path);
-        // Explicit set previews keep their existing authored-value semantics.
-        values[path] = edit != edits.cend() && edit.value()
-                           ? *edit.value()
-                           : candidate.value(path).value_or(QVariant());
-    }
-    return values;
+    // Explicit set previews keep their existing authored-value semantics.
+    return candidatePresentation(candidate);
+}
+ConfigCandidate
+ConfigWorker::resolveCandidate(const ConfigLayers &base, const ConfigEditBatch &batch,
+                               const QMap<QString, ConfigRecordListPolicySpec> &policies,
+                               const QMap<QString, ConfigRecordListMetadata> &metadata,
+                               const std::function<QString(const ConfigInput &)> &admission) const {
+    ++m_candidateResolutions;
+    return configqml::resolveCandidate(base, batch, policies, metadata, admission);
+}
+QVariantList ConfigWorker::candidateKey(const QList<ConfigPath> &paths) const {
+    QVariantList key;
+    for (const auto &layer : m_layers->m_layers)
+        for (const auto &state : layer.sources) {
+            const auto &source = state.source;
+            // A complete source is a dependency: an opaque sibling can change
+            // whole-source fallback after removal. Projection callbacks can
+            // compose sources, so retain their declared context conservatively.
+            bool selected = !m_options.projections.isEmpty();
+            for (const auto &path : paths)
+                selected |= startsWith(path, source.prefix) || startsWith(source.prefix, path);
+            if (!selected)
+                continue;
+            key.append(QVariant(QVariantList{layer.descriptor.id, source.id, source.raw,
+                                             source.exists, source.available, source.localIntent,
+                                             state.admissionSource.raw, state.rejected,
+                                             state.projectionError}));
+            if (!m_options.projections.isEmpty())
+                key.append(QVariant(QVariantList{source.bytes, source.revision}));
+        }
+    for (const auto &policy : m_listPolicies)
+        if (paths.contains(policy.path))
+            key.append(
+                QVariant(QVariantList{policy.policyId, m_listRevisions.value(policy.policyId)}));
+    return key;
 }
 void ConfigWorker::resolveDraft(const ConfigCommand &command) {
     const auto request = command.draft;
@@ -259,7 +300,7 @@ void ConfigWorker::resolveDraft(const ConfigCommand &command) {
     auto previous = m_draftCaptures.value(request->id);
     if (!request->lifetime || !*request->lifetime)
         error = "draft-closed";
-    if (command.operation == "stageReset")
+    if (command.operation == "stageReset" || !previous.frozen)
         for (auto it = request->fences.cbegin(); it != request->fences.cend(); ++it)
             if (m_pathIntents.value(it.key()) != it->intentRevision ||
                 m_contentRevisions.value(it.key()) != it->contentRevision ||
@@ -271,23 +312,60 @@ void ConfigWorker::resolveDraft(const ConfigCommand &command) {
     if (previous.request && previous.request->epoch >= request->epoch)
         error = "draft-stale";
     const auto base = previous.frozen ? previous.frozen : std::make_shared<ConfigLayers>(*m_layers);
+    const auto frozenObservation =
+        previous.frozen ? previous.frozenObservation : readSnapshot(request->paths).observation();
     ConfigDraftPresentation p;
+    QMap<ConfigPath, ConfigCandidateFact> liveFacts;
     p.request = request;
     p.requestId = command.requestId;
     if (error.isEmpty()) {
-        p.frozen = draftCandidate(*base, request->paths, request->edits, error);
-        p.live = draftCandidate(*m_layers, request->paths, request->edits, error);
+        auto selection =
+            ConfigSelection::capture(m_options.schema, request->paths, request->paths,
+                                     ConfigSelection::Target::UserLayer, "draft-selection");
+        selection.owner = m_endpoint;
+        selection.lifetime = request->lifetime;
+        const auto batch = ConfigEditBatch::capture(selection, request->edits);
+        const auto frozen = resolveCandidate(*base, batch, m_listPolicies, m_listMetadata);
+        const auto liveCandidate =
+            previous.frozen ? resolveCandidate(*m_layers, batch, m_listPolicies, m_listMetadata)
+                            : ConfigCandidate{};
+        const auto &live = previous.frozen ? liveCandidate : frozen;
+        error = !frozen.valid() ? frozen.error : live.error;
+        if (error.isEmpty()) {
+            p.frozen = candidatePresentation(frozen);
+            p.live = candidatePresentation(live);
+            liveFacts = live.facts;
+            const auto observation = [&](const ConfigObservation &base, bool preview) {
+                auto dependencies = ConfigObservationAccess::dependencies(base);
+                dependencies.first().previewId =
+                    preview && !request->previewId.isEmpty() ? request->previewId : request->id;
+                dependencies.first().previewLifetime = preview && request->previewLifetime
+                                                           ? request->previewLifetime
+                                                           : request->lifetime;
+                dependencies.first().previewEpoch =
+                    preview && request->previewLifetime ? request->previewEpoch : request->epoch;
+                return ConfigObservationAccess::observation(dependencies);
+            };
+            p.frozenRead = ConfigObservationAccess::candidate(
+                frozen, m_options.schema, observation(frozenObservation, false));
+            p.liveRead = ConfigObservationAccess::candidate(
+                live, m_options.schema,
+                observation(readSnapshot(request->paths).observation(), true));
+        }
     }
     p.error = error;
     result.status = error.isEmpty() ? "staged" : "failed";
     if (!error.isEmpty())
         result.error = {error, {}, command.operation};
-    else if (removals(request->edits))
-        m_draftCaptures[request->id] = {request, base, p.frozen, p.live};
     else
-        m_draftCaptures.remove(request->id);
+        m_draftCaptures[request->id] = {
+            request,           base,         p.frozen,  p.live,
+            frozenObservation, p.frozenRead, liveFacts, candidateKey(request->paths)};
     m_draftPackets.append(p);
-    post(publish(result));
+    auto packet = publish(command.requestId ? std::optional<ConfigResult>(result) : std::nullopt);
+    if (error.isEmpty() && command.requestId)
+        packet.completionObservation = p.frozenRead.observation();
+    post(packet);
 }
 QList<ConfigDraftPresentation> ConfigWorker::draftPresentations() {
     auto packets = std::exchange(m_draftPackets, {});
@@ -296,11 +374,48 @@ QList<ConfigDraftPresentation> ConfigWorker::draftPresentations() {
             it = m_draftCaptures.erase(it);
             continue;
         }
-        QString error;
-        const auto live = draftCandidate(*m_layers, it->request->paths, it->request->edits, error);
-        if (!error.isEmpty() || live != it->liveValues) {
+        bool captured = false;
+        for (const auto &packet : packets)
+            captured |= packet.request == it->request;
+        if (captured) {
+            ++it;
+            continue;
+        }
+        const auto key = candidateKey(it->request->paths);
+        if (key == it->liveKey) {
+            ++it;
+            continue; // A publication/control cursor is not a candidate invalidation.
+        }
+        it->liveKey = key;
+        auto selection =
+            ConfigSelection::capture(m_options.schema, it->request->paths, it->request->paths,
+                                     ConfigSelection::Target::UserLayer, "draft-selection");
+        const auto candidate =
+            resolveCandidate(*m_layers, ConfigEditBatch::capture(selection, it->request->edits),
+                             m_listPolicies, m_listMetadata);
+        const auto error = candidate.error;
+        const auto live = candidatePresentation(candidate);
+        if (!error.isEmpty() || candidate.facts != it->liveFacts) {
             it->liveValues = live;
-            packets.append({it->request, 0, 0, error, it->frozenValues, live});
+            it->liveFacts = candidate.facts;
+            ConfigDraftPresentation presentation;
+            presentation.request = it->request;
+            presentation.error = error;
+            presentation.frozen = it->frozenValues;
+            presentation.live = live;
+            presentation.frozenRead = it->frozenRead;
+            auto dependencies = ConfigObservationAccess::dependencies(
+                readSnapshot(it->request->paths).observation());
+            auto &dependency = dependencies.first();
+            dependency.previewId =
+                it->request->previewId.isEmpty() ? it->request->id : it->request->previewId;
+            dependency.previewLifetime =
+                it->request->previewLifetime ? it->request->previewLifetime : it->request->lifetime;
+            dependency.previewEpoch =
+                it->request->previewLifetime ? it->request->previewEpoch : it->request->epoch;
+            presentation.liveRead = ConfigObservationAccess::candidate(
+                candidate, m_options.schema, ConfigObservationAccess::observation(dependencies));
+            packets.append(presentation);
         }
         ++it;
     }

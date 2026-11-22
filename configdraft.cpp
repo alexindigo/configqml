@@ -7,6 +7,7 @@
 #include "configchange_p.h"
 #include "configstorehandle.h"
 #include "configshutdown_p.h"
+#include "configreadprojection_p.h"
 #include <QUuid>
 
 namespace configqml {
@@ -111,6 +112,7 @@ void ConfigDraft::publishPreview() {
         return;
     auto preview = std::make_shared<ConfigDraftPreview>();
     preview->id = m_previewId;
+    preview->epoch = ConfigDraftState::get(this)->nextPreviewEpoch();
     preview->lifetime = m_previewLifetime;
     preview->paths = paths();
     preview->edits = m_edits;
@@ -150,13 +152,17 @@ ConfigOperation ConfigDraft::setValue(const ConfigPath &path, const QVariant &va
         return {false,
                 {m_schema.diagnostics().make(path, m_busy ? "draft-busy" : "outside-draft")}};
     const auto ownedPath = ownPath(path);
+    const ConfigPublicationScope publication(m_store);
     const bool resolve = ConfigDraftState::get(this)->hasRemovals();
     m_edits[ownedPath] = checked.value;
     m_presentations.remove(ownedPath);
+    ConfigReadProjectionState::stage(this);
     if (resolve)
         ConfigDraftState::get(this)->resolve(m_edits, false);
-    else
+    else {
+        ConfigDraftState::get(this)->capture(m_edits);
         publishPreview();
+    }
     ConfigConsumerGuard boundary(this);
     if (prepareChanges({ownedPath}) &&
         boundary.invoke([&] { emit previewValuesChanged({ownedPath}); }) &&
@@ -174,11 +180,15 @@ ConfigOperation ConfigDraft::setValue(const ConfigAdmission &value) {
                 {m_schema.diagnostics().make(path, m_busy ? "draft-busy" : "outside-draft")}};
     const bool resolve = ConfigDraftState::get(this)->hasRemovals();
     m_edits[path] = checked.value;
+    const ConfigPublicationScope publication(m_store);
     m_presentations.remove(path);
+    ConfigReadProjectionState::stage(this);
     if (resolve)
         ConfigDraftState::get(this)->resolve(m_edits, false);
-    else
+    else {
+        ConfigDraftState::get(this)->capture(m_edits);
         publishPreview();
+    }
     ConfigConsumerGuard boundary(this);
     if (prepareChanges({path}) && boundary.invoke([&] { emit previewValuesChanged({path}); }) &&
         boundary.invoke([&] { emit valuesChanged({path}); }))
@@ -194,6 +204,8 @@ void ConfigDraft::refresh() {
     }
     m_presentations.clear();
     m_previewPresentations.clear();
+    ConfigReadProjectionState::refresh(this);
+    ConfigDraftState::get(this)->capture(m_edits);
 }
 void ConfigDraft::prepareStoreChange() {
     m_previewPresentations.clear();
@@ -233,6 +245,7 @@ void ConfigDraft::observe() {
 quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
     if (!valid() || m_busy || !ConfigDraftState::get(this)->settled())
         return 0;
+    const ConfigPublicationScope publication(m_store);
     m_busy = true;
     if (m_applyId.isEmpty())
         m_applyId = "draft:" + QUuid::createUuid().toString(QUuid::Id128);
@@ -247,8 +260,9 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
     const QPointer<QObject> target(context ? context : this);
     const auto id = m_store->applyGroup(
         m_edits, m_fences, this,
-        [guard, target, attempt, edits,
-         callback = std::move(callback)](const ConfigResult &result) {
+        ConfigPairedCallback{[guard, target, attempt, edits,
+                              callback = std::move(callback)](const ConfigCompletion &completion) {
+            const auto &result = completion.result;
             if (!guard)
                 return;
             guard->m_busy = false;
@@ -299,19 +313,23 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
                 !boundary.invoke([&] { emit guard->valuesChanged(paths); }) ||
                 !boundary.invoke([&] { emit guard->stateChanged(); }))
                 return;
+            if (!boundary.invoke([&] {
+                    ConfigReadProjectionState::operation(guard->readProjection(), completion);
+                }))
+                return;
             if (target && callback) {
                 if (target->thread() == QThread::currentThread())
-                    callback(result);
+                    invokeCompletion(callback, completion);
                 else
                     QMetaObject::invokeMethod(
                         target,
-                        [target, callback, result] {
+                        [target, callback, completion] {
                             if (target)
-                                callback(result);
+                                invokeCompletion(callback, completion);
                         },
                         Qt::QueuedConnection);
             }
-        },
+        }},
         attempt, m_admittedEdits);
     if (prepareChanges({}))
         ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
@@ -320,6 +338,7 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
 bool ConfigDraft::discard() {
     if (!valid() || m_busy)
         return false;
+    const ConfigPublicationScope publication(m_store);
     closePreviewScopes();
     ConfigDraftState::get(this)->reset();
     m_admitted.reset();

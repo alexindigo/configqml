@@ -8,6 +8,57 @@
 namespace configqml {
 class ConfigStoreTestAccess {
 public:
+    static void holdReadReplies(ConfigStore &store, QObject *context,
+                                QList<ConfigWorkerPacket> &held,
+                                const std::function<void()> &onHeld) {
+        QObject::disconnect(store.m_owner.get(), &ConfigWorkerOwner::packetReady, &store,
+                            &ConfigStore::receive);
+        QObject::connect(store.m_owner.get(), &ConfigWorkerOwner::packetReady, context,
+                         [&store, &held, &onHeld](const ConfigWorkerPacket &packet) {
+                             auto delivered = packet;
+                             if (!delivered.reads.isEmpty()) {
+                                 ConfigWorkerPacket retained;
+                                 retained.reads = std::exchange(delivered.reads, {});
+                                 held.append(retained);
+                                 if (onHeld)
+                                     onHeld();
+                             }
+                             store.receive(delivered);
+                         });
+    }
+    static quint64 candidateResolutions(const ConfigWorker &worker) {
+        return worker.m_candidateResolutions;
+    }
+    static ConfigOverlayEditor *overlay(ConfigStore &store, const QString &id) {
+        return store.m_overlays.value(id);
+    }
+    static void holdReader(ConfigStore &store, const QString &id, QObject *context,
+                           QList<ConfigWorkerPacket> &held, const std::function<void()> &onHeld) {
+        QObject::disconnect(store.m_owner.get(), &ConfigWorkerOwner::packetReady, &store,
+                            &ConfigStore::receive);
+        QObject::connect(store.m_owner.get(), &ConfigWorkerOwner::packetReady, context,
+                         [&store, id, &held, &onHeld](const ConfigWorkerPacket &packet) {
+                             auto delivered = packet;
+                             delivered.overlays.clear();
+                             for (const auto &presentation : packet.overlays) {
+                                 if (presentation.editorId != id || !presentation.refreshed) {
+                                     delivered.overlays.append(presentation);
+                                     continue;
+                                 }
+                                 ConfigWorkerPacket retained;
+                                 retained.overlays.append(presentation);
+                                 held.append(retained);
+                                 if (onHeld)
+                                     onHeld();
+                             }
+                             store.receive(delivered);
+                         });
+    }
+    static void releaseReader(ConfigStore &store, QList<ConfigWorkerPacket> &held) {
+        const auto retained = std::exchange(held, {});
+        for (const auto &packet : retained)
+            store.receive(packet);
+    }
     static std::weak_ptr<ConfigFileDescriptor> pendingParentLease(const ConfigWorker &worker,
                                                                   const QString &source,
                                                                   const QString &group = {}) {

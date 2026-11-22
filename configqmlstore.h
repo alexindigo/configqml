@@ -4,6 +4,7 @@
 #include "configstore.h"
 #include "configdraft.h"
 #include "configoverlayeditor.h"
+#include "configqmlreadprojection.h"
 #include <QJSValue>
 #include <QQmlParserStatus>
 #include <QAbstractItemModel>
@@ -35,6 +36,7 @@ class ConfigQmlStore : public QObject, public QQmlParserStatus {
     Q_PROPERTY(bool busy READ busy NOTIFY draftStateChanged BINDABLE bindableBusy)
     Q_PROPERTY(QString editorId READ editorId CONSTANT)
     Q_PROPERTY(QObject *preview READ preview CONSTANT)
+    Q_PROPERTY(configqml::ConfigQmlReadProjection *readProjection READ readProjection CONSTANT)
 public:
     enum Status { Loading, Ready, Error, Closing, Closed };
     Q_ENUM(Status)
@@ -118,6 +120,7 @@ public:
     Q_INVOKABLE QString retryGroup(const QString &token, const QJSValue &callback = {});
     Q_INVOKABLE QString releaseGroup(const QString &token, const QJSValue &callback = {});
     Q_INVOKABLE QVariantMap groupInfo(const QString &token) const;
+    ConfigQmlReadProjection *readProjection();
 signals:
     void schemaChanged();
     void valuesChanged();
@@ -146,6 +149,7 @@ private:
     void registerNotifications(ConfigChangePublisher *publisher);
     void prepareState();
     QJSValue resultMap(const ConfigResult &result) const;
+    QJSValue resultMap(const ConfigResult &result, const ConfigObservation &observation) const;
     QList<ConfigPath> selectedPaths(const QVariantList &paths, bool *ok);
     void initializeHandle(ConfigStore *core, const ConfigPath &prefix, bool writable,
                           ConfigDraft *draft = nullptr, bool preview = false);

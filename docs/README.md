@@ -15,5 +15,6 @@
 | 11 | [Retained groups](retained-groups.md) | Worker reservations, immutable captures, explicit retry and causal suffixes |
 | 12 | [Overlay editors](overlay-editors.md) | Live two-owner views, frozen previews, sparse overrides and selected asynchronous leases |
 | 13 | [String patterns](string-patterns.md) | Owned full-string constraints across canonical admission producers |
+| 14 | [Generic primitives](generic-primitives.md) | Shared selected candidates, opaque observations and exact-reader compatibility completion |
 
 The [examples](../examples/README.md) are executable installed consumers.

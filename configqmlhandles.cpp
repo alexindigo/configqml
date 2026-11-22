@@ -36,9 +36,11 @@ void ConfigQmlStore::initializeHandle(ConfigStore *core, const ConfigPath &prefi
     } else
         connect(core, &ConfigStore::valuesChanged, this, &ConfigQmlStore::settingValuesChanged);
     connect(core, &ConfigStore::statusChanged, this, &ConfigQmlStore::statusChanged);
-    connect(core, &ConfigStore::completed, this, [this](const ConfigResult &result) {
-        ConfigConsumerGuard(this).invoke([&] { emit completed(resultMap(result)); });
-    });
+    connect(core->readProjection(), &ConfigReadProjection::operationCompleted, this,
+            [this](const ConfigResult &result, const ConfigObservation &observation) {
+                ConfigConsumerGuard(this).invoke(
+                    [&] { emit completed(resultMap(result, observation)); });
+            });
     const auto schema = preview ? draft->previewSchema() : core->schema();
     m_values = createConfigNamespace(this, *schema.descriptor(prefix), prefix, this);
     initializeNotifications();

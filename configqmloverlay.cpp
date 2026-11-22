@@ -13,7 +13,11 @@
 
 namespace configqml {
 QJSValue ConfigQmlStore::resultMap(const ConfigResult &result) const {
-    auto map = qmlResultEvent(scriptEngine(), result, m_diagnostics);
+    return resultMap(result, {});
+}
+QJSValue ConfigQmlStore::resultMap(const ConfigResult &result,
+                                   const ConfigObservation &observation) const {
+    auto map = qmlResultEvent(scriptEngine(), result, m_diagnostics, observation);
     if (scriptEngine() && result.status == "opened" && m_overlayHandles.value(result.editorId))
         map.setProperty("editor",
                         scriptEngine()->newQObject(m_overlayHandles.value(result.editorId)));
@@ -37,9 +41,11 @@ ConfigQmlOverlay::ConfigQmlOverlay(ConfigStore *store, ConfigOverlayEditor *edit
     connect(editor, &ConfigOverlayEditor::valuesChanged, m_adapter,
             &ConfigQmlStore::settingValuesChanged);
     connect(editor, &ConfigOverlayEditor::stateChanged, this, &ConfigQmlOverlay::stateChanged);
-    connect(editor, &ConfigOverlayEditor::completed, this, [this](const ConfigResult &result) {
-        ConfigConsumerGuard(this).invoke([&] { emit completed(m_adapter->resultMap(result)); });
-    });
+    connect(editor->readProjection(), &ConfigReadProjection::operationCompleted, this,
+            [this](const ConfigResult &result, const ConfigObservation &observation) {
+                ConfigConsumerGuard(this).invoke(
+                    [&] { emit completed(m_adapter->resultMap(result, observation)); });
+            });
     connect(m_adapter, &ConfigQmlStore::inputRejected, this, &ConfigQmlOverlay::inputRejected);
     m_adapter->m_values =
         createConfigNamespace(m_adapter, *editor->schema().descriptor({}), {}, m_adapter);

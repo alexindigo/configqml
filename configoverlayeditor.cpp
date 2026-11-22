@@ -6,6 +6,7 @@
 #include "configconsumer_p.h"
 #include "configapply_p.h"
 #include "configchange_p.h"
+#include "configreadprojection_p.h"
 #include <QMutexLocker>
 #include <QUuid>
 
@@ -106,6 +107,7 @@ ConfigOverlayEditor::ConfigOverlayEditor(ConfigStore *store, const ConfigOverlay
     : QObject(store), m_store(store), m_id(p.editorId), m_schema(p.schema), m_mode(p.mode) {
     m_changes = std::make_unique<ConfigChangePublisher>();
     m_ownerPath = p.ownerPath;
+    ConfigReadProjectionState::initialize(this, p.read);
     install(p);
     if (m_mode == ConfigOverlayMode::Live)
         connect(store, &ConfigStore::statusChanged, this, [this] {
@@ -150,9 +152,11 @@ ConfigRequestHandle ConfigOverlayEditor::setValue(const ConfigPath &path, const 
                                                                        : "overlay-owner")};
     if (!result.errors.isEmpty())
         return result;
+    const ConfigPublicationScope publication(m_store);
     if (m_mode == ConfigOverlayMode::Live)
         return writeLive(ownPath(path), checked.value);
     m_edits[ownPath(path)] = checked.value;
+    ConfigReadProjectionState::stage(this);
     m_presentations.remove(path);
     result.accepted = true;
     ConfigConsumerGuard boundary(this);
@@ -172,9 +176,11 @@ bool ConfigOverlayEditor::unset(const ConfigPath &query) {
     if (!writable() || !ready() || m_busy || !descriptor ||
         descriptor->type == ConfigDescriptor::Type::Group)
         return false;
+    const ConfigPublicationScope publication(m_store);
     if (m_mode == ConfigOverlayMode::Live)
         return writeLive(path, std::nullopt).accepted;
     m_edits[path] = std::nullopt;
+    ConfigReadProjectionState::stage(this);
     m_presentations.remove(path);
     ConfigConsumerGuard boundary(this);
     if (notifyValues({path}))
@@ -186,13 +192,15 @@ ConfigRequestHandle ConfigOverlayEditor::writeLive(const ConfigPath &path,
     if (!m_store || !m_store->m_accepting)
         return {0, 0, false, {m_schema.diagnostics().make(path, "overlay-owner")}};
     QPointer<ConfigOverlayEditor> guard(this);
-    const auto id = m_store->overlayRequest(this, "overlayWrite", this,
-                                            [guard](const ConfigResult &result) {
-                                                if (guard && guard->status() != Status::Closed)
-                                                    ConfigConsumerGuard(guard).invoke(
-                                                        [&] { emit guard->completed(result); });
-                                            },
-                                            {{path, value}});
+    const auto id = m_store->overlayRequest(
+        this, "overlayWrite", this,
+        ConfigPairedCallback{[guard](const ConfigCompletion &completion) {
+            const auto &result = completion.result;
+            if (guard && guard->status() != Status::Closed)
+                if (ConfigConsumerGuard(guard).invoke([&] { emit guard->completed(result); }))
+                    ConfigReadProjectionState::operation(guard->readProjection(), completion);
+        }},
+        {{path, value}});
     const auto sequence = m_store->m_sequence;
     m_edits[path] = value;
     m_editSequences[path] = sequence;
@@ -203,7 +211,8 @@ ConfigRequestHandle ConfigOverlayEditor::writeLive(const ConfigPath &path,
     return {id, sequence, true, {}};
 }
 ConfigOverlayEditor::InstalledChange
-ConfigOverlayEditor::install(const ConfigOverlayPresentation &p, bool notify) {
+ConfigOverlayEditor::install(const ConfigOverlayPresentation &presentation, bool notify) {
+    const auto p = ConfigReadProjectionState::eligible(this, presentation);
     InstalledChange change;
     if (m_status == Status::Closed)
         return change;
@@ -327,6 +336,7 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
                                      ConfigStore::Callback callback) {
     if (!m_store)
         return 0;
+    const ConfigPublicationScope publication(m_store);
     const bool editorOperation =
         operation == "overlayApply" || operation == "overlayReset" || operation == "overlayDiscard";
     const bool active =
@@ -343,8 +353,9 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
     QPointer<QObject> target(context ? context : this);
     const auto id = m_store->overlayRequest(
         this, operation, this,
-        [guard, target, active, attempt, edits, operation,
-         callback = std::move(callback)](const ConfigResult &result) {
+        ConfigPairedCallback{[guard, target, active, attempt, edits, operation,
+                              callback = std::move(callback)](const ConfigCompletion &completion) {
+            const auto &result = completion.result;
             if (!guard || guard->status() == Status::Closed)
                 return;
             const auto wasBusy = guard->m_busy;
@@ -370,18 +381,23 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
             if ((changed && !boundary.invoke([&] { emit guard->stateChanged(); })) ||
                 !boundary.invoke([&] { emit guard->completed(result); }))
                 return;
+            if (!boundary.invoke([&] {
+                    ConfigReadProjectionState::operation(guard->readProjection(), completion);
+                }))
+                return;
             if (target && callback) {
                 if (target->thread() == QThread::currentThread())
-                    boundary.invoke([&] { callback(result); });
+                    boundary.invoke([&] { invokeCompletion(callback, completion); });
                 else
                     QMetaObject::invokeMethod(
                         target,
-                        [target, callback, result] {
-                            ConfigConsumerGuard(target).invoke([&] { callback(result); });
+                        [target, callback, completion] {
+                            ConfigConsumerGuard(target).invoke(
+                                [&] { invokeCompletion(callback, completion); });
                         },
                         Qt::QueuedConnection);
             }
-        },
+        }},
         {}, attempt);
     if (active)
         m_busy = true;

@@ -47,12 +47,14 @@ public:
     quint64 save(QObject *context = nullptr, ConfigStore::Callback callback = {});
     quint64 flush(QObject *context = nullptr, ConfigStore::Callback callback = {});
     void detach();
+    ConfigReadProjection *readProjection();
 signals:
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
     void stateChanged();
     void completed(const configqml::ConfigResult &result);
 
 private:
+    friend class ConfigReadProjectionState;
     friend class ConfigQmlStore;
     friend class ConfigQmlOverlay;
     friend class ConfigStoreTestAccess;

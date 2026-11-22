@@ -1,7 +1,8 @@
 # Generic primitive qualification inputs
 
-These standalone drivers run only inside the plan's owned test VM. They do not
-register a new production API or qualify the unimplemented candidate.
+These standalone drivers run only inside the plan's owned test VM. Baseline
+controls and candidate qualification are separate; neither substitutes for
+Atmosphera's real domain-consumer acceptance.
 
 | # | Path | Contract |
 |---|---|---|
@@ -11,6 +12,10 @@ register a new production API or qualify the unimplemented candidate.
 | 4 | `layout_contract.py` | Generates a public-only ABI probe once from the installed baseline headers. Keep its generated source unchanged for candidate comparisons. Private test-driver layouts are not ABI proof. |
 | 5 | `harness.py` | Checked subprocess rc/log collection and explicit installed-loader validation, with receipt-bound guest DMI and disk-backed TMPDIR preflight. |
 | 6 | `check-baseline.py` | Fresh standalone client/red builds, cold native/QML outcomes, fixture lint and frozen-input checksum verification. Its green result requires the precise expected behavioral failure, never a crash or timeout. `--sanitize` instruments the fixtures, not the unchanged installed baseline libraries. |
+| 7 | `check-compatibility.py --slice` | Unchanged frozen binaries, all old public layouts/metadata, strict exports, SONAME and installed loader/plugin origins. Additional `--consumer` / `--consumer-root` inputs extend undefined-import evidence. |
+| 8 | `weak_exports.py` | Individually reviewed exact vague-linkage names, baseline `W` checks, consumer-import rejection and strict negative controls. Unlisted/strong/vtable/typeinfo losses still fail; never blanket-ignore weak exports. |
+| 9 | `check-installed.py --slice`, `installed/` | Native and genuinely QtQml-only compatibility-slice outcomes from original and relocated prefixes: write, whole-selection Reset, Discard, Apply, independent cold reader, immutable acknowledged snapshot and inert argv 3. |
+| 10 | `../test_generic_performance.cpp` | Per-span distributions plus structural whole-batch-resolution and no-control/getter-recapture assertions, using production libraries. |
 
 Example, inside the verified `configqml-generic-primitives` guest on `ark.home`,
 workspace `/home/tester/Projects/configqml/generic-primitives`:
@@ -28,6 +33,7 @@ python3 source/tests/generic_primitives/check-baseline.py \
 
 The strict connector exports `CONFIGQML_TEST_VM_UUID` after checking the receipt,
 domain, tester account and guest DMI. Every workload uses the workspace's `tmp/`.
-The additional candidate/installed/performance runners and Phase 1 consumer slice
-are still required by the execution plan. These baseline controls are not that
-slice, a green feature commit, a release or Atmosphera application acceptance.
+Non-slice compatibility/installed runners refuse until the complete matched-Arch
+and expanded handle/reply qualification exists. Slice markers never claim that
+later matrix, a release or Atmosphera application acceptance. See the plan and
+its addenda for phase-specific gates and the schema-handle/pending-reply follow-on.

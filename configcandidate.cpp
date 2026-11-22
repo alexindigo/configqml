@@ -1,0 +1,156 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+#include "configcandidate_p.h"
+
+namespace configqml {
+bool ConfigSelection::matchesSchema(const ConfigSchema &other) const {
+    return schemaIdentity == other.m_identity;
+}
+ConfigSelection ConfigSelection::capture(const ConfigSchema &schema, const QList<ConfigPath> &paths,
+                                         const QList<ConfigPath> &allowed, Target target,
+                                         const QString &failure, bool emptyMeansAll,
+                                         bool rejectDuplicates) {
+    ConfigSelection selection;
+    selection.schema = schema;
+    selection.schemaIdentity = schema.m_identity;
+    selection.target = target;
+    QSet<ConfigPath> seen, included;
+    if (!schema.valid() || (paths.isEmpty() && !emptyMeansAll))
+        selection.error = failure;
+    for (const auto &query : paths) {
+        if (!schema.descriptor(query) || (rejectDuplicates && seen.contains(query))) {
+            selection.error = failure;
+            break;
+        }
+        seen.insert(ownPath(query));
+        bool found = false;
+        for (const auto &leaf : allowed)
+            if (startsWith(leaf, query)) {
+                included.insert(leaf);
+                found = true;
+            }
+        if (!found)
+            selection.error = failure;
+    }
+    for (const auto &leaf : schema.leaves())
+        if (allowed.contains(leaf) &&
+            ((paths.isEmpty() && emptyMeansAll) || included.contains(leaf)))
+            selection.leaves.append(leaf);
+    if (selection.leaves.isEmpty())
+        selection.error = failure;
+    return selection;
+}
+ConfigEditBatch ConfigEditBatch::capture(const ConfigSelection &selection,
+                                         const QMap<ConfigPath, std::optional<QVariant>> &edits) {
+    ConfigEditBatch batch;
+    batch.selection = selection;
+    batch.error = selection.error;
+    for (auto it = edits.cbegin(); batch.error.isEmpty() && it != edits.cend(); ++it) {
+        if (!selection.contains(it.key())) {
+            batch.error = "edit-selection";
+            break;
+        }
+        ConfigEdit edit;
+        if (it.value()) {
+            const auto checked = selection.schema.validate(it.key(), *it.value());
+            if (!checked.ok()) {
+                batch.error = checked.errors.first().code;
+                break;
+            }
+            edit.kind = ConfigEdit::Kind::Set;
+            edit.value = checked.value;
+        }
+        batch.operations.insert(ownPath(it.key()), edit);
+    }
+    return batch;
+}
+QMap<ConfigPath, std::optional<QVariant>> ConfigEditBatch::layerEdits() const {
+    QMap<ConfigPath, std::optional<QVariant>> result;
+    for (auto it = operations.cbegin(); it != operations.cend(); ++it)
+        result[it.key()] =
+            it->kind == ConfigEdit::Kind::Set ? std::optional<QVariant>(it->value) : std::nullopt;
+    return result;
+}
+ConfigValueResult projectCandidateLeaf(const ConfigPath &path, const QVariant &unmasked,
+                                       const QMap<QString, ConfigRecordListPolicySpec> &policies,
+                                       const QMap<QString, ConfigRecordListMetadata> &metadata) {
+    ConfigValueResult result{unmasked, {}};
+    for (const auto &policy : policies) {
+        if (policy.path != path)
+            continue;
+        const auto projected =
+            projectRecordLists(policy, metadata.value(policy.policyId), result.value);
+        if (!projected.error.isEmpty())
+            return {{}, {{path, projected.error}}};
+        result.value = projected.value;
+    }
+    return result;
+}
+ConfigCandidate resolveCandidate(const ConfigLayers &base, const ConfigEditBatch &batch,
+                                 const QMap<QString, ConfigRecordListPolicySpec> &policies,
+                                 const QMap<QString, ConfigRecordListMetadata> &metadata,
+                                 const std::function<QString(const ConfigInput &)> &admission) {
+    ConfigCandidate result;
+    result.error = batch.error;
+    if (result.error.isEmpty() && batch.selection.lifetime && !*batch.selection.lifetime)
+        result.error = "edit-closed";
+    if (result.error.isEmpty() && !batch.selection.matchesSchema(base.schema()))
+        result.error = "edit-schema";
+    if (result.error.isEmpty() && batch.selection.target != ConfigSelection::Target::UserLayer &&
+        batch.selection.target != ConfigSelection::Target::RecordSlot)
+        result.error = "edit-target";
+    if (!result.error.isEmpty())
+        return result;
+    auto candidate = std::make_unique<ConfigLayers>(base);
+    const auto edits = batch.layerEdits();
+    if (admission)
+        for (auto it = edits.cbegin(); it != edits.cend(); ++it) {
+            ConfigInput input;
+            input.kind = it.value() ? ConfigInput::Kind::User : ConfigInput::Kind::Reset;
+            input.sequence = batch.sequence;
+            input.path = it.key();
+            input.value = it.value().value_or(QVariant());
+            result.error = admission(input);
+            if (!result.error.isEmpty())
+                return result;
+        }
+    const auto outcome = candidate->applyEdits(edits);
+    if (!outcome.accepted) {
+        result.error =
+            outcome.errors.isEmpty() ? QString("admission") : outcome.errors.first().code;
+        return result;
+    }
+    const auto effective = candidate->effective(); // Resolve the batch once, not per selected leaf.
+    for (const auto &path : batch.selection.leaves) {
+        ConfigCandidateFact fact;
+        fact.effective = valueAt(effective, path).value_or(QVariant());
+        const auto info = candidate->info(path);
+        fact.maskedBy = info.maskedBy;
+        const auto source = base.source(info.route.layerId, info.route.sourceId);
+        fact.targetPresent = source && bool(valueAt(source->raw, path.mid(source->prefix.size())));
+        const auto operation = batch.operations.constFind(path);
+        if (operation != batch.operations.cend()) {
+            fact.edited = true;
+            fact.pending = operation->kind;
+            fact.authored = operation->value;
+        }
+        if (fact.effective.isValid() && info.maskedBy.isEmpty()) {
+            const auto projected = projectCandidateLeaf(path, fact.effective, policies, metadata);
+            if (!projected.ok()) {
+                result.error = projected.errors.first().code;
+                return result;
+            }
+            fact.effective = projected.value;
+        }
+        result.facts.insert(path, fact);
+    }
+    result.layers = std::move(candidate);
+    return result;
+}
+QMap<ConfigPath, QVariant> candidatePresentation(const ConfigCandidate &candidate) {
+    QMap<ConfigPath, QVariant> values;
+    for (auto it = candidate.facts.cbegin(); it != candidate.facts.cend(); ++it)
+        values[it.key()] =
+            it->edited && it->pending == ConfigEdit::Kind::Set ? it->authored : it->effective;
+    return values;
+}
+} // namespace configqml

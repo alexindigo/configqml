@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 #include "configqmlvalue.h"
+#include "configobservation.h"
 #include <functional>
 
 namespace configqml {
@@ -9,6 +10,9 @@ QJSValue qmlEvent(QJSEngine *engine, const QStringList &keys,
                   std::function<QVariant(const QString &)> loader);
 QJSValue qmlResultEvent(QJSEngine *engine, const ConfigResult &result,
                         const ConfigDiagnosticBuilder &diagnostics = {});
+QJSValue qmlResultEvent(QJSEngine *engine, const ConfigResult &result,
+                        const ConfigDiagnosticBuilder &diagnostics,
+                        const ConfigObservation &observation);
 QJSValue qmlErrorEvent(QJSEngine *engine, const ConfigError &error);
 QJSValue qmlAcceptedEvent(QJSEngine *engine, const ConfigSourceAccepted &event,
                           const ConfigSchema &schema);

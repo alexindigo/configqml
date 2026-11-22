@@ -33,6 +33,8 @@ public:
                        ConfigStore::Callback callback = {});
     quint64 apply(QObject *context = nullptr, ConfigStore::Callback callback = {});
     bool discard();
+    ConfigReadProjection *readProjection();
+    ConfigReadProjection *previewProjection();
 signals:
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
     void stateChanged();
@@ -40,6 +42,8 @@ signals:
     void previewScopesClosed();
 
 private:
+    friend class ConfigReadProjection;
+    friend class ConfigReadProjectionState;
     friend class ConfigDraftState;
     friend class ConfigQmlStore;
     friend class ConfigStore;

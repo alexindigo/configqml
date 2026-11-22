@@ -8,6 +8,10 @@
 #include <QTimer>
 #include <cstdio>
 
+#ifndef CONFIGQML_CLIENT_MARKER
+#define CONFIGQML_CLIENT_MARKER "OLD_QML_OK"
+#endif
+
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     const auto arguments = app.arguments();
@@ -46,6 +50,6 @@ int main(int argc, char **argv) {
     for (const auto &line : maps.readAll().split('\n'))
         if (line.contains("libconfigqml"))
             std::printf("OLD_QML_LOADER %s\n", line.constData());
-    std::puts("OLD_QML_OK");
+    std::puts(CONFIGQML_CLIENT_MARKER);
     return 0;
 }

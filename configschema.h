@@ -6,6 +6,7 @@
 #include <memory>
 
 namespace configqml {
+struct ConfigSelection;
 // A synchronous, non-retained view of input. Core owns/captures each visited
 // value before returning; an engine adapter never crosses the worker boundary.
 class ConfigValueInput {
@@ -131,6 +132,7 @@ public:
     ConfigDiagnosticBuilder diagnostics() const { return ConfigDiagnosticBuilder(m_root); }
 
 private:
+    friend struct ConfigSelection;
     ConfigDescriptor m_root;
     int m_version = 0;
     QList<ConfigMigration> m_migrations;
