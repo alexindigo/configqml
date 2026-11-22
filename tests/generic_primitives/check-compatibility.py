@@ -5,6 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
+from arch_compatibility import matched_arch_lane
 from harness import digest, guest_environment, installed_manifest, loader, require_marker, run, write_json
 from weak_exports import audit_consumers, classify_losses, control_checks, symbols
 
@@ -19,24 +20,13 @@ def metadata_compatible(before, after):
                     raise RuntimeError(f"released Qt metadata changed: {name}/{category}/{index}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    for option in ("baseline", "candidate-source", "candidate-prefix", "output"):
-        parser.add_argument("--" + option, type=Path, required=True)
-    parser.add_argument("--slice", action="store_true")
-    parser.add_argument("--consumer", action="append", type=Path, default=[])
-    parser.add_argument("--consumer-root", action="append", type=Path, default=[])
-    args = parser.parse_args()
-    if not args.slice:
-        raise RuntimeError("full Arch matched-flags qualification is not implemented yet; no full marker")
-    baseline, source, prefix, output = (getattr(args, name).resolve() for name in
-        ("baseline", "candidate_source", "candidate_prefix", "output"))
+def check_lane(baseline, source, prefix, output, consumers=(), roots=()):
     env = guest_environment(prefix)
     original = json.loads((baseline / "baseline.json").read_text())
     control_checks()
     imports = audit_consumers(output,
-        [baseline / path for path in original["binaries"].values()] + args.consumer,
-        [prefix, Path("/usr/bin"), Path("/usr/lib/qt6/qml")] + args.consumer_root,
+        [baseline / path for path in original["binaries"].values()] + list(consumers),
+        [prefix, Path("/usr/bin"), Path("/usr/lib/qt6/qml")] + list(roots),
         env, run, digest, write_json)
     for path, expected in original["frozen_files"].items():
         if digest(baseline / path) != expected:
@@ -92,7 +82,26 @@ def main():
         "layouts": len(current["layouts"]), "metaobjects": len(current["metadata"]),
         "baseline_manifest_sha256": digest(baseline / "baseline.json"),
         "additive_headers": sorted(set(installed["headers"]) - set(original["installation"]["headers"]))})
-    print("GENERIC_COMPATIBILITY_OK slice")
+    return json.loads((output / "qualification.json").read_text())
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    for option in ("baseline", "candidate-source", "candidate-prefix", "output"):
+        parser.add_argument("--" + option, type=Path, required=True)
+    parser.add_argument("--slice", action="store_true")
+    parser.add_argument("--consumer", action="append", type=Path, default=[])
+    parser.add_argument("--consumer-root", action="append", type=Path, default=[])
+    args = parser.parse_args()
+    baseline, source, prefix, output = (getattr(args, name).resolve() for name in
+        ("baseline", "candidate_source", "candidate_prefix", "output"))
+    plain = check_lane(baseline, source, prefix, output, args.consumer, args.consumer_root)
+    if not args.slice:
+        arch = matched_arch_lane(baseline, source, output / "arch", check_lane,
+                                 args.consumer, args.consumer_root)
+        write_json(output / "qualification.json", {
+            "boundary": "full", "plain": plain, "arch": arch})
+    print("GENERIC_COMPATIBILITY_OK " + ("slice" if args.slice else "full"))
 
 
 if __name__ == "__main__":

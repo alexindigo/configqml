@@ -26,6 +26,18 @@ ALLOWLIST = {
         "STL tree-insert template; a using client emits its own copy",
     "_ZNSt8_Rb_treeI7QStringSt4pairIKS0_N9configqml12ConfigWorker12DraftCaptureEESt10_Select1stIS6_ESt4lessIS0_ESaIS6_EE4findERS2_":
         "STL find template over private uninstalled DraftCapture; a using TU emits its own copy (review 02)",
+    # Orchestrator answer to question-weak-exports-abandon.md, 2026-11-22.
+    # Exact demangling, baseline origins and 1,321-scan evidence: docs/weak-exports.md.
+    "_ZN9configqml19ConfigConsumerGuardC1EP7QObjectS2_":
+        "Private constructor, complete-object copy; its header is never installed, so no consumer can reference it",
+    "_ZN9configqml19ConfigConsumerGuardC2EP7QObjectS2_":
+        "Private constructor, base-object copy; its header is never installed, so no consumer can reference it",
+    "_ZNSt8_Rb_treeI7QStringSt4pairIKS0_N9configqml18ConfigApplyCaptureEESt10_Select1stIS5_ESt4lessIS0_ESaIS5_EE12_M_erase_auxESt23_Rb_tree_const_iteratorIS5_E":
+        "STL erase template over a private apply-capture map; a using client emits its own weak copy",
+    "_Z41qRegisterNormalizedMetaTypeImplementationIN9configqml11ConfigErrorEEiRK10QByteArray":
+        "Qt metatype registration template; a using client emits its own weak copy",
+    "_ZN9QtPrivate30QExplicitlySharedDataPointerV2I8QMapDataISt3mapI5QListI7QStringE8QVariantSt4lessIS5_ESaISt4pairIKS5_S6_EEEEE6detachEv":
+        "Qt QMap detach template; a using client emits its own weak copy",
 }
 
 
@@ -54,20 +66,20 @@ def verify_no_imports(imports):
 
 
 def control_checks():
-    sample = next(iter(ALLOWLIST))
-    assert classify_losses({sample: "W"}, {}, set())[0]
-    for kind in ("T", "D", "B", "R", "V"):
-        assert classify_losses({sample: kind}, {}, set())[1]
+    for sample in ALLOWLIST:
+        assert classify_losses({sample: "W"}, {}, set())[0]
+        for kind in ("T", "D", "B", "R", "V"):
+            assert classify_losses({sample: kind}, {}, set())[1]
+        assert classify_losses({sample: "W"}, {}, {sample})[1]
+        try:
+            verify_no_imports({sample})
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("consumer-import negative control was accepted")
     for name in ("_ZTVN9configqml11ConfigStoreE", "_ZTIN9configqml11ConfigStoreE",
                  "_ZTSN9configqml11ConfigStoreE", "_Zunlisted_weak"):
         assert classify_losses({name: "W"}, {}, set())[1]
-    assert classify_losses({sample: "W"}, {}, {sample})[1]
-    try:
-        verify_no_imports({sample})
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError("consumer-import negative control was accepted")
 
 
 def elf_binary(path):
