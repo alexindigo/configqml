@@ -9,6 +9,7 @@
 namespace configqml {
 class ConfigStoreTestAccess {
 public:
+    static std::shared_ptr<ConfigWorkerOwner> owner(ConfigStore &store) { return store.m_owner; }
     static void holdReadReplies(ConfigStore &store, QObject *context,
                                 QList<ConfigWorkerPacket> &held,
                                 const std::function<void()> &onHeld) {

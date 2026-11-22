@@ -120,6 +120,15 @@ private:
     bool m_exiting = false;
     bool m_draining = false;
 };
+// The owner's last reference may drop on another thread, for example in an
+// overlay endpoint send. The deleter then defers deletion to the owner thread,
+// so queued owner events can still arrive. Ownership ends only after the
+// registry retired a stopped owner, leaving those events nothing to do.
+std::shared_ptr<ConfigWorkerOwner> retain(ConfigWorkerOwner &owner) {
+    auto retained = owner.weak_from_this().lock();
+    Q_ASSERT(retained || owner.stopped());
+    return retained;
+}
 } // namespace
 ConfigWorkerOwner::ConfigWorkerOwner(ConfigStoreOptions options, const QString &error)
     : m_storeId(options.storeId), m_autoSave(options.autoSave) {
@@ -236,7 +245,9 @@ void ConfigWorkerOwner::reclaim(std::shared_ptr<const ConfigSnapshot> snapshot) 
             m_worker, [snapshot = std::move(snapshot)] {}, Qt::QueuedConnection);
 }
 void ConfigWorkerOwner::receive(const ConfigWorkerPacket &packet) {
-    auto keepAlive = shared_from_this();
+    const auto keepAlive = retain(*this);
+    if (!keepAlive)
+        return;
     const bool terminal = packet.result && (packet.result->operation == "close" ||
                                             packet.result->operation == "retire");
     {
@@ -275,7 +286,9 @@ QString ConfigWorkerOwner::description() const {
         .arg(m_prefix);
 }
 void ConfigWorkerOwner::pollJoin() {
-    auto keepAlive = shared_from_this();
+    const auto keepAlive = retain(*this);
+    if (!keepAlive)
+        return;
     std::optional<ConfigResult> failed;
     {
         QMutexLocker lock(&m_mutex);
