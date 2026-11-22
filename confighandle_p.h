@@ -36,6 +36,22 @@ private:
     ConfigSelection m_selection;
     ConfigPath m_prefix;
 };
+// Root-local identity: the root already fixes owner incarnation, schema, target
+// and capability. Typed paths retain opaque segment and selection boundaries.
+struct ConfigHandleLookup {
+    enum class Kind { Scope, Selection };
+    Kind kind;
+    ConfigPath prefix;
+    QList<ConfigPath> allowed;
+    QList<ConfigPath> requested;
+    bool operator==(const ConfigHandleLookup &other) const {
+        return kind == other.kind && prefix == other.prefix && allowed == other.allowed &&
+               requested == other.requested;
+    }
+    friend size_t qHash(const ConfigHandleLookup &key, size_t seed = 0) {
+        return qHashMulti(seed, int(key.kind), key.prefix, key.allowed, key.requested);
+    }
+};
 // Private state of one generated handle. Roots belong to an existing owner (or,
 // for an opened edit, own the draft they adapt); children belong to their root.
 // No value, candidate, persistence or capture is owned here: every verb is
@@ -62,6 +78,8 @@ private:
     static ConfigHandle *makeRoot(QObject *owner, const QString &name, Owner kind,
                                   const ConfigHandleSelection &selection);
     static ConfigHandle *open(ConfigDraft *draft, const ConfigHandleSelection &selection);
+    ConfigHandle *lookup(ConfigHandleLookup::Kind kind, const ConfigHandleSelection &selection,
+                         QList<ConfigPath> requested);
     void wire();
     bool alive() const;
     bool writable() const;
@@ -99,7 +117,7 @@ private:
     QPointer<ConfigReadProjection> selected;
     QPointer<ConfigHandle> previewHandle;
     // Root only: cached lookups and materialized handles notified by path.
-    QHash<QString, QPointer<ConfigHandle>> lookups;
+    QHash<ConfigHandleLookup, QPointer<ConfigHandle>> lookups;
     QList<QPointer<ConfigHandle>> materialized;
     QString health = "ok";
     bool cached = false, cachedPresent = false;

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Cold native-driven runs of the five addendum-02 QML sketches.
 #include "configqmlstore.h"
+#include "configqmlhandle.h"
+#include "confighandle.h"
 #include "compatfixture.h"
 #include "storeprobe.h"
 #include <QJsonDocument>
@@ -38,6 +40,87 @@ bool waitFor(QObject *root, QSignalSpy &spy, const QString &name, int timeout = 
 class QmlGenericHandlesTest : public QObject {
     Q_OBJECT
 private slots:
+    void cachedSelectionBindings_data() {
+        QTest::addColumn<bool>("rootFirst");
+        QTest::addColumn<bool>("unionLookup");
+        QTest::newRow("scope-root-first") << true << false;
+        QTest::newRow("scope-selected-first") << false << false;
+        QTest::newRow("union-root-first") << true << true;
+        QTest::newRow("union-selected-first") << false << true;
+    }
+    void cachedSelectionBindings() {
+        QFETCH(bool, rootFirst);
+        QFETCH(bool, unionLookup);
+        using D = ConfigDescriptor;
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema = ConfigSchema(
+            D::group({{"general", D::group({{"count", D::leaf(D::Type::SafeInteger, 2)},
+                                            {"other", D::leaf(D::Type::SafeInteger, 3)}})}}));
+        options.layers = {{"user",
+                           ConfigLayerKind::File,
+                           ConfigAdmissionPolicy::FieldFallback,
+                           {{"settings", {}, {}}},
+                           true}};
+        ConfigStore store(options);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QQmlEngine engine;
+        auto *handle = ConfigQmlHandle::owned(store.root(), &engine, &engine, "cache-test");
+        QQmlComponent component(&engine);
+        component.setData(R"QML(
+            import QtQml
+            QtObject {
+                required property var config
+                required property bool rootFirst
+                required property bool unionLookup
+                property var selected: null
+                property var whole: null
+                property var refusal: null
+                property var accepted: null
+                readonly property int bound: selected
+                    ? (unionLookup ? selected.scopes.general.fields.count.value
+                                   : selected.fields.count.value) : -1
+                function setup() {
+                    const narrow = config.select([["general", "count"]]);
+                    function lookup(parent) {
+                        return unionLookup ? parent.select([["general"]]) : parent.scope(["general"]);
+                    }
+                    if (rootFirst) { whole = lookup(config); selected = lookup(narrow); }
+                    else { selected = lookup(narrow); whole = lookup(config); }
+                    refusal = selected.set([{path: unionLookup ? ["general", "other"] : ["other"], value: 99}]);
+                }
+                function update() {
+                    accepted = (unionLookup ? selected.scopes.general.fields.count
+                                            : selected.fields.count).set(7);
+                }
+            }
+        )QML",
+                          QUrl("file:cache-identity.qml"));
+        std::unique_ptr<QObject> root(
+            component.createWithInitialProperties({{"config", QVariant::fromValue(handle)},
+                                                   {"rootFirst", rootFirst},
+                                                   {"unionLookup", unionLookup}}));
+        QVERIFY2(root, qPrintable(component.errorString()));
+        QVERIFY(QMetaObject::invokeMethod(root.get(), "setup"));
+        auto *selected = root->property("selected").value<QObject *>();
+        auto *whole = root->property("whole").value<QObject *>();
+        QVERIFY(selected && whole && selected != whole);
+        QTRY_COMPARE(root->property("bound").toInt(), 2);
+        auto *refused = root->property("refusal").value<QObject *>();
+        QVERIFY(refused);
+        QTRY_VERIFY(refused->property("isFinished").toBool());
+        QVERIFY(refused->property("isError").toBool());
+        QCOMPARE(engine.toScriptValue(refused->property("error")).property("code").toString(),
+                 QString("outside-selection"));
+        QCOMPARE(store.value({"general", "other"}).toInt(), 3);
+        QVERIFY(QMetaObject::invokeMethod(root.get(), "update"));
+        auto *accepted = root->property("accepted").value<QObject *>();
+        QVERIFY(accepted);
+        QTRY_VERIFY(accepted->property("isFinished").toBool());
+        QVERIFY(!accepted->property("isError").toBool());
+        QCOMPARE(root->property("bound").toInt(), 7);
+        QCOMPARE(store.value({"general", "other"}).toInt(), 3);
+    }
     void sketches() {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());

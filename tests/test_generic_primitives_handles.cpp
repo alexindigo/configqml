@@ -65,6 +65,140 @@ struct Fixture {
 class GenericHandlesTest : public QObject {
     Q_OBJECT
 private slots:
+    void cachedLookupRespectsSelection_data() {
+        QTest::addColumn<bool>("rootFirst");
+        QTest::addColumn<bool>("unionLookup");
+        QTest::newRow("scope-root-first") << true << false;
+        QTest::newRow("scope-selected-first") << false << false;
+        QTest::newRow("union-root-first") << true << true;
+        QTest::newRow("union-selected-first") << false << true;
+    }
+    void cachedLookupRespectsSelection() {
+        QFETCH(bool, rootFirst);
+        QFETCH(bool, unionLookup);
+        Fixture f;
+        QTRY_COMPARE(f.store->status(), ConfigStore::Status::Ready);
+        auto *root = f.store->root();
+        auto *narrow = root->select({{"general", "scaleRatio"}});
+        QVERIFY(narrow->valid());
+        auto lookup = [&](ConfigHandle *parent) {
+            return unionLookup ? parent->select({{"general"}}) : parent->scope({"general"});
+        };
+        ConfigHandle *whole, *selected;
+        if (rootFirst) {
+            whole = lookup(root);
+            selected = lookup(narrow);
+        } else {
+            selected = lookup(narrow);
+            whole = lookup(root);
+        }
+        QVERIFY(whole->valid());
+        QVERIFY(selected->valid());
+        QVERIFY(whole != selected);
+        if (!unionLookup) {
+            QCOMPARE(whole->fields(), (QStringList{"constructor", "label", "scaleRatio"}));
+            QCOMPARE(selected->fields(), (QStringList{"scaleRatio"}));
+            QVERIFY(!selected->scope({"constructor"})->valid());
+            QVERIFY(whole->scope({"constructor"})->valid());
+        } else {
+            QVERIFY(!selected->scope({"general", "constructor"})->valid());
+            QVERIFY(whole->scope({"general", "constructor"})->valid());
+        }
+        const ConfigPath outside =
+            unionLookup ? ConfigPath{"general", "constructor"} : ConfigPath{"constructor"};
+        auto refused = settle(selected->set(QList<ConfigHandleEdit>{{outside, true}}));
+        QCOMPARE(refused->error().code(), QString("outside-selection"));
+        QCOMPARE(f.store->value({"general", "constructor"}).toBool(), false);
+        const ConfigPath inside =
+            unionLookup ? ConfigPath{"general", "scaleRatio"} : ConfigPath{"scaleRatio"};
+        QVERIFY(!settle(selected->set(QList<ConfigHandleEdit>{{inside, 7.0}}))->isError());
+        QCOMPARE(f.store->value({"general", "scaleRatio"}).toDouble(), 7.0);
+        QCOMPARE(f.store->value({"general", "constructor"}).toBool(), false);
+    }
+    void invalidLookupCannotPoisonCache_data() { cachedLookupRespectsSelection_data(); }
+    void invalidLookupCannotPoisonCache() {
+        QFETCH(bool, rootFirst);
+        QFETCH(bool, unionLookup);
+        Fixture f;
+        QTRY_COMPARE(f.store->status(), ConfigStore::Status::Ready);
+        auto *root = f.store->root();
+        auto *narrow = root->select({{"general", "scaleRatio"}});
+        auto lookup = [&](ConfigHandle *parent) {
+            const ConfigPath path{"general", "constructor"};
+            return unionLookup ? parent->select({path}) : parent->scope(path);
+        };
+        ConfigHandle *valid, *invalid;
+        if (rootFirst) {
+            valid = lookup(root);
+            invalid = lookup(narrow);
+        } else {
+            invalid = lookup(narrow);
+            valid = lookup(root);
+        }
+        QVERIFY(valid->valid());
+        QVERIFY(!invalid->valid());
+        QVERIFY(!invalid->scope({})->valid());
+        QVERIFY(!invalid->select({{"general"}})->valid());
+        QVERIFY(settle(invalid->remove())->isError());
+        QVERIFY(!settle(root->scope({"general", "constructor"})->set(true))->isError());
+        QCOMPARE(f.store->value({"general", "constructor"}).toBool(), true);
+        QVERIFY(!invalid->valid());
+        // Valid permutations share a canonical selected identity; invalid
+        // duplicates are checked even after that identity was cached.
+        auto *unionA = root->select({{"bar"}, {"general"}});
+        QCOMPARE(unionA, root->select({{"general"}, {"bar"}}));
+        QVERIFY(!root->select({{"general"}, {"general"}})->valid());
+    }
+    void cachedLookupPreservesOpaqueSegments_data() {
+        QTest::addColumn<bool>("pathBoundary");
+        QTest::addColumn<bool>("singleFirst");
+        QTest::newRow("segments-single-first") << true << true;
+        QTest::newRow("segments-nested-first") << true << false;
+        QTest::newRow("selection-single-first") << false << true;
+        QTest::newRow("selection-union-first") << false << false;
+    }
+    void cachedLookupPreservesOpaqueSegments() {
+        QFETCH(bool, pathBoundary);
+        QFETCH(bool, singleFirst);
+        const QString opaque = QString("a") + QChar(0x1f) + "b";
+        const QString joined = QString("a") + QChar(0x1e) + "b";
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema =
+            ConfigSchema(D::group({{opaque, D::leaf(T::SafeInteger, 2)},
+                                   {joined, D::leaf(T::SafeInteger, 4)},
+                                   {"a", D::group({{"b", D::leaf(T::SafeInteger, 3)}})},
+                                   {"b", D::leaf(T::SafeInteger, 5)}}));
+        ConfigStore store(options);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *root = store.root();
+        auto first = [&] {
+            return pathBoundary ? root->scope({opaque}) : root->select({{joined}});
+        };
+        auto second = [&] {
+            return pathBoundary ? root->scope({"a", "b"}) : root->select({{"a"}, {"b"}});
+        };
+        ConfigHandle *one, *two;
+        if (singleFirst) {
+            one = first();
+            two = second();
+        } else {
+            two = second();
+            one = first();
+        }
+        QVERIFY(one->valid());
+        QVERIFY(two->valid());
+        QVERIFY(one != two);
+        if (pathBoundary) {
+            QCOMPARE(one->value().toInt(), 2);
+            QCOMPARE(two->value().toInt(), 3);
+        } else {
+            QVERIFY(!one->scope({"a", "b"})->valid());
+            QVERIFY(!two->scope({joined})->valid());
+            QCOMPARE(one->scope({joined})->value().toInt(), 4);
+            QCOMPARE(two->scope({"a", "b"})->value().toInt(), 3);
+        }
+    }
     void generatedLookupAndBindings() {
         Fixture f;
         QTRY_COMPARE(f.store->status(), ConfigStore::Status::Ready);

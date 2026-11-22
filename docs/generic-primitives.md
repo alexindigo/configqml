@@ -40,6 +40,11 @@ properties. A new setting or plugin needs a schema, not new library methods.
 
 Handles are materialized lazily and only materialized handles are notified;
 getters never capture, resolve a candidate or touch disk.
+Lookup first validates and narrows through the existing selection owner. Its
+root-local cache identity contains the lookup kind, namespace, canonical allowed
+leaves and requested paths as typed containers. Opaque segment data cannot alias
+path boundaries; a narrowed selection never reuses a wider handle, and an invalid
+lookup cannot poison a valid one. Equivalent validated lookups remain stable.
 
 ### Verbs
 

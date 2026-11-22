@@ -8,6 +8,7 @@
 #include "configworker_p.h"
 #include "configshutdown_p.h"
 #include "configconsumer_p.h"
+#include <algorithm>
 
 namespace configqml {
 ConfigHandleSelection ConfigHandleSelection::capture(const ConfigSelection &selection,
@@ -84,13 +85,6 @@ std::optional<ConfigDescriptor> ConfigHandleSelection::descriptor() const {
 }
 
 namespace {
-QString lookupKey(const QString &kind, const QList<ConfigPath> &paths) {
-    QStringList parts;
-    for (const auto &path : paths)
-        parts.append(path.join(QChar(0x1f)));
-    parts.sort();
-    return kind + parts.join(QChar(0x1e));
-}
 bool overlaps(const ConfigPath &a, const ConfigPath &b) {
     return startsWith(a, b) || startsWith(b, a);
 }
@@ -912,26 +906,33 @@ std::optional<ConfigDescriptor> ConfigHandle::descriptor() const {
     return d->selection.descriptor();
 }
 ConfigHandle *ConfigHandle::scope(const ConfigPath &relative) {
-    auto *root = d->rootState ? d->rootState : d.get();
-    const auto absolute = d->selection.prefix() + ownPath(relative);
     if (relative.isEmpty())
         return this;
-    const auto key = lookupKey("s", {absolute});
-    if (auto existing = root->lookups.value(key))
-        return existing;
-    auto *handle = ConfigHandleState::create(root->q, root, d->selection.scope(relative));
-    root->lookups.insert(key, handle);
-    return handle;
+    const auto selected = d->selection.scope(relative);
+    return d->lookup(ConfigHandleLookup::Kind::Scope, selected,
+                     {d->selection.prefix() + ownPath(relative)});
 }
 ConfigHandle *ConfigHandle::select(const QList<ConfigPath> &relative) {
-    auto *root = d->rootState ? d->rootState : d.get();
+    const auto selected = d->selection.select(relative);
     QList<ConfigPath> absolute;
     for (const auto &path : relative)
         absolute.append(d->selection.prefix() + ownPath(path));
-    const auto key = lookupKey("m" + d->selection.prefix().join(QChar(0x1f)), absolute);
+    return d->lookup(ConfigHandleLookup::Kind::Selection, selected, std::move(absolute));
+}
+ConfigHandle *ConfigHandleState::lookup(ConfigHandleLookup::Kind kind,
+                                        const ConfigHandleSelection &childSelection,
+                                        QList<ConfigPath> requested) {
+    auto *root = rootState ? rootState : this;
+    // P1 validates and narrows before any cache hit. Failed lookups are never
+    // reusable authority, including when requested paths match a valid lookup.
+    if (!childSelection.valid())
+        return create(root->q, root, childSelection);
+    std::sort(requested.begin(), requested.end());
+    ConfigHandleLookup key{kind, childSelection.prefix(), {}, std::move(requested)};
+    key.allowed = childSelection.selection().leaves;
     if (auto existing = root->lookups.value(key))
         return existing;
-    auto *handle = ConfigHandleState::create(root->q, root, d->selection.select(relative));
+    auto *handle = create(root->q, root, childSelection);
     root->lookups.insert(key, handle);
     return handle;
 }
