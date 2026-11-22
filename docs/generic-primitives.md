@@ -219,6 +219,13 @@ is not a claim of completed full matched-Arch or expanded handle/reply performan
 qualification.
 
 ## Explicit candidate targets
+Effective trees collect winning declared leaves under typed paths and assemble
+each namespace once. Atomic Record/Map/List values remain whole leaves; optional
+absence, explicit null, exact numeric domains, layer masks and source participation
+are unchanged. This avoids repeatedly copying a wide nested namespace for each
+leaf in every candidate/publication pass. `compare-performance.py` reports matched
+legacy-workflow distributions separately from new handle/reply measurements and
+the unchanged caller/model budgets; its marker does not assert domain activation.
 
 The shared worker candidate resolver accepts explicit user-layer and runtime-layer
 selections. Both enter ConfigLayers' one transactional edit path: all checked

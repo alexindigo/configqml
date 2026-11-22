@@ -554,16 +554,43 @@ ConfigOperation ConfigLayers::replaceAllSources(const QMap<QString, QList<Config
     return result;
 }
 
+namespace {
+using EffectiveLeaf = QMap<ConfigPath, QVariant>::const_iterator;
+QVariantMap assembleNamespaces(EffectiveLeaf &leaf, const EffectiveLeaf &end,
+                               const ConfigPath &prefix) {
+    QVariantMap result;
+    while (leaf != end && startsWith(leaf.key(), prefix)) {
+        const auto key = leaf.key().at(prefix.size());
+        if (leaf.key().size() == prefix.size() + 1) {
+            // An atomic Record/Map/List is a value, never a namespace to merge.
+            result.insert(key, leaf.value());
+            ++leaf;
+        } else {
+            const auto nested = assembleNamespaces(leaf, end, prefix + ConfigPath{key});
+            result.insert(key, nested);
+        }
+    }
+    return result;
+}
+} // namespace
 QVariantMap ConfigLayers::effective() const {
     if (!valid())
         return {};
-    auto out = m_schema.defaults();
+    // Capture precedence by declared leaf, then construct each namespace once.
+    // Repeated putValue on a shared nested map would detach/copy that namespace
+    // for every leaf, making every candidate and publication quadratic in width.
+    QMap<ConfigPath, QVariant> values;
+    const auto defaults = m_schema.defaults();
+    for (const auto &path : m_schema.leaves())
+        if (const auto value = valueAt(defaults, path))
+            values.insert(path, *value);
     for (const auto &layer : m_layers)
         for (const auto &source : layer.sources)
             if (participates(source))
                 for (auto it = source.admitted.cbegin(); it != source.admitted.cend(); ++it)
-                    putValue(out, it.key(), it.value().value);
-    return out;
+                    values.insert(it.key(), it.value().value);
+    auto leaf = values.cbegin();
+    return assembleNamespaces(leaf, values.cend(), {});
 }
 std::optional<QVariant> ConfigLayers::value(const ConfigPath &path) const {
     if (!valid() || !m_schema.descriptor(path))
