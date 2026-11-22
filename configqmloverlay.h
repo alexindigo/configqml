@@ -17,6 +17,7 @@ class ConfigQmlOverlay : public QObject {
                    bindableStatus)
     Q_PROPERTY(QString error READ error NOTIFY stateChanged BINDABLE bindableError)
     Q_PROPERTY(configqml::ConfigQmlReadProjection *readProjection READ readProjection CONSTANT)
+    Q_PROPERTY(configqml::ConfigQmlHandle *root READ root CONSTANT)
 public:
     ConfigQmlOverlay(ConfigStore *store, ConfigOverlayEditor *editor, QObject *parent);
     ~ConfigQmlOverlay() override;
@@ -48,6 +49,7 @@ public:
     Q_INVOKABLE bool unset(const QStringList &path);
     Q_INVOKABLE void detach();
     ConfigQmlReadProjection *readProjection();
+    ConfigQmlHandle *root();
 signals:
     void stateChanged();
     void completed(const QJSValue &result);

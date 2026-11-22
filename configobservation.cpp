@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configobservation_p.h"
 #include "configoverlay_p.h"
+#include <algorithm>
 
 namespace configqml {
 bool ConfigObservation::empty() const { return !d || d->dependencies.isEmpty(); }
@@ -95,6 +96,33 @@ ConfigObservation ConfigObservationAccess::withLogicalSelection(const ConfigObse
     for (auto &dependency : dependencies)
         if (!dependency.targetIdentity.isEmpty())
             dependency.logicalPaths = paths;
+    return observation(std::move(dependencies));
+}
+ConfigObservation ConfigObservationAccess::narrow(const ConfigObservation &token,
+                                                  const QList<ConfigPath> &paths) {
+    auto dependencies = ConfigObservationAccess::dependencies(token);
+    const bool composed = std::any_of(dependencies.cbegin(), dependencies.cend(),
+                                      [](const auto &d) { return !d.targetIdentity.isEmpty(); });
+    if (composed)
+        return withLogicalSelection(token, paths);
+    for (auto &dependency : dependencies) {
+        QList<ConfigPath> selected;
+        for (const auto &path : dependency.paths)
+            if (paths.contains(path))
+                selected.append(path);
+        dependency.paths = selected;
+    }
+    return observation(std::move(dependencies));
+}
+ConfigObservation ConfigObservationAccess::committed(const ConfigObservation &token) {
+    if (!token.valid())
+        return token;
+    auto dependencies = ConfigObservationAccess::dependencies(token);
+    for (auto &dependency : dependencies) {
+        dependency.previewId.clear();
+        dependency.previewLifetime.reset();
+        dependency.previewEpoch = 0;
+    }
     return observation(std::move(dependencies));
 }
 namespace {

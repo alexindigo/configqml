@@ -25,6 +25,8 @@ class ConfigStoreHandle;
 class ConfigOverlayEditor;
 class ConfigReadProjection;
 class ConfigReadProjectionState;
+class ConfigHandle;
+class ConfigHandleState;
 struct ConfigCompletion;
 struct ConfigOverlayOptions;
 struct ConfigOverlayPresentation;
@@ -119,6 +121,8 @@ public:
     quint64 openOverlay(const ConfigOverlayOptions &options, QObject *context = nullptr,
                         Callback callback = {});
     ConfigReadProjection *readProjection();
+    ConfigHandle *root();        // Live user-layer handle graph.
+    ConfigHandle *runtimeRoot(); // Live runtime-layer handle graph; no disk route.
 signals:
     void statusChanged();
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
@@ -137,6 +141,7 @@ signals:
 private:
     friend class ConfigReadProjection;
     friend class ConfigReadProjectionState;
+    friend class ConfigHandleState;
     friend class ConfigPublicationScope;
     friend class ConfigQmlStore;
     std::unique_ptr<ConfigChangePublisher> m_changes;

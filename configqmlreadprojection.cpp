@@ -9,11 +9,8 @@
 #include <QQmlEngine>
 
 namespace configqml {
-namespace {
-QJSValue selectedEvent(QJSEngine *engine, const ConfigReadSnapshot &snapshot,
-                       const ConfigPath &path) {
-    const auto state = snapshot.selectedState(path);
-    const auto descriptor = ConfigObservationAccess::schema(snapshot).descriptor(path);
+QJSValue qmlSelectedStateEvent(QJSEngine *engine, const ConfigSelectedState &state,
+                               const std::optional<ConfigDescriptor> &descriptor) {
     return qmlEvent(engine,
                     {"valid", "present", "value", "targetPresent", "pending", "authoredPresent",
                      "authoredValue", "candidateAvailable", "candidatePresent", "candidateValue",
@@ -42,6 +39,12 @@ QJSValue selectedEvent(QJSEngine *engine, const ConfigReadSnapshot &snapshot,
                                            {"maskedBy", state.maskedBy()}}
                             .value(key);
                     });
+}
+namespace {
+QJSValue selectedEvent(QJSEngine *engine, const ConfigReadSnapshot &snapshot,
+                       const ConfigPath &path) {
+    return qmlSelectedStateEvent(engine, snapshot.selectedState(path),
+                                 ConfigObservationAccess::schema(snapshot).descriptor(path));
 }
 class ReadSnapshot : public QObject {
     Q_OBJECT

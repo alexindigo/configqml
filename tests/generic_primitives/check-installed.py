@@ -9,7 +9,7 @@ import tempfile
 from harness import guest_environment, installed_manifest, loader, require_marker, run, write_json
 
 
-def check_lane(source, prefix, output):
+def check_lane(source, prefix, output, full):
     env = guest_environment(prefix)
     build = output / "clients-build"
     run(output, "configure", ["cmake", "-S", source / "tests/generic_primitives/installed",
@@ -27,6 +27,22 @@ def check_lane(source, prefix, output):
     if not any("libconfigqmlplugin.so" in line for line in origins) or any(
             str(prefix) + "/lib/" not in line for line in origins):
         raise RuntimeError("QML consumer loaded outside the installed prefix")
+    if full:
+        # Generated handles and composed replies, from consumers whose schema
+        # fields are unknown to the library build.
+        handles_native = build / "installed-handles-native"
+        handles_qml = build / "installed-handles-plugin"
+        loader(output, "handles-native-loader", handles_native, prefix, env, core_only=True)
+        require_marker(run(output, "handles-native", [handles_native], env=env),
+                       "GENERIC_INSTALLED_HANDLES_NATIVE_OK maxVisible=3")
+        loader(output, "handles-qml-linkage", handles_qml, prefix, env, plugin_only=True)
+        text = run(output, "handles-qml", [handles_qml, prefix / "lib/qt6/qml",
+            source / "tests/generic_primitives/installed/handles.qml"], env=env)
+        require_marker(text, "GENERIC_INSTALLED_HANDLES_QML_OK maxVisible=3")
+        origins = [line for line in text.splitlines() if line.startswith("OLD_QML_LOADER ")]
+        if not any("libconfigqmlplugin.so" in line for line in origins) or any(
+                str(prefix) + "/lib/" not in line for line in origins):
+            raise RuntimeError("QML handle consumer loaded outside the installed prefix")
     run(output, "lint", ["cmake", "--build", build, "--target", "installed-qml-lint"], env=env)
     return installed_manifest(prefix, output, env)
 
@@ -37,22 +53,21 @@ def main():
         parser.add_argument("--" + option, type=Path, required=True)
     parser.add_argument("--slice", action="store_true")
     args = parser.parse_args()
-    if not args.slice:
-        raise RuntimeError("full handle/reply installed qualification is not implemented; no full marker")
+    full = not args.slice
     source, prefix, output = (getattr(args, name).resolve() for name in ("source", "prefix", "output"))
-    current = check_lane(source, prefix, output / "original")
+    current = check_lane(source, prefix, output / "original", full)
     output.mkdir(parents=True, exist_ok=True)
     # Keep only observations, not a rebuildable copied prefix, after this proof.
     with tempfile.TemporaryDirectory(prefix="relocated-", dir=output) as temporary:
         relocated = Path(temporary) / "prefix"
         shutil.copytree(prefix, relocated, symlinks=True)
-        moved = check_lane(source, relocated, output / "relocated")
+        moved = check_lane(source, relocated, output / "relocated", full)
         if {name: library["sha256"] for name, library in current["libraries"].items()} != {
                 name: library["sha256"] for name, library in moved["libraries"].items()}:
             raise RuntimeError("relocation changed a candidate library")
-        write_json(output / "qualification.json", {"boundary": "slice", "original": current,
-            "relocated": moved})
-    print("GENERIC_INSTALLED_OK slice")
+        write_json(output / "qualification.json", {"boundary": "full" if full else "slice",
+            "original": current, "relocated": moved})
+    print("GENERIC_INSTALLED_OK " + ("full" if full else "slice"))
 
 
 if __name__ == "__main__":

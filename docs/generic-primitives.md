@@ -13,11 +13,97 @@ admission and persistence; the existing publication boundary owns notifications.
 | 2 | P2: explicit batch | Omitted leaf means no edit. Set and RemoveOverride remain distinct from null, absence and equal intent. Draft and raw-slot staging/admission use one candidate resolver over frozen or current layers, including source fallback and record-list projection. |
 | 3 | P3: causal observation | Every installed capture retains actual worker dependency cuts, selected target and preview lifetime/epoch where applicable. Completion follows installation, bindable/leaf notification and legal model updates of that exact reader. |
 
-This slice provides the compatibility `readProjection` API described below. The
-schema-generated handle graph, uniform verbs and composed pending replies are
-the follow-on public interface; they adapt these same contracts, not another
-capture owner. They are not implemented by the initial slice. Existing methods,
-values, numeric domains, namespaces and persistence/Retry behavior remain valid.
+The recommended interface is the schema-generated handle graph below: generated
+handles, one verb vocabulary and one pending reply. It adapts these same
+contracts; it is not another capture owner or settings engine. The `readProjection`
+callback API further below remains supported as a compatibility recipe. Existing
+methods, values, numeric domains, namespaces and persistence/Retry behavior
+remain valid.
+
+## Generated handles
+
+Every owner exposes a stable `root` handle generated from its schema: a store's
+root is live (user layer), `runtimeRoot` is live on the runtime layer (no disk
+route), a draft or overlay editor's root is staged, and a read-only scope, overlay
+view or draft preview is read-only. Native owners provide nonvirtual `root()`
+(and `ConfigStore::runtimeRoot()`); QML owners provide `root` (and `runtimeRoot`)
+properties. A new setting or plugin needs a schema, not new library methods.
+
+| # | Access | Meaning |
+|---|---|---|
+| 1 | `h.scopes.general`, `h.fields.scaleRatio` | Generated Group and field handles, including optional defaultless fields before a value exists. QML lookup objects have no prototype, so any schema key is plain data and never shadows a verb. |
+| 2 | `h.scope(["general", "scaleRatio"])` | Cached lookup by opaque segments; dot access is convenience only. An undeclared path or an atomic Record/Map/List member gives an invalid handle; it never widens to its parent. |
+| 3 | `h.select([["general"], ["bar", "position"]])` | Disjoint selection within the same owner and permission; Groups expand to all declared fields, including undisplayed ones. |
+| 4 | `h.value`, `h.present`, `h.values` | Binding inputs. Live: checked read-your-writes value. Staged: the checked candidate (inheritance after a staged removal), the authored value while a set is unresolved, nothing while a removal is unresolved. Read-only: the owner's projection. `value` notifies exactly once per actual effective transition, including absent/present; equal intent and metadata-only publications do not notify. |
+| 5 | `h.state`, `h.descriptor` | Immutable selected state (target presence, pending `none`/`set`/`remove`, authored, candidate, mask) and declared metadata. Neither is a widget or codec. |
+| 6 | `h.generation`, `h.capabilities`, `h.valid`, `h.health`, `h.kind` | Opaque installed observation, supported verbs, owner/selection lifetime, last acquisition health (`ok`, `failed`, `invalid`) and `live`/`staged`/`readOnly`. |
+
+Handles are materialized lazily and only materialized handles are notified;
+getters never capture, resolve a candidate or touch disk.
+
+### Verbs
+
+Every verb returns a `ConfigPendingReply`, including refusals and no-ops, which
+finish only after return. `options.observe` lists additional exact read handles
+to acknowledge after the operation; the initiating handle is always observed
+first. The views are validated before anything is admitted: a view that cannot
+certify the selected write (an unrelated owner or a narrower selection) refuses
+with `read-observation` in phase `selection` and nothing is written.
+
+| # | Verb | Live | Staged | Read-only |
+|---|---|---|---|---|
+| 1 | `read()` | Ordered barrier capture | Installed staged snapshot, never thawed | Ordered barrier capture |
+| 2 | `set(value)` / scope `set([{path, value}])` | Checked intent, read-your-writes | Stages a checked set | `unsupported-operation` |
+| 3 | `remove()` = `unset()` | RemoveOverride of every selected declared field | Stages removal; candidate shows inheritance | `unsupported-operation` |
+| 4 | `apply()` | Selected persistence (`saveSelected`); runtime root: transient admission, no saved revision | Admits and publishes only the selected staged edits | `unsupported-operation` |
+| 5 | `discard()` | `unsupported-operation` (never rollback) | Drops only selected unadmitted edits and rebases them | `unsupported-operation` |
+| 6 | `observe(after)` = `whenCurrent(after)` | Capture covering the token; omitted token: fresh barrier | Only an already covered token, else `unsupported-operation` | Capture covering the token |
+| 7 | `edit()` | Opens a staged handle over the same selection (store and scope roots) | `unsupported-operation` | `unsupported-operation` |
+| 8 | `abandon()` | `unsupported-operation` | Draft sessions: abandons the session's failed admitted Apply (same owner as `draft.abandonApply`); `apply-not-pending` when none remains | `unsupported-operation` |
+
+A batch validates completely before anything is staged or admitted; omitted
+fields are not edited; duplicates and paths outside the selection are refused.
+A subscope Apply or Discard of a draft leaves disjoint staged edits and their
+fences intact. An overlay editor applies or discards its single record slot as a
+whole; a subscope that would leave other staged edits of that slot behind is
+refused with `selection-partial`. A failed or uncertain admitted Apply keeps its
+Retry witness; repeating it follows existing witness recovery.
+
+### The pending reply
+
+| # | Member | Meaning |
+|---|---|---|
+| 1 | `finished`, `isFinished` | One terminal signal. Connecting right after the call is always safe. |
+| 2 | `isError`, `error.code/message/phase` | Value-free error; phase is `selection`, `candidate`, `admission`, `publication`, `observation` or `lifetime`. |
+| 3 | `value.generation` | Opaque coverage of this operation; committed write coverage survives editor closure while its owner lives. Staged coverage carries its edit lifetime and cannot stand for committed coverage. |
+| 4 | `value.snapshot` | The initiating handle's immutable acknowledged facts. |
+| 5 | `value.observations` | One entry per `options.observe` view, in order, with its snapshot and generation. |
+| 6 | `value.write`, `value.pending` | Truthful admission/publication facts, and newer local input not covered by the snapshot. |
+| 7 | `value.handle` | The handle opened by `edit()`. The edit handle owns its session and its lookups; keep a reference to it while its fields are used, and release it to close the edit. |
+
+Success means the writer finished (admission/publication where applicable) and
+then every requested view installed, prepared its bindings, notified and finished
+its model updates. A reentrant notification cannot finish it early. Partial or
+uncertain publication is an error even if a view observed state. If publication
+succeeded but a view's acquisition failed, the reply is an error in phase
+`observation` that still carries `value.write` and `value.generation`; retry with
+`view.observe(value.generation)`, not another write. Losing the presentation
+(closing an editor) never cancels admitted persistence; a retained reply still
+receives its completion.
+
+```qml
+function applyAutoTile() {
+    const reply = edit.apply({observe: [runtime]})
+    reply.finished.connect(function () {
+        if (reply.isError) { showError(reply.error); return }
+        const policy = reply.value.observations[0].snapshot
+        autoTile.applyPolicy(policy) // The domain owner consumes the acknowledged value.
+    })
+}
+```
+
+Observation does not certify durability, wait for every process subscriber or
+acknowledge an external effect; the application owns its domain actions.
 
 Remaining compatibility routing is explicit: ordinary store/scoped selected and
 full-prefix entry points, all specialized retained/profile/migration/collection

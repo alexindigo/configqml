@@ -6,6 +6,7 @@
 namespace configqml {
 class ConfigStoreHandle;
 class ConfigDraftState;
+class ConfigHandle;
 struct ConfigApplyWitness;
 // Detached editor. Its values are not an optimistic store layer.
 class ConfigDraft : public QObject {
@@ -40,6 +41,7 @@ public:
     quint64 abandonApply(QObject *context = nullptr, ConfigStore::Callback callback = {});
     ConfigReadProjection *readProjection();
     ConfigReadProjection *previewProjection();
+    ConfigHandle *root();
 signals:
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
     void stateChanged();
@@ -55,6 +57,10 @@ private:
     std::unique_ptr<ConfigChangePublisher> m_changes, m_previewChanges;
     bool prepareChanges(const QList<ConfigPath> &paths);
     friend class ConfigStoreHandle;
+    friend class ConfigHandleState;
+    quint64 applySelection(const std::optional<QList<ConfigPath>> &selection, QObject *context,
+                           ConfigStore::Callback callback, bool retained);
+    bool discardSelection(const QList<ConfigPath> &selection);
     void rebase(const QList<ConfigPath> &selection);
     void publishPreview();
     void closePreviewScopes();

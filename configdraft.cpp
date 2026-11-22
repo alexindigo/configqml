@@ -243,8 +243,26 @@ void ConfigDraft::observe() {
         boundary.invoke([&] { emit stateChanged(); });
 }
 quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
+    return applySelection(std::nullopt, context, std::move(callback), false);
+}
+quint64 ConfigDraft::applySelection(const std::optional<QList<ConfigPath>> &selection,
+                                    QObject *context, ConfigStore::Callback callback,
+                                    bool retained) {
     if (!valid() || m_busy || !ConfigDraftState::get(this)->settled())
         return 0;
+    // A selected Apply admits only its selected edits. An admitted witness is
+    // retried only by the same selection, never recaptured by a different one.
+    auto edits = m_edits;
+    auto fences = m_fences;
+    if (selection) {
+        for (auto it = edits.begin(); it != edits.end();)
+            it = selection->contains(it.key()) ? std::next(it) : edits.erase(it);
+        for (auto it = fences.begin(); it != fences.end();)
+            it = selection->contains(it.key()) ? std::next(it) : fences.erase(it);
+        if (m_admitted && QSet<ConfigPath>(m_admittedEdits.keyBegin(), m_admittedEdits.keyEnd()) !=
+                              QSet<ConfigPath>(edits.keyBegin(), edits.keyEnd()))
+            return 0;
+    }
     const ConfigPublicationScope publication(m_store);
     m_busy = true;
     if (m_applyId.isEmpty())
@@ -252,21 +270,32 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
     auto attempt = std::make_shared<ConfigApplyAttempt>();
     attempt->ownerId = m_applyId;
     attempt->expected = m_admitted;
-    attempt->selectedPublication = ConfigDraftState::get(this)->hasRemovals();
+    attempt->selectedPublication = ConfigDraftState::get(this)->hasRemovals() || selection;
     for (const auto &edit : m_admittedEdits)
         attempt->selectedPublication |= !edit.has_value();
-    const auto edits = m_edits;
     const QPointer<ConfigDraft> guard(this);
     const QPointer<QObject> target(context ? context : this);
+    // A retained caller (a pending reply) still receives the admitted completion
+    // after this presentation is gone; the draft's own updates stay guarded.
+    QObject *const owner = retained ? static_cast<QObject *>(m_store.data()) : this;
     const auto id = m_store->applyGroup(
-        m_edits, m_fences, this,
-        ConfigPairedCallback{[guard, target, attempt, edits,
+        edits, fences, owner,
+        ConfigPairedCallback{[guard, target, attempt, edits, selection, retained,
                               callback = std::move(callback)](const ConfigCompletion &completion) {
             const auto &result = completion.result;
-            if (!guard)
+            if (!guard) {
+                if (retained && target && callback)
+                    invokeCompletion(callback, completion);
                 return;
+            }
             guard->m_busy = false;
-            if (result.status != "failed") {
+            if (result.status != "failed" && selection) {
+                guard->m_admitted.reset();
+                guard->m_admittedEdits.clear();
+                for (auto it = edits.cbegin(); it != edits.cend(); ++it)
+                    guard->m_edits.remove(it.key());
+                guard->rebase(*selection);
+            } else if (result.status != "failed") {
                 guard->m_admitted.reset();
                 guard->m_admittedEdits.clear();
                 guard->closePreviewScopes();
@@ -278,7 +307,12 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
                 if (attempt->admitted) {
                     guard->m_admitted = attempt->admitted;
                     guard->m_admittedEdits = edits;
-                    guard->m_fences = attempt->admitted->fences;
+                    if (selection)
+                        for (auto it = attempt->admitted->fences.cbegin();
+                             it != attempt->admitted->fences.cend(); ++it)
+                            guard->m_fences[it.key()] = it.value();
+                    else
+                        guard->m_fences = attempt->admitted->fences;
                 }
                 // Admission rejection covers ingress, but accepts no intent. Reconcile only
                 // this attempt's single generation step, never a changed baseline or a later
@@ -307,7 +341,7 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
             const auto paths = guard->paths();
             if (!guard->prepareChanges(paths))
                 return;
-            if ((result.status != "failed" &&
+            if ((result.status != "failed" && guard->m_edits.isEmpty() &&
                  !boundary.invoke([&] { emit guard->previewScopesClosed(); })) ||
                 !boundary.invoke([&] { emit guard->previewValuesChanged(paths); }) ||
                 !boundary.invoke([&] { emit guard->valuesChanged(paths); }) ||
@@ -330,7 +364,7 @@ quint64 ConfigDraft::apply(QObject *context, ConfigStore::Callback callback) {
                         Qt::QueuedConnection);
             }
         }},
-        attempt, m_admittedEdits);
+        attempt, selection ? edits : m_admittedEdits);
     if (prepareChanges({}))
         ConfigConsumerGuard(this).invoke([&] { emit stateChanged(); });
     return id;
@@ -365,6 +399,25 @@ void ConfigDraft::rebase(const QList<ConfigPath> &selection) {
         publishPreview();
     }
     prepareStoreChange();
+}
+bool ConfigDraft::discardSelection(const QList<ConfigPath> &selection) {
+    if (!valid() || m_busy)
+        return false;
+    for (auto it = m_admittedEdits.cbegin(); it != m_admittedEdits.cend(); ++it)
+        if (selection.contains(it.key()))
+            return false; // An admitted Retry witness is never discarded here.
+    const ConfigPublicationScope publication(m_store);
+    for (const auto &path : selection)
+        m_edits.remove(path);
+    rebase(selection);
+    const auto changed = paths();
+    ConfigConsumerGuard boundary(this);
+    if (prepareChanges(changed) &&
+        (!m_edits.isEmpty() || boundary.invoke([&] { emit previewScopesClosed(); })) &&
+        boundary.invoke([&] { emit previewValuesChanged(changed); }) &&
+        boundary.invoke([&] { emit valuesChanged(changed); }))
+        boundary.invoke([&] { emit stateChanged(); });
+    return true;
 }
 bool ConfigDraft::discard() {
     if (!valid() || m_busy)

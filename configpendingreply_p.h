@@ -2,6 +2,8 @@
 #pragma once
 #include "configpendingreply.h"
 #include "configreadprojection.h"
+#include "confighandle.h"
+#include "configobservation_p.h"
 #include <QPointer>
 
 namespace configqml {
@@ -9,13 +11,24 @@ struct ConfigReplyErrorData {
     QString code, message, phase;
 };
 struct ConfigReplyValueData {
+    QPointer<ConfigHandle> handle;
     ConfigObservation generation;
     ConfigReadSnapshot snapshot;
     QList<ConfigReadResult> observations;
     QList<ConfigPath> pending;
     std::optional<ConfigResult> write;
 };
-// One native envelope for future handle verbs. It never captures values itself:
+// The writer half of a composed operation: the owner's own admission/staging
+// outcome and its captured coverage, delivered through the paired envelope.
+struct ConfigReplyWrite {
+    std::optional<ConfigResult> result;
+    ConfigObservation observation;
+    QString code, phase;      // Local refusal before any effect was admitted.
+    bool persistence = false; // Apply/save: a failed result is a publication failure.
+};
+using ConfigReplyWriter =
+    std::function<void(QObject *context, std::function<void(const ConfigReplyWrite &)> done)>;
+// One native envelope for every handle verb. It never captures values itself:
 // all reads/install/notification fencing remain in ConfigReadProjection's P3 owner.
 class ConfigPendingReplyState {
 public:
@@ -23,6 +36,15 @@ public:
                                     const ConfigObservation &after = {},
                                     const QList<ConfigReadProjection *> &observe = {},
                                     QObject *parent = nullptr);
+    // Views are captured and validated before the writer admits anything. A
+    // barrier initiator is synchronized after the write; a staged (frozen)
+    // initiator contributes its installed candidate instead.
+    static ConfigPendingReply *operation(ConfigReadProjection *initiator, bool barrier,
+                                         const ConfigObservation &after,
+                                         const QList<ConfigReadProjection *> &observe,
+                                         ConfigReplyWriter writer, ConfigHandle *opened = nullptr,
+                                         const ConfigObservation &shape = {},
+                                         QObject *parent = nullptr);
     static ConfigPendingReply *refuse(const QString &code, const QString &phase,
                                       QObject *parent = nullptr);
 
@@ -30,11 +52,14 @@ private:
     friend class ConfigPendingReply;
     explicit ConfigPendingReplyState(ConfigPendingReply *reply);
     void start(const ConfigObservation &after);
+    void written(const ConfigReplyWrite &write, const ConfigObservation &after);
+    void staged();
+    void observeViews();
     void acquired(qsizetype index, const ConfigReadResult &result);
     void settle(const QString &code = {}, const QString &phase = {});
     void finish();
     ConfigPendingReply *q;
-    bool finished = false, queued = false;
+    bool finished = false, queued = false, barrier = true;
     ConfigReplyError error;
     ConfigReplyValue value;
     ConfigReplyValueData captured;

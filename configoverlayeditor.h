@@ -48,6 +48,7 @@ public:
     quint64 flush(QObject *context = nullptr, ConfigStore::Callback callback = {});
     void detach();
     ConfigReadProjection *readProjection();
+    ConfigHandle *root();
 signals:
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
     void stateChanged();
@@ -55,6 +56,7 @@ signals:
 
 private:
     friend class ConfigReadProjectionState;
+    friend class ConfigHandleState;
     friend class ConfigQmlStore;
     friend class ConfigQmlOverlay;
     friend class ConfigStoreTestAccess;
@@ -70,7 +72,14 @@ private:
     ConfigOverlayEditor(ConfigStore *store, const ConfigOverlayPresentation &presentation);
     InstalledChange install(const ConfigOverlayPresentation &presentation, bool notify = true);
     quint64 request(const QString &operation, QObject *context, ConfigStore::Callback callback);
+    // Retained continuations still receive an admitted completion after this
+    // presentation closes; presentation updates and legacy callbacks stay guarded.
+    using Retained = std::function<void(const ConfigCompletion &)>;
+    quint64 request(const QString &operation, QObject *context, ConfigStore::Callback callback,
+                    QObject *retainedContext, Retained retained);
     ConfigRequestHandle writeLive(const ConfigPath &path, const std::optional<QVariant> &value);
+    ConfigRequestHandle writeLive(const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                                  QObject *retainedContext, Retained retained);
     QPointer<ConfigStore> m_store;
     QString m_id, m_error;
     QString m_placementToken;

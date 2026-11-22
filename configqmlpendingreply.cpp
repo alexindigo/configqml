@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configqmlpendingreply.h"
 #include "configqmlevent_p.h"
+#include "configqmlhandle.h"
 #include <QQmlEngine>
 
 namespace configqml {
@@ -28,8 +29,12 @@ QJSValue ConfigQmlPendingReply::value() const {
     const auto value = m_reply->value();
     const auto engine = m_engine;
     return qmlEvent(
-        engine, {"generation", "snapshot", "observations", "pending", "write"},
+        engine, {"handle", "generation", "snapshot", "observations", "pending", "write"},
         [engine, value](const QString &key) -> QVariant {
+            if (key == "handle")
+                return value.handle() ? QVariant::fromValue<QObject *>(
+                                            ConfigQmlHandle::adopt(value.handle(), engine))
+                                      : QVariant();
             if (key == "generation")
                 return QVariant::fromValue(value.generation());
             if (key == "snapshot")

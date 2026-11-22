@@ -7,6 +7,7 @@ namespace configqml {
 struct ConfigReplyErrorData;
 struct ConfigReplyValueData;
 class ConfigPendingReplyState;
+class ConfigHandle;
 class ConfigReplyError {
 public:
     ConfigReplyError() = default;
@@ -27,6 +28,7 @@ public:
     QList<ConfigReadResult> observations() const;
     QList<ConfigPath> pending() const;
     std::optional<ConfigResult> write() const;
+    ConfigHandle *handle() const; // Opened edit handle; owned by the reply until reparented.
 
 private:
     friend class ConfigPendingReplyState;

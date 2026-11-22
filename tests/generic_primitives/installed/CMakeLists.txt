@@ -9,7 +9,13 @@ add_executable(installed-plugin ../compat/qml.cpp)
 target_link_libraries(installed-plugin PRIVATE Qt6::Qml)
 target_compile_definitions(installed-plugin PRIVATE
     CONFIGQML_CLIENT_MARKER="GENERIC_INSTALLED_QML_OK snapshot=3")
+add_executable(installed-handles-native handles.cpp)
+target_link_libraries(installed-handles-native PRIVATE configqml::core)
+add_executable(installed-handles-plugin ../compat/qml.cpp)
+target_link_libraries(installed-handles-plugin PRIVATE Qt6::Qml)
+target_compile_definitions(installed-handles-plugin PRIVATE
+    CONFIGQML_CLIENT_MARKER="GENERIC_INSTALLED_HANDLES_QML_OK maxVisible=3")
 include(../../../cmake/ConfigQmlLint.cmake)
 add_custom_target(installed-qml-lint
     COMMAND Qt6::qmllint ${_configqml_qmllint_args} -I "${CONFIGQML_IMPORT_ROOT}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/slice.qml")
+        "${CMAKE_CURRENT_SOURCE_DIR}/slice.qml" "${CMAKE_CURRENT_SOURCE_DIR}/handles.qml")

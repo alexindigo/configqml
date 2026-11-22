@@ -24,12 +24,14 @@ public:
     quint64 save(ConfigStore::Callback callback = {});
     ConfigDraft *draft(const QList<ConfigPath> &paths = {});
     ConfigReadProjection *readProjection();
+    ConfigHandle *root();
 signals:
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
     void detached();
 
 private:
     friend class ConfigReadProjectionState;
+    friend class ConfigHandleState;
     friend class ConfigStore;
     friend class ConfigDraft;
     ConfigStoreHandle(ConfigDraft *draft, ConfigPath prefix, QObject *parent);

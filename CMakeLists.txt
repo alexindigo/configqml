@@ -38,7 +38,7 @@ target_sources(configqml_core PRIVATE configselection_p.h configedit_p.h
     configcandidate_p.h configcandidate.cpp configobservation.h configobservation_p.h
     configobservation.cpp configreadprojection.h configreadprojection_p.h configreadprojection.cpp
     configpendingreply.h configpendingreply_p.h configpendingreply.cpp
-    confighandle_p.h confighandle.cpp)
+    confighandle.h confighandle_p.h confighandle.cpp)
 target_sources(configqml_core PRIVATE configworktiming_p.h configworktiming.cpp)
 add_library(configqml::core ALIAS configqml_core)
 set_target_properties(configqml_core PROPERTIES EXPORT_NAME core
@@ -74,7 +74,8 @@ if(CONFIGQML_BUILD_QML)
         configqmlcompat.cpp configqmlgroups.cpp configqmloverlay.h configqmloverlay.cpp
         configqmlevent_p.h configqmlevent.cpp)
     target_sources(configqml PRIVATE configqmlreadprojection.h configqmlreadprojection.cpp
-        configqmlpendingreply.h configqmlpendingreply.cpp)
+        configqmlpendingreply.h configqmlpendingreply.cpp
+        configqmlhandle.h configqmlhandle.cpp)
     add_library(configqml::configqml ALIAS configqml)
     target_link_libraries(configqml PUBLIC configqml::core Qt6::Qml PRIVATE Qt6::CorePrivate)
     target_include_directories(configqml PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -106,7 +107,7 @@ if(CONFIGQML_BUILD_QML)
         "${CMAKE_CURRENT_BINARY_DIR}/ConfigQml/configqml.qmltypes"
         DESTINATION "${_configqml_module_dir}")
     install(FILES configqmldeclaration.h configqmlstore.h configqmlvalue.h configqmlmodel.h configfacade.h
-        configqmlreadprojection.h configqmlpendingreply.h
+        configqmlreadprojection.h configqmlpendingreply.h configqmlhandle.h
         DESTINATION "${_configqml_include_dir}")
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/configqml-qt-build.txt"
         DESTINATION "${_configqml_data_dir}")
@@ -120,7 +121,7 @@ install(FILES configvalue.h configschema.h confignumber.h configlayers.h configs
     configenvironment.h configbackend.h configcodec.h configmemorybackend.h
     configjsoncodec.h configjsonbackend.h configresult.h configstore.h configlistmodel.h
     configdraft.h configstorehandle.h configprojection.h configrecordlistpolicy.h configoverlayeditor.h
-    configobservation.h configreadprojection.h configpendingreply.h
+    configobservation.h configreadprojection.h configpendingreply.h confighandle.h
     DESTINATION "${_configqml_include_dir}")
 install(FILES COPYING COPYING.LESSER DESTINATION "${_configqml_license_dir}")
 install(EXPORT configqmlCoreTargets FILE configqmlCoreTargets.cmake NAMESPACE configqml::
@@ -139,7 +140,7 @@ include(CTest)
 if(BUILD_TESTING)
     configure_file(tests/generator.cmake.in test-generator.cmake @ONLY)
     find_package(Qt6 6.12 REQUIRED COMPONENTS Test Gui)
-    foreach(suite thread_work generic_primitives generic_performance compact_events projections fallback_layers startup_policy record_list_policy record_list_containers unknown_data source_events retained_groups save_selected draft_reset strict_conflicts pending_rebase evidence_backlog empty_shards overlay_editor overlay_preserve string_pattern)
+    foreach(suite thread_work generic_primitives generic_primitives_handles generic_performance compact_events projections fallback_layers startup_policy record_list_policy record_list_containers unknown_data source_events retained_groups save_selected draft_reset strict_conflicts pending_rebase evidence_backlog empty_shards overlay_editor overlay_preserve string_pattern)
         add_executable(test_${suite} tests/test_${suite}.cpp)
         target_link_libraries(test_${suite} PRIVATE configqml::core Qt6::Test)
         add_test(NAME ${suite} COMMAND test_${suite})
@@ -201,11 +202,21 @@ if(BUILD_TESTING)
             QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
             ABANDON_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_abandon_apply.qml")
         add_test(NAME generic_primitives_abandon COMMAND test_generic_primitives_abandon)
+        add_executable(test_qml_generic_primitives_handles
+            tests/test_qml_generic_primitives_handles.cpp)
+        target_link_libraries(test_qml_generic_primitives_handles PRIVATE configqml::configqml
+            Qt6::Test)
+        add_dependencies(test_qml_generic_primitives_handles configqmlplugin)
+        target_compile_definitions(test_qml_generic_primitives_handles PRIVATE
+            QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
+            HANDLES_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_generic_handles.qml")
+        add_test(NAME qml_generic_primitives_handles COMMAND test_qml_generic_primitives_handles)
         add_test(NAME generic_primitives_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
             ${_configqml_qmllint_args} -I ${CMAKE_CURRENT_BINARY_DIR}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_generic_primitives.qml
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_overlay_completion.qml
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_abandon_apply.qml)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_abandon_apply.qml
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_generic_handles.qml)
         add_executable(test_qml_compact_events tests/test_qml_compact_events.cpp)
         add_dependencies(test_qml_compact_events configqmlplugin)
         target_link_libraries(test_qml_compact_events PRIVATE configqml::configqml Qt6::Test Qt6::QmlPrivate)

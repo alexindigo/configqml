@@ -83,6 +83,12 @@ public:
     static const QList<ConfigObservationDependency> &dependencies(const ConfigObservation &token);
     static ConfigObservation withLogicalSelection(const ConfigObservation &token,
                                                   const QList<ConfigPath> &paths);
+    // A weaker claim over a subset of an admitted token: ordinary storage cuts
+    // keep only the selected paths; composed cuts narrow logical coverage.
+    static ConfigObservation narrow(const ConfigObservation &token, const QList<ConfigPath> &paths);
+    // The same dependency cuts without staged/preview scoping: the shape of the
+    // coverage a committed write over this selection produces.
+    static ConfigObservation committed(const ConfigObservation &token);
     static bool covers(const ConfigObservation &installed, const ConfigObservation &after);
     static bool applicable(const ConfigObservation &selection, const ConfigObservation &after);
     static ConfigSelectedState state(ConfigSelectedStateData data);

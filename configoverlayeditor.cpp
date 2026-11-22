@@ -189,24 +189,39 @@ bool ConfigOverlayEditor::unset(const ConfigPath &query) {
 }
 ConfigRequestHandle ConfigOverlayEditor::writeLive(const ConfigPath &path,
                                                    const std::optional<QVariant> &value) {
+    return writeLive({{path, value}}, nullptr, {});
+}
+ConfigRequestHandle
+ConfigOverlayEditor::writeLive(const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                               QObject *retainedContext, Retained retained) {
     if (!m_store || !m_store->m_accepting)
-        return {0, 0, false, {m_schema.diagnostics().make(path, "overlay-owner")}};
+        return {0,
+                0,
+                false,
+                {m_schema.diagnostics().make(edits.isEmpty() ? ConfigPath() : edits.firstKey(),
+                                             "overlay-owner")}};
     QPointer<ConfigOverlayEditor> guard(this);
+    const QPointer<QObject> retainedTarget(retainedContext);
+    QObject *const owner = retained ? static_cast<QObject *>(m_store.data()) : this;
     const auto id = m_store->overlayRequest(
-        this, "overlayWrite", this,
-        ConfigPairedCallback{[guard](const ConfigCompletion &completion) {
+        this, "overlayWrite", owner,
+        ConfigPairedCallback{[guard, retainedTarget, retained](const ConfigCompletion &completion) {
             const auto &result = completion.result;
             if (guard && guard->status() != Status::Closed)
                 if (ConfigConsumerGuard(guard).invoke([&] { emit guard->completed(result); }))
                     ConfigReadProjectionState::operation(guard->readProjection(), completion);
+            if (retained && retainedTarget)
+                retained(completion);
         }},
-        {{path, value}});
+        edits);
     const auto sequence = m_store->m_sequence;
-    m_edits[path] = value;
-    m_editSequences[path] = sequence;
-    m_presentations.remove(path);
+    for (auto it = edits.cbegin(); it != edits.cend(); ++it) {
+        m_edits[it.key()] = it.value();
+        m_editSequences[it.key()] = sequence;
+        m_presentations.remove(it.key());
+    }
     ConfigConsumerGuard boundary(this);
-    if (notifyValues({path}))
+    if (notifyValues(edits.keys()))
         boundary.invoke([&] { emit stateChanged(); });
     return {id, sequence, true, {}};
 }
@@ -334,6 +349,11 @@ quint64 ConfigStore::overlayRequest(ConfigOverlayEditor *editor, const QString &
 }
 quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
                                      ConfigStore::Callback callback) {
+    return request(operation, context, std::move(callback), nullptr, {});
+}
+quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
+                                     ConfigStore::Callback callback, QObject *retainedContext,
+                                     Retained retained) {
     if (!m_store)
         return 0;
     const ConfigPublicationScope publication(m_store);
@@ -351,52 +371,61 @@ quint64 ConfigOverlayEditor::request(const QString &operation, QObject *context,
     const auto edits = m_edits;
     QPointer<ConfigOverlayEditor> guard(this);
     QPointer<QObject> target(context ? context : this);
+    const QPointer<QObject> retainedTarget(retainedContext);
+    QObject *const owner = retained ? static_cast<QObject *>(m_store.data()) : this;
     const auto id = m_store->overlayRequest(
-        this, operation, this,
-        ConfigPairedCallback{[guard, target, active, attempt, edits, operation,
+        this, operation, owner,
+        ConfigPairedCallback{[guard, target, active, attempt, edits, operation, retainedTarget,
+                              retained,
                               callback = std::move(callback)](const ConfigCompletion &completion) {
-            const auto &result = completion.result;
-            if (!guard || guard->status() == Status::Closed)
-                return;
-            const auto wasBusy = guard->m_busy;
-            const auto wasConflicted = guard->m_conflicted;
-            if (active)
-                guard->m_busy = false;
-            if (attempt && attempt->admitted && result.status == "failed") {
-                guard->m_admitted = attempt->admitted;
-                guard->m_admittedEdits = edits;
-                guard->m_admittedOperation = operation;
-            } else if ((result.status != "failed" && result.refreshState == "current") ||
-                       result.status == "discarded") {
-                guard->m_admitted.reset();
-                guard->m_admittedEdits.clear();
-                guard->m_admittedOperation.clear();
-            }
-            if (result.error.code == "overlay-conflict")
-                guard->m_conflicted = true;
-            ConfigConsumerGuard boundary(guard);
-            const bool changed = wasBusy != guard->m_busy || wasConflicted != guard->m_conflicted;
-            if (changed && !ConfigChangePublisher::prepare(guard, {{guard->m_changes.get(), {}}}))
-                return;
-            if ((changed && !boundary.invoke([&] { emit guard->stateChanged(); })) ||
-                !boundary.invoke([&] { emit guard->completed(result); }))
-                return;
-            if (!boundary.invoke([&] {
-                    ConfigReadProjectionState::operation(guard->readProjection(), completion);
-                }))
-                return;
-            if (target && callback) {
-                if (target->thread() == QThread::currentThread())
-                    boundary.invoke([&] { invokeCompletion(callback, completion); });
-                else
-                    QMetaObject::invokeMethod(
-                        target,
-                        [target, callback, completion] {
-                            ConfigConsumerGuard(target).invoke(
-                                [&] { invokeCompletion(callback, completion); });
-                        },
-                        Qt::QueuedConnection);
-            }
+            [&] {
+                const auto &result = completion.result;
+                if (!guard || guard->status() == Status::Closed)
+                    return;
+                const auto wasBusy = guard->m_busy;
+                const auto wasConflicted = guard->m_conflicted;
+                if (active)
+                    guard->m_busy = false;
+                if (attempt && attempt->admitted && result.status == "failed") {
+                    guard->m_admitted = attempt->admitted;
+                    guard->m_admittedEdits = edits;
+                    guard->m_admittedOperation = operation;
+                } else if ((result.status != "failed" && result.refreshState == "current") ||
+                           result.status == "discarded") {
+                    guard->m_admitted.reset();
+                    guard->m_admittedEdits.clear();
+                    guard->m_admittedOperation.clear();
+                }
+                if (result.error.code == "overlay-conflict")
+                    guard->m_conflicted = true;
+                ConfigConsumerGuard boundary(guard);
+                const bool changed =
+                    wasBusy != guard->m_busy || wasConflicted != guard->m_conflicted;
+                if (changed &&
+                    !ConfigChangePublisher::prepare(guard, {{guard->m_changes.get(), {}}}))
+                    return;
+                if ((changed && !boundary.invoke([&] { emit guard->stateChanged(); })) ||
+                    !boundary.invoke([&] { emit guard->completed(result); }))
+                    return;
+                if (!boundary.invoke([&] {
+                        ConfigReadProjectionState::operation(guard->readProjection(), completion);
+                    }))
+                    return;
+                if (target && callback) {
+                    if (target->thread() == QThread::currentThread())
+                        boundary.invoke([&] { invokeCompletion(callback, completion); });
+                    else
+                        QMetaObject::invokeMethod(
+                            target,
+                            [target, callback, completion] {
+                                ConfigConsumerGuard(target).invoke(
+                                    [&] { invokeCompletion(callback, completion); });
+                            },
+                            Qt::QueuedConnection);
+                }
+            }();
+            if (retained && retainedTarget)
+                retained(completion);
         }},
         {}, attempt);
     if (active)
