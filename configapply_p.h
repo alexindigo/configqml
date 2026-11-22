@@ -25,6 +25,9 @@ struct ConfigApplyCapture {
     QMap<ConfigPath, std::optional<QVariant>> edits;
     QSet<ConfigPath> ownConfirmation;
     QSet<ConfigPath> rejectedIngress;
+    // Every admitted input of this Apply, including Retry additions: the exact
+    // pending change an explicit abandon removes.
+    QSet<quint64> inputs;
     bool publicationFence = false;
 };
 } // namespace configqml

@@ -755,6 +755,10 @@ void ConfigWorker::process(const ConfigCommand &command) {
         processGroup(command);
         return;
     }
+    if (command.operation == "abandonApply") {
+        abandonApply(command);
+        return;
+    }
     if (!command.input) {
         if (command.operation == "updateRecordListPolicy") {
             recordListCommand(command);

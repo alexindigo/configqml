@@ -180,6 +180,15 @@ QString ConfigQmlStore::apply(const QJSValue &function) {
     ConfigConsumerGuard(this).invoke([&] { id = m_draft->apply(this, callback(function)); });
     return QString::number(id);
 }
+QString ConfigQmlStore::abandonApply(const QJSValue &function) {
+    if (!m_draft || !m_core || m_isPreview || m_overlay || m_draft->busy()) {
+        reject({}, "not-an-idle-draft");
+        return {};
+    }
+    quint64 id = 0;
+    ConfigConsumerGuard(this).invoke([&] { id = m_draft->abandonApply(this, callback(function)); });
+    return QString::number(id);
+}
 QString ConfigQmlStore::stageReset(const QVariantList &paths, const QJSValue &function) {
     if (!m_core || !m_draft || !m_writable || m_isPreview || m_overlay || m_draft->busy()) {
         reject({}, "not-an-idle-draft");

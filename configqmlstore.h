@@ -120,6 +120,7 @@ public:
     Q_INVOKABLE QString retryGroup(const QString &token, const QJSValue &callback = {});
     Q_INVOKABLE QString releaseGroup(const QString &token, const QJSValue &callback = {});
     Q_INVOKABLE QVariantMap groupInfo(const QString &token) const;
+    Q_INVOKABLE QString abandonApply(const QJSValue &callback = {});
     ConfigQmlReadProjection *readProjection();
 signals:
     void schemaChanged();

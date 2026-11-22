@@ -94,6 +94,12 @@ void ConfigWorker::rememberApply(const ConfigCommand &command, const QList<Confi
         return;
     auto witness = std::make_shared<ConfigApplyWitness>();
     ConfigApplyCapture capture;
+    const auto previous = m_applyCaptures.find(command.applyAttempt->ownerId);
+    if (previous != m_applyCaptures.end() && command.applyAttempt->expected &&
+        previous->witness.lock() == command.applyAttempt->expected)
+        capture.inputs = previous->inputs; // A Retry that admitted further edits.
+    if (command.input)
+        capture.inputs.insert(command.input->sequence);
     capture.witness = witness;
     capture.edits = edits;
     capture.publicationFence = command.applyAttempt->publicationFence;
@@ -104,6 +110,79 @@ void ConfigWorker::rememberApply(const ConfigCommand &command, const QList<Confi
     witness->fences = capture.fences;
     command.applyAttempt->admitted = std::move(witness);
     m_applyCaptures[command.applyAttempt->ownerId] = std::move(capture);
+}
+void ConfigWorker::abandonApply(const ConfigCommand &command) {
+    // Explicitly abandon one failed admitted Apply, identified by its witness.
+    // Only that Apply's still-pending intents leave the store; newer intents and
+    // other writers are replayed unchanged over the confirmed disk state, and no
+    // file is written. A succeeded or already abandoned Apply has no capture.
+    auto result = resultFor(command);
+    const auto attempt = command.applyAttempt;
+    auto found = attempt ? m_applyCaptures.find(attempt->ownerId) : m_applyCaptures.end();
+    if (!attempt || !attempt->expected || found == m_applyCaptures.end() ||
+        found->witness.lock() != attempt->expected) {
+        result.status = "failed";
+        result.error = {"apply-not-pending", {}, "abandonApply"};
+        post(publish(result));
+        return;
+    }
+    const auto inputs = found->inputs;
+    auto intents = m_intents;
+    QList<ConfigPath> touched;
+    QSet<QString> sources;
+    quint64 newest = 0;
+    for (const auto input : inputs)
+        newest = qMax(newest, input);
+    for (auto it = intents.begin(); it != intents.end(); ++it) {
+        const auto removed = it->removeIf([&](const ConfigPendingIntent &intent) {
+            if (!inputs.contains(intent.input) || !intent.reservation.isEmpty())
+                return false;
+            touched.append(intent.path);
+            return true;
+        });
+        if (removed)
+            sources.insert(it.key());
+    }
+    QMap<QString, QList<ConfigSource>> replacements;
+    for (const auto &id : std::as_const(sources)) {
+        const auto route = m_routes.value(id);
+        const auto disk = m_diskLayers->source(route.layerId, id);
+        if (!disk)
+            continue;
+        auto source = *disk; // Confirmed disk state, then the remaining intents.
+        for (const auto &intent : intents.value(id))
+            applyFileEdit(source.raw, intent.edit);
+        source.exists = disk->exists || !intents.value(id).isEmpty();
+        source.localIntent = !intents.value(id).isEmpty();
+        replacements[route.layerId].append(source);
+    }
+    auto candidate = *m_layers;
+    if (!replacements.isEmpty() && !candidate.replaceAllSources(replacements).accepted) {
+        result.status = "failed";
+        result.error = {"abandon-admission", {}, "abandonApply"};
+        post(publish(result));
+        return;
+    }
+    *m_layers = std::move(candidate);
+    m_intents = std::move(intents);
+    for (const auto &id : std::as_const(sources))
+        refreshDirty(id);
+    // Effective intent changed only where no remaining (newer) intent covers it.
+    for (const auto &leaf : m_options.schema.leaves()) {
+        bool abandoned = false, retained = false;
+        for (const auto &path : std::as_const(touched))
+            abandoned |= startsWith(leaf, path) || startsWith(path, leaf);
+        for (const auto &pending : std::as_const(m_intents))
+            for (const auto &intent : pending)
+                retained |= intent.input > newest &&
+                            (startsWith(leaf, intent.path) || startsWith(intent.path, leaf));
+        if (abandoned && !retained)
+            ++m_pathIntents[leaf];
+    }
+    attempt->expected->valid = false; // Its Retry can never re-admit it.
+    m_applyCaptures.erase(found);
+    result.status = "abandoned";
+    post(publish(result));
 }
 void ConfigWorker::reconcileApplyRejection(const ConfigCommand &command) {
     if (!command.input || !command.applyAttempt)

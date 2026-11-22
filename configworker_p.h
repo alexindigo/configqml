@@ -156,6 +156,7 @@ private:
     void rememberApply(const ConfigCommand &command, const QList<ConfigPath> &paths,
                        const QMap<ConfigPath, std::optional<QVariant>> &edits);
     void reconcileApplyRejection(const ConfigCommand &command);
+    void abandonApply(const ConfigCommand &command);
     struct OwnPublication {
         ConfigSourcePreimage output, predecessor, recoveryBase;
         ConfigCommand origin;

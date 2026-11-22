@@ -33,6 +33,11 @@ public:
                        ConfigStore::Callback callback = {});
     quint64 apply(QObject *context = nullptr, ConfigStore::Callback callback = {});
     bool discard();
+    // Abandons this draft's failed admitted Apply: only that Apply's pending
+    // change leaves the store, readers observe the saved values again, staged
+    // edits stay staged and no file is written. Refused with apply-not-pending
+    // when no failed admitted Apply remains (succeeded or already abandoned).
+    quint64 abandonApply(QObject *context = nullptr, ConfigStore::Callback callback = {});
     ConfigReadProjection *readProjection();
     ConfigReadProjection *previewProjection();
 signals:
@@ -50,6 +55,7 @@ private:
     std::unique_ptr<ConfigChangePublisher> m_changes, m_previewChanges;
     bool prepareChanges(const QList<ConfigPath> &paths);
     friend class ConfigStoreHandle;
+    void rebase(const QList<ConfigPath> &selection);
     void publishPreview();
     void closePreviewScopes();
     void refresh();
