@@ -411,6 +411,8 @@ private slots:
         o.autoSave = false;
         ConfigStore store(o);
         Probe::measureCallerWork(store);
+        QSignalSpy published(&store, &ConfigStore::published);
+        QSignalSpy sourceEvents(&store, &ConfigStore::sourceAccepted);
         QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
         QSignalSpy done(&store, &ConfigStore::completed);
         QElapsedTimer timer;
@@ -458,6 +460,9 @@ private slots:
         QVERIFY(writeFile(dir.filePath("s1.json"), "{\"a\":42}"));
         QTRY_COMPARE(store.value({"s1", "a"}).toLongLong(), 42);
         QCOMPARE(store.value({"s0", "a"}).toLongLong(), 100);
+        QCOMPARE(sourceEvents.size(), 102); // Startup, every own save, then external reload.
+        qInfo("JSON_SOURCE_CUTS publications=%lld events=%lld", qlonglong(published.size()),
+              qlonglong(sourceEvents.size()));
     }
     void fileIdentityAndReadOnly() {
         QTemporaryDir dir;

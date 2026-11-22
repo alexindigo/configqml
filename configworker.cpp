@@ -550,8 +550,12 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
         m_acceptCause.clear();
         for (const auto &state : m_sourceStates)
             event.sources.append({state.sourceId, state.revision});
+        // All selected facts belong to this one immutable disk cut. Resolving
+        // the complete layer tree once per leaf makes event work quadratic in
+        // unrelated shards; valueAt preserves optional absence on this capture.
+        const auto diskEffective = m_diskLayers->effective();
         for (const auto &path : m_options.schema.leaves()) {
-            const auto value = m_diskLayers->value(path);
+            const auto value = valueAt(diskEffective, path);
             const auto info = m_diskLayers->info(path);
             QByteArray revision;
             for (const auto &contribution : info.contributions)
