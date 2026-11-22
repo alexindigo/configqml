@@ -144,3 +144,41 @@ namespace siblings.
 This target adapter is a Phase 2 increment, not the generated-handle/reply surface
 or completion of all facade routing. New handle construction will select runtime
 explicitly; the compatibility APIs have not changed.
+
+## Pending completion owner (Phase 2 increment)
+
+`ConfigPendingReply` is the native terminal envelope for the forthcoming handle
+verbs. `ConfigQmlPendingReply` exposes `finished`, `isFinished`, `isError`, `error`
+and lazy `value`. This increment supplies the types and private read-composition
+entry point, not the generated handle factories or public handle verbs yet.
+
+The private composition validates and captures the exact additional reader list
+before dispatch. It obtains the initiating cut through the existing P3 projection,
+then asks each captured reader to cover that cut. A superset reader is permitted;
+an unrelated or narrower reader refuses before capture. No new merge, read cache,
+worker stream or completion counter is introduced. Every refusal, no-op and success
+finishes queued after return. Terminal delivery is once only, after each successful
+reader's installation/notification completion, independently of public signal order.
+
+| # | Captured reply fact | Meaning |
+|---|---|---|
+| 1 | `generation`, `snapshot`, `pending` | Detached initiating coverage, selected immutable facts and newer input at its acknowledgment; not later getters |
+| 2 | `observations` | Additional readers in invocation order, each with its own snapshot, generation and pending facts; captures need not share one global cut |
+| 3 | `write` | Absent for reads; observation alone never creates a publication receipt |
+| 4 | `error.code/message/phase` | Value-free failure, including selection, acquisition and lifetime failures |
+
+If an additional read fails, the initiating successful cut is retained. Failed
+read entries carry their last-good state, not fresh success coverage. Entries not
+acknowledged before failure have status `not_observed`; the whole reply is an
+error, never partial observation success. Actual source-presentation loss fails
+pending delivery; detached results remain readable afterward. The eventual writer
+adapter must additionally retain its paired publication facts on observation
+failure; this increment does not yet compose writer completion or Retry.
+
+Native replies have explicit caller ownership. The QML wrapper owns its native
+reply without parenting itself to a store/editor. Retained replies survive source
+presentation closure; unreferenced pending or settled wrappers and their native
+payloads are engine-GC-reclaimable. Callbacks retain only guarded native pointers,
+not engine values or a store-owned reply registry. Schema handles, edit opening,
+selected writer verbs, frozen-handle reads and their full compatibility matrix
+remain subsequent Phase 2/3 work.

@@ -39,6 +39,7 @@ public:
     static void refresh(ConfigDraft *draft);
     static void stage(ConfigOverlayEditor *overlay);
     static void stage(ConfigDraft *draft);
+    static bool available(ConfigReadProjection *projection);
 
 private:
     friend class ConfigReadProjection;

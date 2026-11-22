@@ -2,6 +2,8 @@
 #include "configqmlstore.h"
 #include "compatfixture.h"
 #include "storeprobe.h"
+#include "configpendingreply_p.h"
+#include "configqmlpendingreply.h"
 #include <QCoreApplication>
 #include <QProcess>
 #include <QQmlComponent>
@@ -14,6 +16,127 @@ using namespace configqml;
 class QmlGenericPrimitivesTest : public QObject {
     Q_OBJECT
 private slots:
+    void pendingReplyImmediateConnectionAndRetention() {
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema = ConfigSchema(ConfigDescriptor::group(
+            {{"count", ConfigDescriptor::leaf(ConfigDescriptor::Type::SafeInteger, 3)}}));
+        auto store = std::make_unique<ConfigStore>(options);
+        QTRY_COMPARE(store->status(), ConfigStore::Status::Ready);
+        QQmlEngine engine;
+        auto *native = ConfigPendingReplyState::read(store->readProjection());
+        auto *reply = new ConfigQmlPendingReply(native, &engine);
+        QPointer<ConfigQmlPendingReply> lifetime(reply);
+        engine.globalObject().setProperty("reply", engine.newQObject(reply));
+        QQmlComponent binding(&engine);
+        binding.setData(R"QML(
+            import QtQml
+            QtObject {
+                required property var reply
+                readonly property var count: reply.isFinished && !reply.isError
+                    ? reply.value.snapshot.state(["count"]).value : -1
+            }
+        )QML",
+                        QUrl("file:pending-reply-binding.qml"));
+        QVERIFY2(binding.isReady(), qPrintable(binding.errorString()));
+        std::unique_ptr<QObject> bound(
+            binding.createWithInitialProperties({{"reply", QVariant::fromValue(reply)}}));
+        QVERIFY2(bound, qPrintable(binding.errorString()));
+        QCOMPARE(bound->property("count").toInt(), -1);
+        const auto connected = engine.evaluate(R"JS(
+            var count = 0;
+            var captured = null;
+            var failure = "";
+            reply.finished.connect(function() {
+                count++;
+                if (!reply.isFinished || reply.isError) failure = "reply outcome";
+                captured = reply.value;
+                if (captured.snapshot.state(["count"]).value !== 3) failure = "snapshot";
+                if (captured.pending.length !== 0 || captured.observations.length !== 0)
+                    failure = "read metadata";
+                if (captured.write !== undefined) failure = "invented write";
+            });
+        )JS");
+        QVERIFY2(!connected.isError(), qPrintable(connected.toString()));
+        QVERIFY(!reply->isFinished());
+        QTRY_COMPARE(engine.globalObject().property("count").toInt(), 1);
+        QCOMPARE(engine.globalObject().property("failure").toString(), QString());
+        QCOMPARE(bound->property("count").toInt(), 3);
+        // Reply and snapshot survive their transient source presentation.
+        store.reset();
+        QVERIFY(lifetime);
+        QCOMPARE(engine.evaluate("captured.snapshot.state(['count']).value").toInt(), 3);
+        bound.reset();
+        engine.globalObject().setProperty("reply", QJSValue(QJSValue::UndefinedValue));
+        engine.collectGarbage();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QTRY_VERIFY(!lifetime);
+        QCOMPARE(engine.evaluate("captured.snapshot.state(['count']).value").toInt(), 3);
+    }
+    void pendingReplyRefusalAndGarbageCollection() {
+        QQmlEngine engine;
+        for (int i = 0; i < 64; ++i) {
+            auto *native = ConfigPendingReplyState::refuse("unsupported-operation", "selection");
+            QPointer<ConfigPendingReply> core(native);
+            auto *reply = new ConfigQmlPendingReply(native, &engine);
+            QPointer<ConfigQmlPendingReply> wrapper(reply);
+            engine.globalObject().setProperty("reply", engine.newQObject(reply));
+            const auto connected = engine.evaluate(R"JS(
+                var failure = "";
+                reply.finished.connect(function() {
+                    if (!reply.isFinished || !reply.isError
+                        || reply.error.code !== "unsupported-operation"
+                        || reply.error.phase !== "selection") failure = "refusal";
+                });
+            )JS");
+            QVERIFY2(!connected.isError(), qPrintable(connected.toString()));
+            QVERIFY(!reply->isFinished());
+            QTRY_VERIFY(reply->isFinished());
+            QCOMPARE(engine.globalObject().property("failure").toString(), QString());
+            engine.globalObject().setProperty("reply", QJSValue(QJSValue::UndefinedValue));
+            engine.collectGarbage();
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+            QTRY_VERIFY(!wrapper);
+            QVERIFY(!core);
+        }
+    }
+    void pendingReplyEngineLoss() {
+        auto engine = std::make_unique<QQmlEngine>();
+        auto *native = ConfigPendingReplyState::refuse("unsupported-operation", "selection");
+        auto *reply = new ConfigQmlPendingReply(native, engine.get());
+        QPointer<ConfigQmlPendingReply> lifetime(reply);
+        engine->globalObject().setProperty("reply", engine->newQObject(reply));
+        engine.reset(); // Queued terminal delivery must not reach a dead engine/context.
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QTRY_VERIFY(!lifetime);
+    }
+    void pendingReplyCollectionDuringHeldRead() {
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema = ConfigSchema(ConfigDescriptor::group(
+            {{"count", ConfigDescriptor::leaf(ConfigDescriptor::Type::SafeInteger, 3)}}));
+        ConfigStore store(options);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QQmlEngine engine;
+        QList<ConfigWorkerPacket> held;
+        std::function<void()> onHeld;
+        QObject scheduler;
+        ConfigStoreTestAccess::holdReadReplies(store, &scheduler, held, onHeld);
+        auto *native = ConfigPendingReplyState::read(store.readProjection());
+        auto *reply = new ConfigQmlPendingReply(native, &engine);
+        QPointer<ConfigQmlPendingReply> lifetime(reply);
+        engine.globalObject().setProperty("reply", engine.newQObject(reply));
+        QTRY_COMPARE(held.size(), 1);
+        QVERIFY(!reply->isFinished());
+        engine.globalObject().setProperty("reply", QJSValue(QJSValue::UndefinedValue));
+        engine.collectGarbage();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QTRY_VERIFY(!lifetime);
+        ConfigStoreTestAccess::releaseReader(store, held);
+        QCoreApplication::processEvents();
+        QCOMPARE(store.value({"count"}).toInt(), 3);
+        QVERIFY(store.inputs().isEmpty());
+    }
     void readerAcknowledgment_data() {
         QTest::addColumn<QString>("scenario");
         QTest::addColumn<int>("expected");

@@ -36,7 +36,8 @@ target_sources(configqml_core PRIVATE configoverlayeditor.h configoverlayeditor.
     configoverlay_p.h configoverlaypolicy.cpp configoverlayworker.cpp)
 target_sources(configqml_core PRIVATE configselection_p.h configedit_p.h
     configcandidate_p.h configcandidate.cpp configobservation.h configobservation_p.h
-    configobservation.cpp configreadprojection.h configreadprojection_p.h configreadprojection.cpp)
+    configobservation.cpp configreadprojection.h configreadprojection_p.h configreadprojection.cpp
+    configpendingreply.h configpendingreply_p.h configpendingreply.cpp)
 add_library(configqml::core ALIAS configqml_core)
 set_target_properties(configqml_core PROPERTIES EXPORT_NAME core
     VERSION ${PROJECT_VERSION} SOVERSION ${_configqml_soversion} INSTALL_RPATH "$ORIGIN")
@@ -70,7 +71,8 @@ if(CONFIGQML_BUILD_QML)
     target_sources(configqml PRIVATE configqmlmodel.h configqmlmigration.cpp configqmlhandles.cpp
         configqmlcompat.cpp configqmlgroups.cpp configqmloverlay.h configqmloverlay.cpp
         configqmlevent_p.h configqmlevent.cpp)
-    target_sources(configqml PRIVATE configqmlreadprojection.h configqmlreadprojection.cpp)
+    target_sources(configqml PRIVATE configqmlreadprojection.h configqmlreadprojection.cpp
+        configqmlpendingreply.h configqmlpendingreply.cpp)
     add_library(configqml::configqml ALIAS configqml)
     target_link_libraries(configqml PUBLIC configqml::core Qt6::Qml PRIVATE Qt6::CorePrivate)
     target_include_directories(configqml PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -102,7 +104,7 @@ if(CONFIGQML_BUILD_QML)
         "${CMAKE_CURRENT_BINARY_DIR}/ConfigQml/configqml.qmltypes"
         DESTINATION "${_configqml_module_dir}")
     install(FILES configqmldeclaration.h configqmlstore.h configqmlvalue.h configqmlmodel.h configfacade.h
-        configqmlreadprojection.h
+        configqmlreadprojection.h configqmlpendingreply.h
         DESTINATION "${_configqml_include_dir}")
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/configqml-qt-build.txt"
         DESTINATION "${_configqml_data_dir}")
@@ -116,7 +118,7 @@ install(FILES configvalue.h configschema.h confignumber.h configlayers.h configs
     configenvironment.h configbackend.h configcodec.h configmemorybackend.h
     configjsoncodec.h configjsonbackend.h configresult.h configstore.h configlistmodel.h
     configdraft.h configstorehandle.h configprojection.h configrecordlistpolicy.h configoverlayeditor.h
-    configobservation.h configreadprojection.h
+    configobservation.h configreadprojection.h configpendingreply.h
     DESTINATION "${_configqml_include_dir}")
 install(FILES COPYING COPYING.LESSER DESTINATION "${_configqml_license_dir}")
 install(EXPORT configqmlCoreTargets FILE configqmlCoreTargets.cmake NAMESPACE configqml::

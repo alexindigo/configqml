@@ -56,7 +56,15 @@ private:
     QPointer<QJSEngine> m_engine;
     const ConfigReadSnapshot m_snapshot;
 };
-QJSValue readEvent(QJSEngine *engine, const ConfigReadResult &result) {
+} // namespace
+QJSValue qmlReadSnapshotEvent(QJSEngine *engine, const ConfigReadSnapshot &value) {
+    if (!engine)
+        return {};
+    auto *snapshot = new ReadSnapshot(engine, value);
+    QQmlEngine::setObjectOwnership(snapshot, QQmlEngine::JavaScriptOwnership);
+    return engine->newQObject(snapshot);
+}
+QJSValue qmlReadResultEvent(QJSEngine *engine, const ConfigReadResult &result) {
     const QPointer<QJSEngine> guard(engine);
     return qmlEvent(engine, {"requestId", "status", "error", "observation", "snapshot", "pending"},
                     [guard, result](const QString &key) -> QVariant {
@@ -68,12 +76,9 @@ QJSValue readEvent(QJSEngine *engine, const ConfigReadResult &result) {
                             return QVariant::fromValue(qmlErrorEvent(guard, result.error()));
                         if (key == "observation")
                             return QVariant::fromValue(result.observation());
-                        if (key == "snapshot" && guard) {
-                            auto *snapshot = new ReadSnapshot(guard, result.snapshot());
-                            QQmlEngine::setObjectOwnership(snapshot,
-                                                           QQmlEngine::JavaScriptOwnership);
-                            return QVariant::fromValue(guard->newQObject(snapshot));
-                        }
+                        if (key == "snapshot")
+                            return QVariant::fromValue(
+                                qmlReadSnapshotEvent(guard, result.snapshot()));
                         if (key == "pending") {
                             QVariantList pending;
                             for (const auto &path : result.pending())
@@ -83,7 +88,6 @@ QJSValue readEvent(QJSEngine *engine, const ConfigReadResult &result) {
                         return {};
                     });
 }
-} // namespace
 ConfigQmlReadProjection::ConfigQmlReadProjection(ConfigReadProjection *projection,
                                                  QJSEngine *engine, QObject *parent)
     : QObject(parent) {
@@ -104,7 +108,7 @@ void ConfigQmlReadProjection::bind(ConfigReadProjection *projection, QJSEngine *
             &ConfigQmlReadProjection::stateChanged);
     connect(projection, &ConfigReadProjection::completed, this,
             [this](const ConfigReadResult &result) {
-                const auto event = readEvent(m_engine, result);
+                const auto event = qmlReadResultEvent(m_engine, result);
                 ConfigConsumerGuard(this, m_engine).invoke([&] { emit completed(event); });
             });
 }
@@ -131,7 +135,7 @@ QString ConfigQmlReadProjection::synchronize(const QVariant &after, const QJSVal
         m_projection->synchronize(token, this, [guard, callback](const ConfigReadResult &result) {
             if (!guard || !guard->m_engine || !callback.isCallable())
                 return;
-            const auto event = readEvent(guard->m_engine, result);
+            const auto event = qmlReadResultEvent(guard->m_engine, result);
             ConfigConsumerGuard(guard, guard->m_engine).invoke([&] {
                 const auto returned = callback.call({event});
                 if (returned.isError())

@@ -14,6 +14,8 @@ QJSValue qmlResultEvent(QJSEngine *engine, const ConfigResult &result,
                         const ConfigDiagnosticBuilder &diagnostics,
                         const ConfigObservation &observation);
 QJSValue qmlErrorEvent(QJSEngine *engine, const ConfigError &error);
+QJSValue qmlReadSnapshotEvent(QJSEngine *engine, const ConfigReadSnapshot &snapshot);
+QJSValue qmlReadResultEvent(QJSEngine *engine, const ConfigReadResult &result);
 QJSValue qmlAcceptedEvent(QJSEngine *engine, const ConfigSourceAccepted &event,
                           const ConfigSchema &schema);
 QJSValue qmlProjectionEvent(QJSEngine *engine, const ConfigProjectionEffectsEvent &event);

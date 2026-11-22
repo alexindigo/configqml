@@ -152,6 +152,9 @@ bool ConfigReadProjectionState::live() const {
            (!handle || handle->attached()) && (!overlay || overlay->ready()) &&
            (!draft || draft->valid()) && *lifetime;
 }
+bool ConfigReadProjectionState::available(ConfigReadProjection *projection) {
+    return projection && projection->d->live();
+}
 void ConfigReadProjectionState::stage(ConfigOverlayEditor *overlay) {
     if (!overlay->m_store || overlay->m_mode != ConfigOverlayMode::Editor)
         return;

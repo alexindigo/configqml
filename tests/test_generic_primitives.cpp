@@ -3,6 +3,7 @@
 #include "configdraft.h"
 #include "configjsoncodec.h"
 #include "configreadprojection.h"
+#include "configpendingreply_p.h"
 #include "configstorehandle.h"
 #include "storeprobe.h"
 #include <QSignalSpy>
@@ -17,6 +18,243 @@ using T = D::Type;
 class GenericPrimitivesTest : public QObject {
     Q_OBJECT
 private slots:
+    void pendingRefusalIsQueued() {
+        std::unique_ptr<ConfigPendingReply> reply(
+            ConfigPendingReplyState::refuse("unsupported-operation", "selection"));
+        QSignalSpy finished(reply.get(), &ConfigPendingReply::finished);
+        QVERIFY(!reply->isFinished());
+        QVERIFY(finished.isEmpty());
+        QTRY_COMPARE(finished.size(), 1);
+        QVERIFY(reply->isFinished());
+        QVERIFY(reply->isError());
+        const auto error = reply->error();
+        QCOMPARE(error.code(), QString("unsupported-operation"));
+        QCOMPARE(error.phase(), QString("selection"));
+        QCOMPARE(error.message(), QString("configqml: unsupported-operation"));
+        reply.reset();
+        QCOMPARE(error.code(), QString("unsupported-operation"));
+    }
+    void pendingReadComposesExactViews_data() {
+        QTest::addColumn<bool>("newerInput");
+        QTest::newRow("unchanged") << false;
+        QTest::newRow("newer-input") << true;
+    }
+    void pendingReadComposesExactViews() {
+        QFETCH(bool, newerInput);
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema =
+            ConfigSchema(D::group({{"a", D::group({{"count", D::leaf(T::SafeInteger, 3)}})},
+                                   {"b", D::group({{"count", D::leaf(T::SafeInteger, 9)}})}}));
+        options.layers = {{"user",
+                           ConfigLayerKind::File,
+                           ConfigAdmissionPolicy::FieldFallback,
+                           {{"user", {}, {}}},
+                           true}};
+        ConfigStore store(options);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *origin = store.scope({"a"}, false)->readProjection();
+        auto *first = store.readProjection();
+        auto *second = store.scope({"a"}, false)->readProjection();
+        QList<ConfigWorkerPacket> held;
+        std::function<void()> onHeld;
+        QObject scheduler;
+        ConfigStoreTestAccess::holdReadReplies(store, &scheduler, held, onHeld);
+        const auto inputs = store.inputs().size();
+        std::unique_ptr<ConfigPendingReply> reply(
+            ConfigPendingReplyState::read(origin, {}, {first, second}));
+        QSignalSpy finished(reply.get(), &ConfigPendingReply::finished);
+        QVERIFY(!reply->isFinished());
+        QTRY_COMPARE(held.size(), 1);
+        QVERIFY(finished.isEmpty());
+        ConfigStoreTestAccess::releaseReader(store, held); // Only the initiating cut.
+        QTRY_COMPARE(held.size(), 2);
+        QVERIFY(finished.isEmpty()); // Neither requested exact view has installed its capture.
+        QCOMPARE(store.inputs().size(), inputs);
+        if (newerInput)
+            QVERIFY(store.setUser({"a", "count"}, 7).accepted);
+        // Release the second requested view first: the reply still needs the first.
+        const auto firstCapture = held.takeFirst();
+        ConfigStoreTestAccess::releaseReader(store, held);
+        QCoreApplication::processEvents();
+        QVERIFY(!reply->isFinished());
+        ConfigStoreTestAccess::inject(store, firstCapture);
+        QVERIFY(!reply->isFinished()); // Terminal delivery is queued, including a no-op.
+        QTRY_COMPARE(finished.size(), 1);
+        QVERIFY(!reply->isError());
+        const auto captured = reply->value();
+        QVERIFY(captured.generation().valid());
+        QCOMPARE(captured.snapshot().selectedState({"count"}).value().toInt(), 3);
+        const auto views = captured.observations();
+        QCOMPARE(views.size(), 2);
+        QCOMPARE(views[0].status(), QString("observed"));
+        QCOMPARE(views[1].status(), QString("observed"));
+        QCOMPARE(views[0].snapshot().selectedState({"b", "count"}).value().toInt(), 9);
+        QVERIFY(!views[1].snapshot().selectedState({"b", "count"}).valid());
+        QCOMPARE(views[1].snapshot().selectedState({"count"}).value().toInt(), 3);
+        const bool rootCoversNewer =
+            views[0].snapshot().selectedState({"a", "count"}).value().toInt() == 7;
+        const QList<ConfigPath> expectedPending = newerInput && !rootCoversNewer
+                                                      ? QList<ConfigPath>{{"a", "count"}}
+                                                      : QList<ConfigPath>{};
+        QCOMPARE(views[0].pending(), expectedPending);
+        QCOMPARE(views[1].pending(),
+                 newerInput ? QList<ConfigPath>{{"count"}} : QList<ConfigPath>{});
+        QVERIFY(!captured.write()); // Observation is not a fabricated publication receipt.
+        QProcess consumer;
+        consumer.start(
+            QCoreApplication::applicationFilePath(),
+            {"--inert-daemon",
+             QString::number(captured.snapshot().selectedState({"count"}).value().toInt())});
+        QVERIFY(consumer.waitForFinished(10000));
+        QCOMPARE(consumer.exitCode(), 0);
+        QCOMPARE(consumer.readAllStandardOutput().trimmed(), QByteArray("DAEMON_ARGV 3"));
+        // Late duplicate captures cannot finish again or mutate detached results.
+        ConfigStoreTestAccess::inject(store, firstCapture);
+        QCoreApplication::processEvents();
+        QCOMPARE(finished.size(), 1);
+        reply.reset();
+        QCOMPARE(captured.snapshot().selectedState({"count"}).value().toInt(), 3);
+    }
+    void pendingViewSelectionRefusesBeforeCapture() {
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema =
+            ConfigSchema(D::group({{"a", D::group({{"count", D::leaf(T::SafeInteger, 3)}})},
+                                   {"b", D::group({{"count", D::leaf(T::SafeInteger, 9)}})}}));
+        ConfigStore store(options), unrelated(options);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(unrelated.status(), ConfigStore::Status::Ready);
+        auto *root = store.readProjection();
+        auto *narrow = store.scope({"a"}, false)->readProjection();
+        QSignalSpy reads(root, &ConfigReadProjection::completed);
+        for (auto *view : {narrow, unrelated.readProjection()}) {
+            std::unique_ptr<ConfigPendingReply> reply(
+                ConfigPendingReplyState::read(root, {}, {view}));
+            QVERIFY(!reply->isFinished());
+            QTRY_VERIFY(reply->isFinished());
+            QVERIFY(reply->isError());
+            QCOMPARE(reply->error().code(), QString("read-observation"));
+            QCOMPARE(reply->error().phase(), QString("selection"));
+            QCOMPARE(reply->value().observations().size(), 1);
+            QCOMPARE(reply->value().observations()[0].status(), QString("not_observed"));
+        }
+        QVERIFY(reads.isEmpty());
+        QVERIFY(store.inputs().isEmpty());
+    }
+    void pendingReaderFailureRetainsInitiatingCapture() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const auto file = directory.filePath("pending.json");
+        const QByteArray bytes("{\"a\":{\"count\":3}}");
+        compat::put(file, bytes);
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema =
+            ConfigSchema(D::group({{"a", D::group({{"count", D::leaf(T::SafeInteger, 1)}})}}));
+        options.layers = {{"user",
+                           ConfigLayerKind::File,
+                           ConfigAdmissionPolicy::FieldFallback,
+                           {{"user", {}, {}}},
+                           true}};
+        options.jsonFiles = {{"user", "user", file}};
+        ConfigStore store(options);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *origin = store.scope({"a"}, false)->readProjection();
+        auto *reader = store.readProjection();
+        QList<ConfigWorkerPacket> held;
+        std::function<void()> onHeld;
+        QObject scheduler;
+        ConfigStoreTestAccess::holdReadReplies(store, &scheduler, held, onHeld);
+        std::unique_ptr<ConfigPendingReply> reply(
+            ConfigPendingReplyState::read(origin, {}, {reader}));
+        QTRY_COMPARE(held.size(), 1);
+        const auto lastGood = reader->observation();
+        compat::put(file, "{");
+        ConfigStoreTestAccess::releaseReader(store, held);
+        QTRY_COMPARE(held.size(), 1);
+        QVERIFY(!reply->isFinished());
+        ConfigStoreTestAccess::releaseReader(store, held);
+        QTRY_VERIFY(reply->isFinished());
+        QVERIFY(reply->isError());
+        QCOMPARE(reply->error().phase(), QString("observation"));
+        QCOMPARE(reply->error().code(), QString("read-acquisition"));
+        const auto captured = reply->value();
+        QVERIFY(captured.generation().valid());
+        QCOMPARE(captured.snapshot().selectedState({"count"}).value().toInt(), 3);
+        QVERIFY(!captured.write());
+        QCOMPARE(reader->observation(), lastGood);
+        QCOMPARE(captured.observations()[0].status(), QString("failed"));
+        compat::put(file, bytes);
+        std::unique_ptr<ConfigPendingReply> recovery(
+            ConfigPendingReplyState::read(reader, captured.generation()));
+        QTRY_COMPARE(held.size(), 1);
+        ConfigStoreTestAccess::releaseReader(store, held);
+        QTRY_VERIFY(recovery->isFinished());
+        QVERIFY(!recovery->isError());
+        QCOMPARE(recovery->value().snapshot().selectedState({"a", "count"}).value().toInt(), 3);
+        QVERIFY(store.inputs().isEmpty());
+        QCOMPARE(compat::bytes(file), bytes);
+    }
+    void pendingReplySurvivesPresentationLoss() {
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema =
+            ConfigSchema(D::group({{"a", D::group({{"count", D::leaf(T::SafeInteger, 3)}})}}));
+        ConfigStore store(options);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *scope = store.scope({"a"}, false);
+        QList<ConfigWorkerPacket> held;
+        std::function<void()> onHeld;
+        QObject scheduler;
+        ConfigStoreTestAccess::holdReadReplies(store, &scheduler, held, onHeld);
+        std::unique_ptr<ConfigPendingReply> reply(
+            ConfigPendingReplyState::read(scope->readProjection()));
+        QTRY_COMPARE(held.size(), 1);
+        delete scope;
+        QVERIFY(!reply->isFinished());
+        QTRY_VERIFY(reply->isFinished());
+        QVERIFY(reply->isError());
+        QCOMPARE(reply->error().phase(), QString("lifetime"));
+        ConfigStoreTestAccess::releaseReader(store, held);
+        // Consumer deletion during the one terminal signal has no continuation.
+        auto *destroyed = ConfigPendingReplyState::refuse("unsupported-operation", "selection");
+        QPointer<ConfigPendingReply> guard(destroyed);
+        connect(destroyed, &ConfigPendingReply::finished, this, [destroyed] { delete destroyed; });
+        QTRY_VERIFY(!guard);
+    }
+    void pendingReadNotificationFence() {
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema = ConfigSchema(D::group({{"count", D::leaf(T::SafeInteger, 4)}}));
+        options.layers = {{"user",
+                           ConfigLayerKind::File,
+                           ConfigAdmissionPolicy::FieldFallback,
+                           {{"user", {}, {}}},
+                           true}};
+        ConfigStore store(options);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        bool started = false, inside = false, early = false;
+        std::unique_ptr<ConfigPendingReply> reply;
+        connect(&store, &ConfigStore::valuesChanged, this, [&] {
+            if (started)
+                return;
+            started = inside = true;
+            reply.reset(ConfigPendingReplyState::read(store.readProjection()));
+            connect(reply.get(), &ConfigPendingReply::finished, this, [&] { early |= inside; });
+            QEventLoop nested;
+            ConfigStoreTestAccess::run(
+                store, [](ConfigWorker &) {}, &nested, [&] { nested.quit(); });
+            nested.exec();
+            early |= reply->isFinished();
+            inside = false;
+        });
+        QVERIFY(store.setUser({"count"}, 3).accepted);
+        QTRY_VERIFY(reply && reply->isFinished());
+        QVERIFY(!early);
+        QVERIFY(!reply->isError());
+        QCOMPARE(reply->value().snapshot().selectedState({"count"}).value().toInt(), 3);
+    }
     void explicitCandidateTargets_data() {
         QTest::addColumn<bool>("runtime");
         QTest::newRow("user") << false;
