@@ -31,7 +31,7 @@ jobs:
       # CTest owns the shared default / GNU dirs / relative QML / absolute QML /
       # absolute GNU dirs matrix, including both installed functional examples.
       - name: Test including install-layout matrix
-        run: ctest --test-dir build --output-on-failure --no-tests=error
+        run: bash .github/run-tests.sh build
       - name: Core-only installed consumer
         run: |
           cmake -S . -B build-core -G Ninja -DCMAKE_BUILD_TYPE=Release -DCONFIGQML_BUILD_QML=OFF -DCMAKE_INSTALL_PREFIX="$PWD/core-prefix"
@@ -69,4 +69,4 @@ jobs:
       - name: Build
         run: cmake --build build-san --parallel 4
       - name: Test including install-layout matrix and installed consumers
-        run: ctest --test-dir build-san --output-on-failure --no-tests=error
+        run: bash .github/run-tests.sh build-san
