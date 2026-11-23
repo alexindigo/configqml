@@ -1,17 +1,61 @@
 #!/usr/bin/env python3
 """Matched old-public-workflow distributions plus candidate-only P1/P2/P3 gates.
 
-No baseline acknowledgment is invented. Ratios are reported, not compared to an
-arbitrary new threshold. The success marker requires the existing caller/model
-budgets and structural assertions, not merely successful benchmark startup.
+No baseline acknowledgment is invented. The success marker requires the
+existing caller/model budgets and structural assertions, plus the measured
+small-selection regression guard.
 """
 import argparse
 import json
 import os
 from pathlib import Path
+from statistics import median
 
 from harness import digest, guest_environment, require_marker, run, write_json
 from performance_spans import distribution
+
+SMALL_SAVE_PAIRS = 20
+# 0.5.4 control: mixed 1.058x (95% interval 1.005-1.083), isolated 1.066x
+# (1.014-1.101). Allow about five percentage points over the upper envelope.
+SMALL_SAVE_LIMIT = 1.15
+SMALL_SAVE_SPANS = {
+    "mixed": "set_completion_including_consumers_ns",
+    "isolated": "isolated_set_completion_including_consumers_ns",
+}
+
+
+def paired_save_summary(pairs):
+    if len(pairs) != SMALL_SAVE_PAIRS or any(old <= 0 or new <= 0 for old, new in pairs):
+        raise RuntimeError("missing or invalid paired save samples")
+    ratios = [new / old for old, new in pairs]
+    ratio = median(ratios)
+    return {"ratios": ratios, "median_ratio": ratio, "limit": SMALL_SAVE_LIMIT,
+            "passed": ratio <= SMALL_SAVE_LIMIT}
+
+
+def paired_small_saves(output, executables, env):
+    pairs = []
+    for repeat in range(SMALL_SAVE_PAIRS):
+        sides = ("baseline", "candidate") if repeat % 2 == 0 else ("candidate", "baseline")
+        pair = {}
+        for side in sides:
+            text = run(output, f"small-save-{repeat + 1:02d}-{side}",
+                       [executables[side], "workflows:sources-16"], env=env)
+            row, = spans(text, "LEGACY_PERFORMANCE_SPAN")
+            if ((row["leaves"], row["sources"], row["readers"]) != (128, 16, 1)
+                    or row["reader_value_notifications"] != [1] * 9):
+                raise RuntimeError("paired save workload or reader fan-out changed")
+            pair[side] = {label: list(map(int, row[span])) for label, span in SMALL_SAVE_SPANS.items()}
+            if any(len(v) != 9 or min(v) <= 0 for v in pair[side].values()):
+                raise RuntimeError("incomplete paired save distribution")
+        pairs.append(pair)
+    summary = {
+        label: paired_save_summary([(median(pair["baseline"][label]), median(pair["candidate"][label]))
+                                    for pair in pairs])
+        for label in SMALL_SAVE_SPANS
+    }
+    write_json(output / "paired-small-saves.json", {"pairs_ns": pairs, "summary": summary})
+    return summary
 
 
 def cache(build):
@@ -131,6 +175,7 @@ def main():
             results.append({"run": name, "side": side, "rows": rows,
                             "executable_sha256": digest(executables[side])})
             write_json(output / "runs.json", results)
+    paired = paired_small_saves(output, executables, env)
     text = run(output, "candidate-structural", [builds["candidate"] / "test_generic_performance"], env=env)
     generic = spans(text, "GENERIC_PERFORMANCE_SPAN")
     if {row["leaves"] for row in generic} != {1, 32, 128, 512} or len(generic) != 4:
@@ -148,9 +193,13 @@ def main():
         raise RuntimeError("release-qualification blocked-time gate was not measured")
     summaries = []
     lines = ["# Matched public-workflow performance", "",
-        "Same compiler, flags, VM and fixture, four alternating pairs. No new ratio threshold.",
+        "Same compiler, flags, VM and fixture, four alternating pairs across all shapes.",
         "Reset/completion spans include worker delivery and fixture consumers, not only library CPU.",
         "Combined completion includes queued Discard capture; isolated completion follows its drained write.",
+        f"128/16/1 save guard ({SMALL_SAVE_PAIRS} additional alternating pairs, median of paired run medians, "
+        f"limit {SMALL_SAVE_LIMIT:.2f}x): " + ", ".join(
+            f'{label} {result["median_ratio"]:.3f}x ({"pass" if result["passed"] else "fail"})'
+            for label, result in paired.items()) + ".",
         "New handle/observation spans have no v0.5.3 equivalent; their structural assertions and",
         "existing caller/model budgets are separate candidate-only gates.", "",
         "| # | Leaves | Sources | Readers | Span | Baseline median/p95 ms | Candidate median/p95 ms | Median ratio |",
@@ -171,6 +220,7 @@ def main():
             lines.append(f'| {len(summaries)} | {dimensions[0]} | {dimensions[1]} | {dimensions[2]} | '
                          f'{span} | {ms(baseline)} | {ms(candidate)} | {ratio:.3f} |')
     write_json(output / "summary.json", {"comparisons": summaries,
+        "paired_small_save_guard": paired,
         "candidate_existing_budgets_passed": True, "candidate_structural_scaling_passed": True,
         "boundary": "measured-workflows-not-a-domain-activation-promise"})
     (output / "report.md").write_text("\n".join(lines) + "\n")
@@ -180,6 +230,8 @@ def main():
             raise RuntimeError("source inputs changed during comparison")
         if digest(builds[side] / "libconfigqml_core.so.0.5") != metadata["libraries"][side]["sha256"]:
             raise RuntimeError("library changed during comparison")
+    if not all(result["passed"] for result in paired.values()):
+        raise RuntimeError(f"128/16 paired save regression exceeded {SMALL_SAVE_LIMIT:.2f}x; see report.md")
     print("GENERIC_PERFORMANCE_OK")
 
 
