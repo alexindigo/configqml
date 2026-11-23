@@ -2,6 +2,7 @@
 // Count the actual old per-leaf rebuilding boundary, not a timing proxy.
 #include "configlayers.h"
 #include "configselection_p.h"
+#include "configcandidate_p.h"
 #include <QTest>
 #include <dlfcn.h>
 #include <limits>
@@ -9,8 +10,17 @@
 namespace {
 thread_local quint64 individualWrites = 0;
 thread_local quint64 prefixScans = 0;
+thread_local quint64 provenanceQueries = 0;
 } // namespace
 namespace configqml {
+ConfigInfo ConfigLayers::info(const ConfigPath &path) const {
+    using F = ConfigInfo (*)(const ConfigLayers *, const ConfigPath &);
+    static auto real = reinterpret_cast<F>(dlsym(RTLD_NEXT, CONFIGQML_INFO_SYMBOL));
+    if (!real)
+        qFatal("missing actual info boundary");
+    ++provenanceQueries;
+    return real(this, path);
+}
 bool startsWith(const ConfigPath &path, const ConfigPath &prefix) {
     using F = bool (*)(const ConfigPath &, const ConfigPath &);
     static auto real = reinterpret_cast<F>(dlsym(RTLD_NEXT, CONFIGQML_STARTS_WITH_SYMBOL));
@@ -32,6 +42,46 @@ using namespace configqml;
 class LayerStructureTest : public QObject {
     Q_OBJECT
 private slots:
+    void candidateCapturesSelectedFacts_data() { oneNamespaceAssembly_data(); }
+    void candidateCapturesSelectedFacts() {
+        QFETCH(int, leaves);
+        using D = ConfigDescriptor;
+        QMap<QString, D> fields;
+        QVariantMap raw;
+        for (int i = 0; i < leaves; ++i) {
+            const auto key = "field" + QString::number(i);
+            fields[key] = D::leaf(D::Type::SafeInteger, 1);
+            raw[key] = 4;
+        }
+        ConfigSchema schema(D::group({{"group", D::group(fields)}}));
+        ConfigLayers layers(schema, {{"user",
+                                      ConfigLayerKind::File,
+                                      ConfigAdmissionPolicy::FieldFallback,
+                                      {{"user", {"group"}, raw}},
+                                      true},
+                                     {"runtime",
+                                      ConfigLayerKind::Runtime,
+                                      ConfigAdmissionPolicy::FieldFallback,
+                                      {{"runtime", {"group"}, {{"field0", 8}}}},
+                                      false}});
+        const auto selection =
+            ConfigSelection::capture(schema, schema.leaves(), schema.leaves(),
+                                     ConfigSelection::Target::UserLayer, "selection");
+        provenanceQueries = 0;
+        const auto candidate =
+            resolveCandidate(layers, ConfigEditBatch::capture(selection, {}), {}, {});
+        const auto queries = provenanceQueries;
+        QVERIFY(candidate.valid());
+        QCOMPARE(candidate.facts.size(), leaves);
+        for (const auto &path : schema.leaves()) {
+            QCOMPARE(candidate.facts.value(path).effective, layers.value(path).value());
+            QCOMPARE(candidate.facts.value(path).maskedBy, layers.info(path).maskedBy);
+            QVERIFY(candidate.facts.value(path).targetPresent);
+        }
+        qInfo() << "CANDIDATE_SELECTED_STRUCTURE leaves=" << leaves
+                << "provenance_queries=" << queries;
+        QCOMPARE(queries, quint64(0));
+    }
     void selectionUsesAncestorIndex_data() { oneNamespaceAssembly_data(); }
     void selectionUsesAncestorIndex() {
         QFETCH(int, leaves);
@@ -146,6 +196,17 @@ private slots:
         // unpacking atomic maps/records/lists, or exposing unknown raw siblings.
         QCOMPARE(layers.effective(), expected);
         const auto actual = layers.effective();
+        const auto selection =
+            ConfigSelection::capture(schema, schema.leaves(), schema.leaves(),
+                                     ConfigSelection::Target::UserLayer, "selection");
+        const auto candidate =
+            resolveCandidate(layers, ConfigEditBatch::capture(selection, {}), {}, {});
+        QVERIFY(candidate.valid());
+        for (const auto &path : schema.leaves()) {
+            QCOMPARE(candidate.facts.value(path).effective,
+                     valueAt(actual, path).value_or(QVariant()));
+            QCOMPARE(candidate.facts.value(path).maskedBy, layers.info(path).maskedBy);
+        }
         QVERIFY(!valueAt(actual, {"outer", "absent"}));
         QVERIFY(isNull(*valueAt(actual, {"outer", "null"})));
         QCOMPARE(valueAt(actual, {"outer", "record"})->toMap(), QVariantMap{});

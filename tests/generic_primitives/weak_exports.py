@@ -38,6 +38,11 @@ ALLOWLIST = {
         "Qt metatype registration template; a using client emits its own weak copy",
     "_ZN9QtPrivate30QExplicitlySharedDataPointerV2I8QMapDataISt3mapI5QListI7QStringE8QVariantSt4lessIS5_ESaISt4pairIKS5_S6_EEEEE6detachEv":
         "Qt QMap detach template; a using client emits its own weak copy",
+    # Orchestrator answer to question-weak-pair-18.md, 2026-11-22.
+    "_ZNSt4pairIK5QListI7QStringESt8optionalI8QVariantEED1Ev":
+        "STL pair complete destructor template; an independent using TU emits its own weak copy",
+    "_ZNSt4pairIK5QListI7QStringESt8optionalI8QVariantEED2Ev":
+        "STL pair base destructor template; an independent using TU emits its own weak copy",
 }
 
 

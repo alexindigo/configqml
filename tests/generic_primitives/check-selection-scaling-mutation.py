@@ -17,7 +17,7 @@ env["QT_FORCE_STDERR_LOGGING"] = "1"
 names = run(output, "symbols", ["nm", "-D", "--defined-only", "--format=posix",
     build / "libconfigqml_core.so.0.5"], env=env)
 symbols = {}
-for stem in ("putValue", "startsWith"):
+for stem in ("putValue", "startsWith", "ConfigLayers4info"):
     found = [line.split()[0] for line in names.splitlines() if stem in line.split()[0]]
     if len(found) != 1:
         raise RuntimeError("nonunique structural boundary: " + stem)
@@ -27,6 +27,7 @@ run(output, "configure", ["cmake", "-S", source / "tests/generic_primitives/perf
     "-B", fixture, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DCONFIGQML_MEASURE_HANDLES=ON",
     "-DCONFIGQML_PUT_VALUE_SYMBOL=" + symbols["putValue"],
     "-DCONFIGQML_STARTS_WITH_SYMBOL=" + symbols["startsWith"],
+    "-DCONFIGQML_INFO_SYMBOL=" + symbols["ConfigLayers4info"],
     "-DCONFIGQML_SOURCE=" + str(source), "-DCONFIGQML_BUILD=" + str(build)], env=env)
 run(output, "fixture-build", ["cmake", "--build", fixture, "--parallel", "2",
     "--target", "layer-structure"], env=env)

@@ -67,8 +67,13 @@ def main():
         names = run(output, side + "-symbols", ["nm", "-D", "--defined-only", "--format=posix", library], env=env)
         symbols = []
         prefix_symbols = []
+        info_symbols = []
         for line in names.splitlines():
             name = line.split()[0]
+            if "ConfigLayers" in name and "info" in name:
+                text = run(output, side + "-info-name", ["c++filt", name], env=env)
+                if text.startswith("configqml::ConfigLayers::info("):
+                    info_symbols.append(name)
             if "startsWith" in name:
                 text = run(output, side + "-prefix-name", ["c++filt", name], env=env)
                 if text.startswith("configqml::startsWith("):
@@ -77,7 +82,7 @@ def main():
                 text = run(output, side + "-put-value-name", ["c++filt", name], env=env)
                 if text.startswith("configqml::putValue("):
                     symbols.append(name)
-        if len(symbols) != 1 or len(prefix_symbols) != 1:
+        if len(symbols) != 1 or len(prefix_symbols) != 1 or len(info_symbols) != 1:
             raise RuntimeError("actual per-leaf putValue boundary is not unique")
         metadata["libraries"][side]["put_value_symbol"] = symbols[0]
         build = output / (side + "-fixture")
@@ -89,6 +94,7 @@ def main():
             "-DCONFIGQML_MEASURE_HANDLES=" + ("ON" if side == "candidate" else "OFF"),
              "-DCONFIGQML_PUT_VALUE_SYMBOL=" + symbols[0],
              "-DCONFIGQML_STARTS_WITH_SYMBOL=" + prefix_symbols[0],
+             "-DCONFIGQML_INFO_SYMBOL=" + info_symbols[0],
             "-DCONFIGQML_SOURCE=" + str(sources[side]),
             "-DCONFIGQML_BUILD=" + str(builds[side])], env=env)
         run(output, side + "-build", ["cmake", "--build", build, "--parallel", "2"], env=env)
@@ -98,7 +104,7 @@ def main():
             raise RuntimeError("performance fixture escaped its matched library")
     write_json(output / "inputs.json", metadata)
     structural = run(output, "candidate-effective-structure", [output / "candidate-fixture/layer-structure"], env=env)
-    require_marker(structural, "15 passed, 0 failed, 0 skipped")
+    require_marker(structural, "19 passed, 0 failed, 0 skipped")
     results = []
     span_names = ("reset_dispatch_ns", "reset_e2e_ns", "set_ingress_ns",
                   "set_completion_including_consumers_ns",

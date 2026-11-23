@@ -20,6 +20,120 @@ using T = D::Type;
 class GenericPrimitivesTest : public QObject {
     Q_OBJECT
 private slots:
+    void selectedCandidateFactsMatchLayerOracle() {
+        auto absent = D::leaf(T::String, QVariant());
+        absent.optional = true;
+        absent.defaultValue.reset();
+        auto nullable = D::leaf(T::String, QVariant::fromValue(nullptr));
+        nullable.nullable = true;
+        const QString opaque = QString("key") + QChar(0x1e) + QChar(0x1f) + "/.__proto__";
+        const ConfigSchema schema(
+            D::group({{"a", D::group({{"count", D::leaf(T::SafeInteger, 1)},
+                                      {"absent", absent},
+                                      {"null", nullable},
+                                      {opaque, D::leaf(T::Boolean, false)}})},
+                      {"b", D::group({{"count", D::leaf(T::SafeInteger, 2)}})}}));
+        int comparisons = 0, cases = 0;
+        for (auto policy :
+             {ConfigAdmissionPolicy::FieldFallback, ConfigAdmissionPolicy::RetainLastGood,
+              ConfigAdmissionPolicy::RejectInput})
+            for (int flags = 0; flags < 64; ++flags) {
+                ConfigSource user{
+                    "user",
+                    {"a"},
+                    flags & 1 ? QVariantMap{}
+                              : QVariantMap{{"count", 4}, {opaque, true}, {"unknown", "kept"}}};
+                user.exists = !(flags & 2);
+                user.available = !(flags & 4);
+                ConfigSource legacy{"legacy", {"a"}, {{"count", 7}}};
+                legacy.fallbackFor = "user";
+                ConfigSource runtime{
+                    "runtime",
+                    {},
+                    flags & 8
+                        ? QVariantMap{}
+                        : QVariantMap{{"a", QVariantMap{{"count", 9}, {"absent", "present"}}}}};
+                const QList<ConfigLayer> layers{{"legacy",
+                                                 ConfigLayerKind::File,
+                                                 ConfigAdmissionPolicy::FieldFallback,
+                                                 {legacy}},
+                                                {"user",
+                                                 ConfigLayerKind::File,
+                                                 policy,
+                                                 {user, {"other", {"b"}, {{"count", "invalid"}}}},
+                                                 !(flags & 16)},
+                                                {"environment",
+                                                 ConfigLayerKind::Environment,
+                                                 ConfigAdmissionPolicy::FieldFallback,
+                                                 {{"environment", {"b"}, {{"count", 8}}}}},
+                                                {"runtime",
+                                                 ConfigLayerKind::Runtime,
+                                                 ConfigAdmissionPolicy::FieldFallback,
+                                                 {runtime}}};
+                ConfigLayers base(schema, layers);
+                QVERIFY2(base.valid(), qPrintable(base.errors().value(0).code));
+                if (flags & 32) {
+                    auto rejected = user;
+                    rejected.raw["count"] = "invalid";
+                    base.replaceSource("user", rejected);
+                }
+                for (auto target :
+                     {ConfigSelection::Target::UserLayer, ConfigSelection::Target::RecordSlot,
+                      ConfigSelection::Target::RuntimeLayer})
+                    for (bool narrow : {false, true})
+                        for (bool edited : {false, true}) {
+                            const auto selection = ConfigSelection::capture(
+                                schema,
+                                narrow ? QList<ConfigPath>{{"a", "count"}} : QList<ConfigPath>{{}},
+                                schema.leaves(), target, "selection");
+                            const auto edits =
+                                edited ? QMap<ConfigPath, std::optional<QVariant>>{{{"a", "count"},
+                                                                                    std::nullopt}}
+                                       : QMap<ConfigPath, std::optional<QVariant>>{};
+                            const auto candidate = resolveCandidate(
+                                base, ConfigEditBatch::capture(selection, edits), {}, {});
+                            ConfigLayers oracle(base);
+                            const bool accepted =
+                                !edited || (target == ConfigSelection::Target::RuntimeLayer
+                                                ? oracle.clearRuntime({"a", "count"}).accepted
+                                                : oracle.applyEdits(edits).accepted);
+                            ++cases;
+                            QCOMPARE(candidate.valid(), accepted);
+                            if (!accepted)
+                                continue;
+                            const auto effective = oracle.effective();
+                            QCOMPARE(candidate.facts.size(), selection.leaves.size());
+                            for (const auto &path : selection.leaves) {
+                                const auto fact = candidate.facts.value(path);
+                                QCOMPARE(fact.effective,
+                                         valueAt(effective, path).value_or(QVariant()));
+                                QCOMPARE(fact.maskedBy,
+                                         target == ConfigSelection::Target::RuntimeLayer
+                                             ? QString()
+                                             : oracle.info(path).maskedBy);
+                                std::optional<ConfigSource> source;
+                                for (const auto &layer : layers)
+                                    if (target == ConfigSelection::Target::RuntimeLayer
+                                            ? layer.kind == ConfigLayerKind::Runtime
+                                            : layer.writable) {
+                                        for (const auto &entry : layer.sources)
+                                            if (startsWith(path, entry.prefix)) {
+                                                source = base.source(layer.id, entry.id);
+                                                break;
+                                            }
+                                        break;
+                                    }
+                                QCOMPARE(fact.targetPresent,
+                                         source && bool(valueAt(source->raw,
+                                                                path.mid(source->prefix.size()))));
+                                QCOMPARE(fact.edited, edits.contains(path));
+                                ++comparisons;
+                            }
+                        }
+            }
+        QCOMPARE(cases, 2304);
+        qInfo() << "SELECTED_FACT_ORACLE comparisons=" << comparisons;
+    }
     void selectionAncestorIndexPreservesValidation() {
         const QString opaque = QString("field") + QChar(0x1e) + QChar(0x1f) + "/.__proto__";
         auto record = D::leaf(T::Record, QVariantMap{{"inside", 1}});

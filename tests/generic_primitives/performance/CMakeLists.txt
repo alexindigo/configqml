@@ -12,6 +12,9 @@ target_include_directories(legacy-performance PRIVATE "${CONFIGQML_SOURCE}")
 target_link_libraries(legacy-performance PRIVATE
     "${CONFIGQML_BUILD}/libconfigqml_core.so.0.5" Qt6::Core Qt6::Test)
 if(CONFIGQML_MEASURE_HANDLES)
+    if(NOT CONFIGQML_INFO_SYMBOL)
+        message(FATAL_ERROR "The actual ConfigLayers::info boundary is required")
+    endif()
     add_executable(handle-performance handles.cpp)
     target_include_directories(handle-performance PRIVATE "${CONFIGQML_SOURCE}" "${CONFIGQML_SOURCE}/tests")
     target_link_libraries(handle-performance PRIVATE
@@ -22,5 +25,6 @@ if(CONFIGQML_MEASURE_HANDLES)
         "${CONFIGQML_BUILD}/libconfigqml_core.so.0.5" Qt6::Core Qt6::Test ${CMAKE_DL_LIBS})
     target_compile_definitions(layer-structure PRIVATE
         CONFIGQML_PUT_VALUE_SYMBOL="${CONFIGQML_PUT_VALUE_SYMBOL}"
+        CONFIGQML_INFO_SYMBOL="${CONFIGQML_INFO_SYMBOL}"
         CONFIGQML_STARTS_WITH_SYMBOL="${CONFIGQML_STARTS_WITH_SYMBOL}")
 endif()

@@ -581,18 +581,48 @@ ConfigOperation ConfigLayers::replaceAllSources(const QMap<QString, QList<Config
     return result;
 }
 
-QVariantMap ConfigLayers::effective() const {
+QMap<ConfigPath, QVariant> ConfigLayers::effectiveLeaves(const QSet<ConfigPath> *selection,
+                                                         QMap<ConfigPath, QString> *masks) const {
     if (!valid())
         return {};
+    QMap<ConfigPath, QVariant> values;
+    if (!selection)
+        values = defaultLeaves(m_schema);
+    else {
+        const auto defaults = m_schema.defaults();
+        for (const auto &path : *selection)
+            if (const auto value = valueAt(defaults, path))
+                values.insert(path, *value);
+    }
+    qsizetype writable = -1;
+    if (masks) {
+        masks->clear();
+        for (qsizetype i = 0; i < m_layers.size(); ++i)
+            if (m_layers[i].descriptor.writable)
+                writable = i;
+    }
+    // Full namespace reads and selected candidates share this one precedence
+    // owner. Masks are optional selected facts, not full provenance materialization.
+    for (qsizetype i = 0; i < m_layers.size(); ++i) {
+        const auto &layer = m_layers[i];
+        for (const auto &source : layer.sources)
+            if (participates(source))
+                for (auto it = source.admitted.cbegin(); it != source.admitted.cend(); ++it) {
+                    if (selection && !selection->contains(it.key()))
+                        continue;
+                    values.insert(it.key(), it.value().value);
+                    if (masks)
+                        masks->insert(it.key(), writable >= 0 && i > writable ? layer.descriptor.id
+                                                                              : QString());
+                }
+    }
+    return values;
+}
+QVariantMap ConfigLayers::effective() const {
     // Capture precedence by declared leaf, then construct each namespace once.
     // Repeated putValue on a shared nested map would detach/copy that namespace
     // for every leaf, making every candidate and publication quadratic in width.
-    auto values = defaultLeaves(m_schema);
-    for (const auto &layer : m_layers)
-        for (const auto &source : layer.sources)
-            if (participates(source))
-                for (auto it = source.admitted.cbegin(); it != source.admitted.cend(); ++it)
-                    values.insert(it.key(), it.value().value);
+    const auto values = effectiveLeaves();
     auto leaf = values.cbegin();
     return assembleNamespaces(leaf, values.cend(), {});
 }

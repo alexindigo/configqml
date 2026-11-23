@@ -10,12 +10,34 @@ struct ConfigLayerEditAccess {
                                    bool runtime) {
         return layers.applyTargetEdits(edits, runtime);
     }
-    static ConfigRoute route(const ConfigLayers &layers, const ConfigPath &path, bool runtime) {
+    static bool targetPresent(const ConfigLayers &layers, const ConfigPath &path, bool runtime) {
         for (const auto &layer : layers.m_layers)
             if (runtime ? layer.descriptor.kind == ConfigLayerKind::Runtime
-                        : layer.descriptor.writable)
-                return layers.route(path, layer.descriptor.id);
-        return {};
+                        : layer.descriptor.writable) {
+                for (const auto &source : layer.sources)
+                    if (startsWith(path, source.source.prefix))
+                        return bool(
+                            valueAt(source.source.raw, path.mid(source.source.prefix.size())));
+                return false;
+            }
+        return false;
+    }
+    static QMap<ConfigPath, ConfigCandidateFact> capture(const ConfigLayers &layers,
+                                                         const ConfigLayers &base,
+                                                         const QList<ConfigPath> &paths,
+                                                         bool runtime) {
+        QMap<ConfigPath, ConfigCandidateFact> facts;
+        const QSet<ConfigPath> selected(paths.cbegin(), paths.cend());
+        QMap<ConfigPath, QString> masks;
+        const auto values = layers.effectiveLeaves(&selected, &masks);
+        for (const auto &path : paths) {
+            ConfigCandidateFact fact;
+            fact.effective = values.value(path);
+            fact.maskedBy = masks.value(path);
+            fact.targetPresent = targetPresent(base, path, runtime);
+            facts.insert(path, fact);
+        }
+        return facts;
     }
 };
 bool ConfigSelection::matchesSchema(const ConfigSchema &other) const {
@@ -153,22 +175,21 @@ ConfigCandidate resolveCandidate(const ConfigLayers &base, const ConfigEditBatch
             return result;
         }
     }
-    const auto effective = candidate->effective(); // Resolve the batch once, not per selected leaf.
-    for (const auto &path : batch.selection.leaves) {
-        ConfigCandidateFact fact;
-        fact.effective = valueAt(effective, path).value_or(QVariant());
-        const auto info = candidate->info(path);
-        fact.maskedBy = runtime ? QString() : info.maskedBy;
-        const auto target = ConfigLayerEditAccess::route(base, path, runtime);
-        const auto source = base.source(target.layerId, target.sourceId);
-        fact.targetPresent = source && bool(valueAt(source->raw, path.mid(source->prefix.size())));
+    result.facts =
+        ConfigLayerEditAccess::capture(*candidate, base, batch.selection.leaves, runtime);
+    for (auto it = result.facts.begin(); it != result.facts.end(); ++it) {
+        const auto &path = it.key();
+        auto &fact = it.value();
+        const bool masked = !fact.maskedBy.isEmpty();
+        if (runtime)
+            fact.maskedBy.clear();
         const auto operation = batch.operations.constFind(path);
         if (operation != batch.operations.cend()) {
             fact.edited = true;
             fact.pending = operation->kind;
             fact.authored = operation->value;
         }
-        if (fact.effective.isValid() && info.maskedBy.isEmpty()) {
+        if (fact.effective.isValid() && !masked) {
             const auto projected = projectCandidateLeaf(path, fact.effective, policies, metadata);
             if (!projected.ok()) {
                 result.error = projected.errors.first().code;
@@ -176,7 +197,6 @@ ConfigCandidate resolveCandidate(const ConfigLayers &base, const ConfigEditBatch
             }
             fact.effective = projected.value;
         }
-        result.facts.insert(path, fact);
     }
     result.layers = std::move(candidate);
     return result;

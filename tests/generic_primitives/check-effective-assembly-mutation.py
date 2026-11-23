@@ -18,6 +18,7 @@ names = run(output, "symbols", ["nm", "-D", "--defined-only", "--format=posix",
     build / "libconfigqml_core.so.0.5"], env=env)
 symbols = [line.split()[0] for line in names.splitlines() if "putValue" in line.split()[0]]
 prefix_symbols = [line.split()[0] for line in names.splitlines() if "startsWith" in line.split()[0]]
+info_symbols = [line.split()[0] for line in names.splitlines() if "ConfigLayers4info" in line.split()[0]]
 if len(symbols) != 1 or len(prefix_symbols) != 1:
     raise RuntimeError("nonunique actual per-leaf write boundary")
 fixture = output / "fixture-build"
@@ -25,6 +26,7 @@ run(output, "configure", ["cmake", "-S", source / "tests/generic_primitives/perf
     "-B", fixture, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DCONFIGQML_MEASURE_HANDLES=ON",
     "-DCONFIGQML_PUT_VALUE_SYMBOL=" + symbols[0], "-DCONFIGQML_SOURCE=" + str(source),
     "-DCONFIGQML_STARTS_WITH_SYMBOL=" + prefix_symbols[0],
+    "-DCONFIGQML_INFO_SYMBOL=" + info_symbols[0],
     "-DCONFIGQML_BUILD=" + str(build)], env=env)
 run(output, "fixture-build", ["cmake", "--build", fixture, "--parallel", "2",
     "--target", "layer-structure"], env=env)
@@ -70,7 +72,7 @@ try:
         run(output, name + "-mutated-build", ["cmake", "--build", build, "--parallel", "2",
             "--target", "configqml_core"], env=env)
         text = run(output, name + "-mutated", [fixture / "layer-structure"], env=env, expected=4)
-        require_marker(text, "11 passed, 4 failed, 0 skipped")
+        require_marker(text, "15 passed, 4 failed, 0 skipped")
         require_marker(text, marker)
 finally:
     path.write_bytes(original)
@@ -79,7 +81,7 @@ finally:
     run(output, "restored-build", ["cmake", "--build", build, "--parallel", "2",
         "--target", "configqml_core"], env=env)
 text = run(output, "restored", [fixture / "layer-structure"], env=env)
-require_marker(text, "15 passed, 0 failed, 0 skipped")
+require_marker(text, "19 passed, 0 failed, 0 skipped")
 require_marker(text, "individual_writes= 0")
 write_json(output / "result.json", {"source_sha256": before, "restored_sha256": digest(path),
     "old_reconstruction_rejected": True, "typed_atomic_and_opaque_trees_preserved": True})

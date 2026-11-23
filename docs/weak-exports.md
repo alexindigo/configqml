@@ -29,3 +29,31 @@ first three names separately. These receipts are preserved off-guest under
 `~/TemporaryFiles/configqml/plans/generic-primitives/evidence/checkpoint-13/`.
 Unavailable consumers are not claimed as examined. The full runner repeats the
 import audit for its actual inputs before accepting a reviewed loss.
+
+## Pair destructor review, 2026-11-22
+
+Source of approval: the originating orchestrator's answer to
+`question-weak-pair-18.md`: "both approved for the reviewed list (addendum 01)".
+The exact-name guard and all four controls remain active; this is not a blanket
+weak-symbol exception or a production emission shim.
+
+| # | Exact mangled name | Demangled form | Frozen baseline origin | Reason |
+|---|---|---|---|---|
+| 1 | `_ZNSt4pairIK5QListI7QStringESt8optionalI8QVariantEED1Ev` | `std::pair<QList<QString> const, std::optional<QVariant> >::~pair()` (complete object) | `configoverlaypolicy.cpp.o`, W | Standard-library template instantiation; an independent O0/no-inline using translation unit built against installed public headers emits its own W copy. |
+| 2 | `_ZNSt4pairIK5QListI7QStringESt8optionalI8QVariantEED2Ev` | `std::pair<QList<QString> const, std::optional<QVariant> >::~pair()` (base object) | `configoverlaypolicy.cpp.o`, W | The same standard-library template; a using consumer emits its own weak copy. |
+
+Evidence: guest `artifacts/weak-pair-18/{characterization.json,origin-objects.log,
+using-client-symbols.log}` and `artifacts/unit-selected-facts-shared-18/compatibility/`.
+All 1,321 consumer paths/hashes were rechecked and their complete undefined-import
+inventories contain neither name. The independent using translation unit emits
+both definitions as W. The frozen baseline symbol inventories and strict refusal
+are retained. Off-guest custody:
+`~/TemporaryFiles/configqml/plans/generic-primitives/evidence/checkpoint-18/` and
+the subsequent continuation evidence for the origin and approved guard renewal.
+
+The same orchestrator answer permits equivalent std/Qt weak template definitions
+and copies of private, never-installed classes only after exact-name documentation
+and all four controls: baseline W, zero consumer imports, no vtable/typeinfo and
+no strong symbol. Each addition is listed in the release PR; other losses still
+require review. The runner continues to reject an unlisted weak name, strong
+substitution, any vtable/typeinfo and a consumer import of a reviewed definition.

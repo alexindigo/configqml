@@ -250,6 +250,13 @@ local edit transaction or rerunning source transforms. Selection/schema/lifetime
 checks still apply, and selected facts still pass through current record-list
 metadata projection. This does not alter the public layer `applyEdits` contract.
 
+Candidate selected facts are captured directly from that layer cut: declared
+defaults, participating admitted contributions, writable-layer masks and the
+original target's raw presence. They do not construct full per-source provenance
+or rebuild an unselected namespace to obtain a selected value. Full provenance
+remains available through `info`; record-list metadata projection still runs on
+the selected checked result. No second cache or getter evaluation is introduced.
+
 Target presence describes the selected target's raw contribution, not the winning
 layer or an inferred user route. A runtime candidate does not report its own
 runtime contribution as a higher-layer mask. Untouched target contributions and
