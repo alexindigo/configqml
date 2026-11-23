@@ -1,13 +1,13 @@
 # Generic editing and observation contracts
 
-The initial native/QML slice shares selections, explicit edits and causal read
+The native/QML interfaces share selections, explicit edits and causal read
 observations beneath the existing facades. It is not a second settings engine.
 ConfigLayers still owns layer resolution; store workers own candidates, leases,
 admission and persistence; the existing publication boundary owns notifications.
 
-## Current slice and subsequent adoption
+## Shared contracts
 
-| # | Contract | Initial routing |
+| # | Contract | Routing |
 |---|---|---|
 | 1 | P1: owned selection | Declared leaf/group/disjoint-union validation, schema identity, target and lifetime are captured once. Atomic Record/Map/List members are not new storage paths. Checked overlay addresses retain their existing mapping/identity fences. |
 | 2 | P2: explicit batch | Omitted leaf means no edit. Set and RemoveOverride remain distinct from null, absence and equal intent. Draft and raw-slot staging/admission use one candidate resolver over frozen or current layers, including source fallback and record-list projection. |
@@ -116,11 +116,21 @@ function applyAutoTile() {
 Observation does not certify durability, wait for every process subscriber or
 acknowledge an external effect; the application owns its domain actions.
 
-Remaining compatibility routing is explicit: ordinary store/scoped selected and
-full-prefix entry points, all specialized retained/profile/migration/collection
-producers and every view/model completion path still require the broader routing
-and qualification work. The initial slice is not a claim that all old dispatch
-paths have already been replaced.
+### Compatibility dispatch
+
+| # | Existing entry points | Owner and boundary |
+|---|---|---|
+| 1 | Store, scope, runtime and namespace | Store routes and schema validate before ingress; worker layers commit intent. A handle batch is one command and one acknowledgment. Legacy namespace Reset can still include raw container content; handle RemoveOverride only removes selected declared leaves. |
+| 2 | Draft, preview scope and overlay | Draft/overlay owners install one complete local edit map before notification. Reset, projection and Apply resolve against the checked candidate; overlay leases and address mapping still own base/entry authority. |
+| 3 | Retained groups, profiles and migration | Worker handlers own producer-specific preflight, reservations and results. Persistent edits, accepted worker snapshots and paired completion use the store's existing admission/publication boundaries; these producers do not get new handle verbs. |
+| 4 | Record/list operations and models | Collection operations resolve against captured policy, identity and paths; they produce worker edits and model plans. Publication installs value/projection state before preparation, delivers legal model updates, then completes observation. |
+
+An ordinary live Set/Remove batch is not an Apply: it does not begin a save.
+The user layer retains its existing optimistic Set and autosave policy; runtime
+edits and ordinary Reset publish from the worker. All observable leaf values in
+each local or worker publication are installed before its first change
+notification. If the worker rejects one edit, it admits none of the batch's
+intent. A reentrant operation follows the whole original batch.
 
 ## Selected immutable read facts
 
@@ -210,7 +220,7 @@ some state was observed. The application owns external effects.
 
 ## Compatibility qualification
 
-The slice preserves released public layouts/metadata slots, old compiled native,
+The compatibility gates check released public layouts/metadata slots, old compiled native,
 moc and pure-QML clients, `.so.0.5`, the QtCore-only Core boundary and the exact
 Qt 6.12.0 private adapter. The export guard remains strict except for reviewed
 exact weak compiler-emitted definitions in `tests/generic_primitives/weak_exports.py`.
@@ -220,9 +230,10 @@ vtable/typeinfo exclusion or production ABI shim is used.
 
 `generic_performance` records stage/getter distributions and asserts whole-batch
 resolution counts and no candidate reacquisition on control-only publications or
-cached getters. Existing timing/sanitizer policy is unchanged. This initial guard
-is not a claim of completed full matched-Arch or expanded handle/reply performance
-qualification.
+cached getters. The matched performance runner separately compares old public
+workloads, candidate-only handle/reply costs and paired small-selection save
+latency. The frozen-client/export checks run on both plain CMake and matched
+Arch package builds. Existing timing/sanitizer policy is unchanged.
 
 ## Explicit candidate targets
 Effective trees collect winning declared leaves under typed paths and assemble
@@ -298,12 +309,11 @@ This target adapter is a Phase 2 increment, not the generated-handle/reply surfa
 or completion of all facade routing. New handle construction will select runtime
 explicitly; the compatibility APIs have not changed.
 
-## Pending completion owner (Phase 2 increment)
+## Pending completion owner
 
-`ConfigPendingReply` is the native terminal envelope for the forthcoming handle
+`ConfigPendingReply` is the native terminal envelope for the handle
 verbs. `ConfigQmlPendingReply` exposes `finished`, `isFinished`, `isError`, `error`
-and lazy `value`. This increment supplies the types and private read-composition
-entry point, not the generated handle factories or public handle verbs yet.
+and lazy `value`.
 
 The private composition validates and captures the exact additional reader list
 before dispatch. It obtains the initiating cut through the existing P3 projection,
@@ -324,19 +334,18 @@ If an additional read fails, the initiating successful cut is retained. Failed
 read entries carry their last-good state, not fresh success coverage. Entries not
 acknowledged before failure have status `not_observed`; the whole reply is an
 error, never partial observation success. Actual source-presentation loss fails
-pending delivery; detached results remain readable afterward. The eventual writer
-adapter must additionally retain its paired publication facts on observation
-failure; this increment does not yet compose writer completion or Retry.
+pending delivery; detached results remain readable afterward. Admitted staged
+Apply retains the paired writer outcome even when observation fails or the
+presentation disappears. Retry reuses the retained draft admission, not a
+new writer intent.
 
 Native replies have explicit caller ownership. The QML wrapper owns its native
 reply without parenting itself to a store/editor. Retained replies survive source
 presentation closure; unreferenced pending or settled wrappers and their native
 payloads are engine-GC-reclaimable. Callbacks retain only guarded native pointers,
-not engine values or a store-owned reply registry. Schema handles, edit opening,
-selected writer verbs, frozen-handle reads and their full compatibility matrix
-remain subsequent Phase 2/3 work.
+not engine values or a store-owned reply registry.
 
-## Generated-handle selection foundation (Phase 2 increment)
+## Generated-handle selection
 
 The private `ConfigHandleSelection` describes a generated handle's schema
 namespace and narrowed P1 selection. Group/leaf lookup and disjoint selections
@@ -349,14 +358,11 @@ Child lookup and group expansion are restricted to the parent's allowed leaves;
 neither can widen a read-only target or a selected union. Invalid/empty/duplicate
 selections stay invalid rather than falling back to root. The selected descriptor
 contains only allowed declared children and is detached from caller mutation.
-This foundation performs no IO, value resolution, worker capture or input.
+Selection and lazy handle materialization do not write input or capture a worker
+cut. Native/QML roots and selected edit-session verbs reuse this identity
+instead of maintaining a parallel validator or configuration cache.
 
-It is not the public generated QObject graph yet. Lazy handle materialization,
-new native/QML root accessors, all reply-returning verbs and selected edit-session
-Apply/discard remain required; those adapters will use this identity instead of
-adding a parallel selection validator or configuration cache.
-
-## Selected read projections (Phase 2 increment)
+## Selected read projections
 
 A selected projection narrows an existing store, scoped, draft, preview or
 overlay projection to a generated-handle identity. It is created privately from

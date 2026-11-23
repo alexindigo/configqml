@@ -76,3 +76,23 @@ were freshly checked and their undefined-import inventories contain neither name
 Both baseline definitions are W; neither is strong, vtable or typeinfo. The full
 compatibility renewal repeats import checks and exact-name rejection controls.
 These additions must be listed in the release PR alongside earlier reviewed names.
+
+## Qt route-map detach helpers, 2026-11-23
+
+Authority: the equivalent std/Qt template category approved by the originating
+orchestrator in `decision-weak-pair-18.md`. Reset now looks up routes through
+const `ConfigStore::checkWrite`; this no longer instantiates the detach helpers
+from the mutating `QMap` lookup overload.
+
+| # | Exact mangled name | Demangled form | Frozen baseline origin |
+|---|---|---|---|
+| 1 | `_ZN4QMapI5QListI7QStringEN9configqml11ConfigRouteEE22referenceHoldingDetachEv` | `QMap<QList<QString>, configqml::ConfigRoute>::referenceHoldingDetach()` | `configstore.cpp.o`, W |
+| 2 | `_ZN9QtPrivate30QExplicitlySharedDataPointerV2I8QMapDataISt3mapI5QListI7QStringEN9configqml11ConfigRouteESt4lessIS5_ESaISt4pairIKS5_S7_EEEEE6detachEv` | `QtPrivate::QExplicitlySharedDataPointerV2<QMapData<std::map<QList<QString>, configqml::ConfigRoute, std::less<QList<QString> >, std::allocator<std::pair<QList<QString> const, configqml::ConfigRoute> > > > >::detach()` | `configstore.cpp.o`, W |
+
+Both definitions are weak functions in the frozen Core DSO, not strong symbols,
+vtables or typeinfo. None of the 1,329 audited consumer binaries imports either
+name. An independent O0/no-inline translation unit using the route map against
+installed headers emits both definitions as W. Evidence: guest
+`artifacts/combined-27/compatibility/` (strict refusal and import inventory),
+`artifacts/weak-routes-27/` (independent object), and the retained baseline
+`build-baseline/CMakeFiles/configqml_core.dir/configstore.cpp.o`.

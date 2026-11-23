@@ -20,6 +20,7 @@ class ConfigWorkerOwner;
 struct ConfigWorkerPacket;
 struct ConfigApplyAttempt;
 class ConfigStoreTestAccess;
+struct ConfigCommand;
 class ConfigDraft;
 class ConfigStoreHandle;
 class ConfigOverlayEditor;
@@ -166,6 +167,15 @@ private:
                               const QString &target, QObject *context, Callback callback,
                               ConfigDescriptor::Format format = ConfigDescriptor::Format::Native,
                               const ConfigAdmission *admission = nullptr);
+    Q_DECL_HIDDEN QList<ConfigDiagnostic> checkWrite(ConfigInput::Kind kind, const ConfigPath &path,
+                                                     const QString &target,
+                                                     const ConfigValueResult &checked) const;
+    Q_DECL_HIDDEN ConfigRequestHandle queueWrite(ConfigCommand command, const ConfigPath &path,
+                                                 QList<ConfigDiagnostic> errors, QObject *context,
+                                                 Callback callback);
+    Q_DECL_HIDDEN ConfigRequestHandle
+    writeEdits(const QMap<ConfigPath, std::optional<QVariant>> &edits, bool runtime,
+               QObject *context, Callback callback);
     quint64 request(const QString &operation, QObject *context, Callback callback,
                     const QList<ConfigPath> &selection = {});
     quint64 registerRequest(QObject *context, Callback callback);

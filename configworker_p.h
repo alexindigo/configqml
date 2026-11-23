@@ -57,6 +57,7 @@ struct ConfigCommand {
     quint64 prefix = 0;
     QString operation;
     std::optional<ConfigInput> input;
+    bool runtimeEdits = false;
     QString file;
     QString profileName;
     QList<ConfigPath> selection;

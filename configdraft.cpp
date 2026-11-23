@@ -149,40 +149,26 @@ ConfigOperation ConfigDraft::setValue(const ConfigPath &path, const QVariant &va
     const auto checked = m_schema.validate(path, value, format);
     if (!checked.ok())
         return {false, checked.errors};
-    if (!valid() || m_busy || !m_base.contains(path))
-        return {false,
-                {m_schema.diagnostics().make(path, m_busy ? "draft-busy" : "outside-draft")}};
-    const auto ownedPath = ownPath(path);
-    const ConfigPublicationScope publication(m_store);
-    const bool resolve = ConfigDraftState::get(this)->hasRemovals();
-    m_edits[ownedPath] = checked.value;
-    m_presentations.remove(ownedPath);
-    ConfigReadProjectionState::stage(this);
-    if (resolve)
-        ConfigDraftState::get(this)->resolve(m_edits, false);
-    else {
-        ConfigDraftState::get(this)->capture(m_edits);
-        publishPreview();
-    }
-    ConfigConsumerGuard boundary(this);
-    if (prepareChanges({ownedPath}) &&
-        boundary.invoke([&] { emit previewValuesChanged({ownedPath}); }) &&
-        boundary.invoke([&] { emit valuesChanged({ownedPath}); }))
-        boundary.invoke([&] { emit stateChanged(); });
-    return {true, {}};
+    return stageValues({{ownPath(path), checked.value}});
 }
 ConfigOperation ConfigDraft::setValue(const ConfigAdmission &value) {
     const auto checked = m_schema.admitted(value);
-    const auto path = value.path();
     if (!checked.ok())
         return {false, checked.errors};
-    if (!valid() || m_busy || !m_base.contains(path))
-        return {false,
-                {m_schema.diagnostics().make(path, m_busy ? "draft-busy" : "outside-draft")}};
-    const bool resolve = ConfigDraftState::get(this)->hasRemovals();
-    m_edits[path] = checked.value;
+    return stageValues({{value.path(), checked.value}});
+}
+ConfigOperation ConfigDraft::stageValues(const QMap<ConfigPath, QVariant> &values) {
+    for (auto it = values.cbegin(); it != values.cend(); ++it)
+        if (!valid() || m_busy || !m_base.contains(it.key()))
+            return {
+                false,
+                {m_schema.diagnostics().make(it.key(), m_busy ? "draft-busy" : "outside-draft")}};
     const ConfigPublicationScope publication(m_store);
-    m_presentations.remove(path);
+    const bool resolve = ConfigDraftState::get(this)->hasRemovals();
+    for (auto it = values.cbegin(); it != values.cend(); ++it) {
+        m_edits[it.key()] = it.value();
+        m_presentations.remove(it.key());
+    }
     ConfigReadProjectionState::stage(this);
     if (resolve)
         ConfigDraftState::get(this)->resolve(m_edits, false);
@@ -190,9 +176,10 @@ ConfigOperation ConfigDraft::setValue(const ConfigAdmission &value) {
         ConfigDraftState::get(this)->capture(m_edits);
         publishPreview();
     }
+    const auto paths = values.keys();
     ConfigConsumerGuard boundary(this);
-    if (prepareChanges({path}) && boundary.invoke([&] { emit previewValuesChanged({path}); }) &&
-        boundary.invoke([&] { emit valuesChanged({path}); }))
+    if (prepareChanges(paths) && boundary.invoke([&] { emit previewValuesChanged(paths); }) &&
+        boundary.invoke([&] { emit valuesChanged(paths); }))
         boundary.invoke([&] { emit stateChanged(); });
     return {true, {}};
 }

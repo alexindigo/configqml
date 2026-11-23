@@ -144,25 +144,32 @@ bool ConfigOverlayEditor::notifyValues(const QList<ConfigPath> &paths) {
 }
 ConfigRequestHandle ConfigOverlayEditor::setValue(const ConfigPath &path, const QVariant &value) {
     const auto checked = m_schema.validate(path, value);
-    ConfigRequestHandle result;
-    result.errors = checked.errors;
-    if (result.errors.isEmpty() && (!writable() || !ready() || m_busy))
-        result.errors = {m_schema.diagnostics().make(path, !writable() ? "overlay-readonly"
-                                                           : m_busy    ? "overlay-busy"
-                                                                       : "overlay-owner")};
-    if (!result.errors.isEmpty())
-        return result;
+    if (!checked.ok())
+        return {0, 0, false, checked.errors};
+    return admitEdits({{ownPath(path), checked.value}});
+}
+ConfigRequestHandle
+ConfigOverlayEditor::admitEdits(const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                                QObject *context, Retained retained) {
+    if (!writable() || !ready() || m_busy)
+        return {0,
+                0,
+                false,
+                {m_schema.diagnostics().make(edits.firstKey(), !writable() ? "overlay-readonly"
+                                                               : m_busy    ? "overlay-busy"
+                                                                           : "overlay-owner")}};
     const ConfigPublicationScope publication(m_store);
     if (m_mode == ConfigOverlayMode::Live)
-        return writeLive(ownPath(path), checked.value);
-    m_edits[ownPath(path)] = checked.value;
+        return writeLive(edits, context, std::move(retained));
+    for (auto it = edits.cbegin(); it != edits.cend(); ++it) {
+        m_edits[it.key()] = it.value();
+        m_presentations.remove(it.key());
+    }
     ConfigReadProjectionState::stage(this);
-    m_presentations.remove(path);
-    result.accepted = true;
     ConfigConsumerGuard boundary(this);
-    if (notifyValues({path}))
+    if (notifyValues(edits.keys()))
         boundary.invoke([&] { emit stateChanged(); });
-    return result;
+    return {0, 0, true, {}};
 }
 ConfigRequestHandle ConfigOverlayEditor::setValue(const ConfigAdmission &admission) {
     const auto checked = m_schema.admitted(admission);
@@ -173,19 +180,9 @@ ConfigRequestHandle ConfigOverlayEditor::setValue(const ConfigAdmission &admissi
 bool ConfigOverlayEditor::unset(const ConfigPath &query) {
     const auto path = ownPath(query);
     const auto descriptor = m_schema.descriptor(path);
-    if (!writable() || !ready() || m_busy || !descriptor ||
-        descriptor->type == ConfigDescriptor::Type::Group)
+    if (!descriptor || descriptor->type == ConfigDescriptor::Type::Group)
         return false;
-    const ConfigPublicationScope publication(m_store);
-    if (m_mode == ConfigOverlayMode::Live)
-        return writeLive(path, std::nullopt).accepted;
-    m_edits[path] = std::nullopt;
-    ConfigReadProjectionState::stage(this);
-    m_presentations.remove(path);
-    ConfigConsumerGuard boundary(this);
-    if (notifyValues({path}))
-        boundary.invoke([&] { emit stateChanged(); });
-    return true;
+    return admitEdits({{path, std::nullopt}}).accepted;
 }
 ConfigRequestHandle ConfigOverlayEditor::writeLive(const ConfigPath &path,
                                                    const std::optional<QVariant> &value) {

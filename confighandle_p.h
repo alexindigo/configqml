@@ -72,6 +72,9 @@ public:
 
 private:
     friend class ConfigHandle;
+    static ConfigReplyWriter overlayWriter(QPointer<ConfigOverlayEditor> overlay,
+                                           QMap<ConfigPath, std::optional<QVariant>> edits,
+                                           bool staged);
     explicit ConfigHandleState(ConfigHandle *handle);
     static ConfigHandle *create(QObject *parent, ConfigHandleState *root,
                                 const ConfigHandleSelection &selection);

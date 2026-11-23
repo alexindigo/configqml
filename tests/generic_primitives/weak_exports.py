@@ -48,6 +48,10 @@ ALLOWLIST = {
         "Qt QList initializer-list complete constructor template; an independent using TU emits its own weak copy",
     "_ZN5QListI8QVariantEC2ESt16initializer_listIS0_E":
         "Qt QList initializer-list base constructor template; an independent using TU emits its own weak copy",
+    "_ZN4QMapI5QListI7QStringEN9configqml11ConfigRouteEE22referenceHoldingDetachEv":
+        "Qt route-map detach template; an independent using TU emits its own weak copy",
+    "_ZN9QtPrivate30QExplicitlySharedDataPointerV2I8QMapDataISt3mapI5QListI7QStringEN9configqml11ConfigRouteESt4lessIS5_ESaISt4pairIKS5_S7_EEEEE6detachEv":
+        "Qt shared-data detach template for the route map; an independent using TU emits its own weak copy",
 }
 
 

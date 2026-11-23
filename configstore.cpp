@@ -201,14 +201,31 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
                                        const ConfigAdmission *admission) {
     Q_ASSERT(QThread::currentThread() == thread());
     const auto path = ownPath(queryPath);
+    const auto checked = admission ? m_schema.admitted(*admission)
+                         : (kind == ConfigInput::Kind::User || kind == ConfigInput::Kind::Runtime ||
+                            kind == ConfigInput::Kind::Initialize)
+                             ? m_schema.validate(path, value, format)
+                             : ConfigValueResult{};
+    ConfigInput input;
+    input.kind = kind;
+    input.path = path;
+    input.value = checked.value;
+    input.target = QString(target.constData(), target.size());
+    const auto affected = kind == ConfigInput::Kind::User || kind == ConfigInput::Kind::Runtime ||
+                                  kind == ConfigInput::Kind::Initialize
+                              ? QList<ConfigPath>{path}
+                              : m_schema.leaves();
+    for (const auto &leaf : affected)
+        if (startsWith(leaf, path))
+            input.pathGenerations[leaf] = m_cache.information.value(leaf).pathGeneration + 1;
+    return queueWrite({0, 0, "write", input}, path, checkWrite(kind, path, target, checked),
+                      context, std::move(callback));
+}
+QList<ConfigDiagnostic> ConfigStore::checkWrite(ConfigInput::Kind kind, const ConfigPath &path,
+                                                const QString &target,
+                                                const ConfigValueResult &value) const {
+    auto checked = value;
     const auto diagnostics = m_schema.diagnostics();
-    ConfigRequestHandle handle;
-    ConfigConsumerGuard boundary(this);
-    auto checked = admission ? m_schema.admitted(*admission)
-                   : (kind == ConfigInput::Kind::User || kind == ConfigInput::Kind::Runtime ||
-                      kind == ConfigInput::Kind::Initialize)
-                       ? m_schema.validate(path, value, format)
-                       : ConfigValueResult{};
     if (!m_accepting || !m_owner->accepting() || m_status != Status::Ready)
         checked.errors = {diagnostics.make(
             path, m_accepting && m_owner->accepting() ? "not-ready" : "store-closed")};
@@ -242,50 +259,57 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
                 (startsWith(path, source.prefix) || startsWith(source.prefix, path)))
                 checked.errors = {diagnostics.make(path, "source-quarantined")};
         }
-    handle.requestId = registerRequest(context, std::move(callback));
-    if (!checked.ok()) {
-        handle.errors = checked.errors;
-        ConfigResult result;
-        result.requestId = handle.requestId;
-        result.storeId = m_storeId;
-        result.operation = "write";
-        result.status = "failed";
-        result.inputPrefix = m_sequence;
-        result.error = diagnostics.error(checked.errors.first(), {}, "ingress");
-        QMetaObject::invokeMethod(
-            this, [this, result] { receiveResult(result); }, Qt::QueuedConnection);
-        boundary.invoke([&] { emit inputRejected(diagnostics.path(path), result.error.code); });
-        return handle;
-    }
+    return checked.errors;
+}
+ConfigRequestHandle ConfigStore::writeEdits(const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                                            bool runtime, QObject *context, Callback callback) {
+    Q_ASSERT(QThread::currentThread() == thread());
     ConfigInput input;
-    input.kind = kind;
-    input.sequence = m_sequence + 1;
-    input.path = ownPath(path);
-    input.value = checked.value;
-    input.target = QString(target.constData(), target.size());
-    const auto affected = kind == ConfigInput::Kind::User || kind == ConfigInput::Kind::Runtime ||
-                                  kind == ConfigInput::Kind::Initialize
-                              ? QList<ConfigPath>{path}
-                              : m_schema.leaves();
-    for (const auto &leaf : affected)
-        if (startsWith(leaf, path)) {
-            input.pathGenerations[leaf] = m_cache.information.value(leaf).pathGeneration + 1;
-        }
-    ConfigCommand command{handle.requestId, input.sequence, "write", input};
-    if (!m_owner->dispatch(command)) {
-        handle.errors = {diagnostics.make(path, "store-closed")};
+    input.kind = ConfigInput::Kind::Group;
+    input.edits = edits;
+    ConfigCommand command{0, 0, "write", input};
+    command.runtimeEdits = runtime;
+    for (auto it = edits.cbegin(); it != edits.cend(); ++it) {
+        const auto kind =
+            it.value() ? (runtime ? ConfigInput::Kind::Runtime : ConfigInput::Kind::User)
+                       : (runtime ? ConfigInput::Kind::ClearRuntime : ConfigInput::Kind::Reset);
+        auto errors =
+            checkWrite(kind, it.key(), m_userLayerId, {it.value().value_or(QVariant()), {}});
+        if (!errors.isEmpty())
+            return queueWrite(std::move(command), it.key(), std::move(errors), context,
+                              std::move(callback));
+        command.input->pathGenerations[it.key()] =
+            m_cache.information.value(it.key()).pathGeneration + 1;
+    }
+    return queueWrite(std::move(command), edits.firstKey(), {}, context, std::move(callback));
+}
+ConfigRequestHandle ConfigStore::queueWrite(ConfigCommand command, const ConfigPath &path,
+                                            QList<ConfigDiagnostic> errors, QObject *context,
+                                            Callback callback) {
+    const auto diagnostics = m_schema.diagnostics();
+    ConfigConsumerGuard boundary(this);
+    ConfigRequestHandle handle;
+    command.requestId = handle.requestId = registerRequest(context, std::move(callback));
+    const auto reject = [&](QList<ConfigDiagnostic> rejected) {
+        handle.errors = std::move(rejected);
         ConfigResult result;
         result.requestId = handle.requestId;
         result.storeId = m_storeId;
         result.operation = "write";
         result.status = "failed";
         result.inputPrefix = m_sequence;
-        result.error = {"store-closed", {}, "ingress"};
+        result.error = diagnostics.error(handle.errors.first(), {}, "ingress");
         QMetaObject::invokeMethod(
             this, [this, result] { receiveResult(result); }, Qt::QueuedConnection);
         boundary.invoke([&] { emit inputRejected(diagnostics.path(path), result.error.code); });
         return handle;
-    }
+    };
+    if (!errors.isEmpty())
+        return reject(std::move(errors));
+    auto &input = *command.input;
+    command.prefix = input.sequence = m_sequence + 1;
+    if (!m_owner->dispatch(command))
+        return reject({diagnostics.make(path, "store-closed")});
     m_sequence = input.sequence;
     for (auto it = input.pathGenerations.cbegin(); it != input.pathGenerations.cend(); ++it) {
         auto &state = m_cache.information[it.key()];
@@ -295,17 +319,26 @@ ConfigRequestHandle ConfigStore::write(ConfigInput::Kind kind, const ConfigPath 
     m_inputs.append(input);
     handle.inputSequence = input.sequence;
     handle.accepted = true;
-    bool changed = false;
-    if (kind == ConfigInput::Kind::User && info(path).provenance.maskedBy.isEmpty()) {
-        changed = m_cache.values.value(path) != checked.value;
-        m_cache.values[path] = checked.value;
-        if (changed)
-            m_presentations.remove(path);
-    }
+    QList<ConfigPath> changed;
+    const auto installUserValue = [&](const ConfigPath &leaf, const QVariant &value) {
+        if (!info(leaf).provenance.maskedBy.isEmpty())
+            return;
+        if (m_cache.values.value(leaf) != value) {
+            changed.append(leaf);
+            m_presentations.remove(leaf);
+        }
+        m_cache.values[leaf] = value;
+    };
+    if (input.kind == ConfigInput::Kind::User)
+        installUserValue(input.path, input.value);
+    if (input.kind == ConfigInput::Kind::Group && !command.runtimeEdits)
+        for (auto it = input.edits.cbegin(); it != input.edits.cend(); ++it)
+            if (it.value())
+                installUserValue(it.key(), *it.value());
     // Owned input, sequence, queueing and cache installation all precede consumer reentry.
     const ConfigPublicationScope publication(this);
-    if (changed && ConfigChangePublisher::prepare(this, {{m_changes.get(), {path}}}))
-        boundary.invoke([&] { emit valuesChanged({path}); });
+    if (!changed.isEmpty() && ConfigChangePublisher::prepare(this, {{m_changes.get(), changed}}))
+        boundary.invoke([&] { emit valuesChanged(changed); });
     return handle;
 }
 ConfigRequestHandle ConfigStore::setUser(const ConfigAdmission &value, QObject *context,

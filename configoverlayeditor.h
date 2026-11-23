@@ -75,6 +75,9 @@ private:
     // Retained continuations still receive an admitted completion after this
     // presentation closes; presentation updates and legacy callbacks stay guarded.
     using Retained = std::function<void(const ConfigCompletion &)>;
+    Q_DECL_HIDDEN ConfigRequestHandle
+    admitEdits(const QMap<ConfigPath, std::optional<QVariant>> &edits, QObject *context = nullptr,
+               Retained retained = {});
     quint64 request(const QString &operation, QObject *context, ConfigStore::Callback callback,
                     QObject *retainedContext, Retained retained);
     ConfigRequestHandle writeLive(const ConfigPath &path, const std::optional<QVariant> &value);

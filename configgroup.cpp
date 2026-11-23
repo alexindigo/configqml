@@ -95,6 +95,7 @@ void ConfigWorker::processGroup(const ConfigCommand &inputCommand) {
     if (command.selectsPublication() && !prepareSelected(command))
         return;
     const auto input = command.input.value_or(ConfigInput{});
+    const bool ordinaryWrite = command.operation == "write";
     const bool retry = command.applyAttempt && command.applyAttempt->expected;
     auto fences = input.fences;
     auto acceptedEdits = input.edits;
@@ -137,14 +138,16 @@ void ConfigWorker::processGroup(const ConfigCommand &inputCommand) {
     const auto before = *m_layers;
     auto selection =
         ConfigSelection::capture(m_options.schema, input.edits.keys(), m_options.schema.leaves(),
-                                 ConfigSelection::Target::UserLayer, "admission", true);
+                                 command.runtimeEdits ? ConfigSelection::Target::RuntimeLayer
+                                                      : ConfigSelection::Target::UserLayer,
+                                 "admission", true);
     selection.owner = m_endpoint;
     auto batch = ConfigEditBatch::capture(selection, input.edits);
     batch.sequence = input.sequence;
     batch.fences = fences;
-    for (auto it = input.edits.cbegin(); error.isEmpty() && it != input.edits.cend(); ++it) {
-        error = quarantined(it.key());
-    }
+    if (!command.runtimeEdits)
+        for (auto it = input.edits.cbegin(); error.isEmpty() && it != input.edits.cend(); ++it)
+            error = quarantined(it.key());
     ConfigCandidate candidate;
     if (error.isEmpty()) {
         candidate =
@@ -154,7 +157,7 @@ void ConfigWorker::processGroup(const ConfigCommand &inputCommand) {
     if (!error.isEmpty()) {
         auto result = resultFor(command);
         result.status = "failed";
-        result.error = {error, {}, "apply"};
+        result.error = {error, {}, ordinaryWrite ? "write" : "apply"};
         result.rejectedPathGenerations = input.pathGenerations;
         reconcileApplyRejection(command);
         post(publish(result));
@@ -162,7 +165,18 @@ void ConfigWorker::processGroup(const ConfigCommand &inputCommand) {
     }
     *m_layers = std::move(*candidate.layers);
     acceptIntent(input);
-    recordPersistent(input, before);
+    if (!command.runtimeEdits)
+        recordPersistent(input, before);
+    if (ordinaryWrite) {
+        if (!command.runtimeEdits)
+            scheduleAutoSave();
+        auto result = resultFor(command);
+        result.status = "accepted";
+        if (input.edits.size() == 1)
+            result.maskedBy = m_layers->info(input.edits.firstKey()).maskedBy;
+        post(publish(result));
+        return;
+    }
     if (command.applyAttempt) {
         post(publish());
         rememberApply(command, fences.keys(), acceptedEdits);

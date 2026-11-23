@@ -437,7 +437,8 @@ void ConfigHandleState::prime() {
 }
 void ConfigHandleState::refresh(const QList<ConfigPath> &paths, bool all) {
     ConfigConsumerGuard guard(q);
-    QSet<ConfigHandleState *> changedFields;
+    QList<QPointer<ConfigHandle>> changedFields;
+    QSet<ConfigPath> changedPaths;
     const auto handles = materialized;
     for (const auto &handle : handles) {
         if (!handle || !handle->d->field)
@@ -457,13 +458,15 @@ void ConfigHandleState::refresh(const QList<ConfigPath> &paths, bool all) {
         state.cached = true;
         state.cachedPresent = present;
         state.cachedValue = value;
-        if (notify)
-            changedFields.insert(&state);
+        if (notify) {
+            changedFields.append(handle);
+            changedPaths.insert(leaf);
+        }
     }
     // Exactly one value notification per actual effective transition, fields
     // first, then each materialized scope containing a changed field.
-    for (auto *state : std::as_const(changedFields))
-        if (!guard.invoke([&] { emit state->q->valueChanged(); }))
+    for (const auto &handle : std::as_const(changedFields))
+        if (handle && !guard.invoke([&] { emit handle->valueChanged(); }))
             return;
     if (changedFields.isEmpty())
         return;
@@ -472,8 +475,8 @@ void ConfigHandleState::refresh(const QList<ConfigPath> &paths, bool all) {
             continue;
         const auto leaves = handle->d->selection.selection().leaves;
         bool contains = false;
-        for (auto *state : std::as_const(changedFields))
-            contains |= leaves.contains(state->selection.prefix());
+        for (const auto &path : std::as_const(changedPaths))
+            contains |= leaves.contains(path);
         if (contains && !guard.invoke([&] { emit handle->valueChanged(); }))
             return;
     }
@@ -552,7 +555,7 @@ ConfigPendingReply *ConfigHandleState::set(ConfigHandle *handle,
         return state.refuse("unsupported-operation", "selection");
     const auto schema = state.schema();
     const auto leaves = state.selection.selection().leaves;
-    QMap<ConfigPath, QVariant> checked;
+    QMap<ConfigPath, std::optional<QVariant>> checked;
     for (const auto &entry : batch) {
         const auto absolute = state.selection.prefix() + ownPath(entry.path);
         if (!leaves.contains(absolute))
@@ -584,61 +587,26 @@ ConfigPendingReply *ConfigHandleState::set(ConfigHandle *handle,
     case Owner::Store:
     case Owner::Scope:
         writer = [store, checked, runtime](QObject *context, auto done) {
-            auto remaining = std::make_shared<qsizetype>(checked.size());
-            auto outcome = std::make_shared<ConfigReplyWrite>();
-            for (auto it = checked.cbegin(); it != checked.cend(); ++it) {
-                ConfigPairedCallback paired{
-                    [remaining, outcome, done](const ConfigCompletion &pair) {
-                        const bool failed = outcome->result && outcome->result->status == "failed";
-                        if (!failed) {
-                            outcome->result = pair.result;
-                            if (pair.observation.valid())
-                                outcome->observation = pair.observation;
-                        }
-                        if (--*remaining == 0)
-                            done(*outcome);
-                    }};
-                if (runtime)
-                    store->setRuntime(it.key(), it.value(), context, paired);
-                else
-                    store->setUser(it.key(), it.value(), context, paired);
-            }
+            store->writeEdits(checked, runtime, context,
+                              ConfigPairedCallback{[done](const ConfigCompletion &pair) {
+                                  done({pair.result, pair.observation, {}, {}, false});
+                              }});
         };
         break;
     case Owner::Overlay:
-        if (state.kind == ConfigHandle::Kind::Live) {
-            writer = [overlay, checked](QObject *context, auto done) {
-                QMap<ConfigPath, std::optional<QVariant>> edits;
-                for (auto it = checked.cbegin(); it != checked.cend(); ++it)
-                    edits.insert(it.key(), it.value());
-                const auto handle =
-                    overlay->writeLive(edits, context, [done](const ConfigCompletion &pair) {
-                        done({pair.result, pair.observation, {}, {}, false});
-                    });
-                if (!handle.accepted)
-                    done({std::nullopt, {}, handle.errors.value(0).code, "admission", false});
-            };
-            break;
-        }
-        writer = [overlay, checked](QObject *, auto done) {
-            for (auto it = checked.cbegin(); it != checked.cend(); ++it)
-                if (!overlay->setValue(it.key(), it.value()).accepted) {
-                    done({std::nullopt, {}, "overlay-busy", "candidate", false});
-                    return;
-                }
-            done({});
-        };
+        writer = overlayWriter(overlay, checked, state.frozen());
         break;
     case Owner::Draft:
         writer = [draft, checked](QObject *, auto done) {
+            QMap<ConfigPath, QVariant> values;
             for (auto it = checked.cbegin(); it != checked.cend(); ++it) {
-                const auto operation = draft->setValue(it.key(), it.value());
-                if (!operation.accepted) {
-                    done({std::nullopt, {}, operation.errors.value(0).code, "candidate", false});
-                    return;
-                }
+                values.insert(it.key(), *it.value());
             }
-            done({});
+            const auto operation = draft->stageValues(values);
+            if (operation.accepted)
+                done({});
+            else
+                done({std::nullopt, {}, operation.errors.value(0).code, "candidate", false});
         };
         break;
     case Owner::Preview:
@@ -646,12 +614,34 @@ ConfigPendingReply *ConfigHandleState::set(ConfigHandle *handle,
     }
     return state.start(std::move(writer), !state.frozen(), {}, options);
 }
+ConfigReplyWriter ConfigHandleState::overlayWriter(QPointer<ConfigOverlayEditor> overlay,
+                                                   QMap<ConfigPath, std::optional<QVariant>> edits,
+                                                   bool staged) {
+    return [overlay, edits = std::move(edits), staged](QObject *context, auto done) {
+        const auto request =
+            overlay->admitEdits(edits, context, [done](const ConfigCompletion &pair) {
+                done({pair.result, pair.observation, {}, {}, false});
+            });
+        if (!request.accepted)
+            done({std::nullopt,
+                  {},
+                  request.errors.value(0).code,
+                  staged ? "candidate" : "admission",
+                  false});
+        else if (staged)
+            done({});
+    };
+}
 ConfigPendingReply *ConfigHandleState::remove(const ConfigHandleOptions &options) {
     if (!alive())
         return refuse("read-owner", "lifetime");
     if (!writable() || owner == Owner::Preview)
         return refuse("unsupported-operation", "selection");
     const auto leaves = selection.selection().leaves;
+    QMap<ConfigPath, std::optional<QVariant>> edits;
+    // RemoveOverride of selected leaves, not a broad erase of opaque siblings.
+    for (const auto &leaf : leaves)
+        edits.insert(leaf, std::nullopt);
     ConfigReplyWriter writer;
     const QPointer<ConfigStore> owningStore = store;
     const QPointer<ConfigDraft> owningDraft = draft;
@@ -660,55 +650,17 @@ ConfigPendingReply *ConfigHandleState::remove(const ConfigHandleOptions &options
     switch (owner) {
     case Owner::Store:
     case Owner::Scope:
-        writer = [owningStore, leaves, runtimeTarget](QObject *context, auto done) {
-            auto remaining = std::make_shared<qsizetype>(leaves.size());
-            auto outcome = std::make_shared<ConfigReplyWrite>();
-            for (const auto &leaf : leaves) {
-                ConfigPairedCallback paired{
-                    [remaining, outcome, done](const ConfigCompletion &pair) {
-                        const bool failed = outcome->result && outcome->result->status == "failed";
-                        if (!failed) {
-                            outcome->result = pair.result;
-                            if (pair.observation.valid())
-                                outcome->observation = pair.observation;
-                        }
-                        if (--*remaining == 0)
-                            done(*outcome);
-                    }};
-                // RemoveOverride of each selected declared leaf; never a broad
-                // namespace erase of opaque siblings.
-                if (runtimeTarget)
-                    owningStore->clearRuntime(leaf, context, paired);
-                else
-                    owningStore->reset(leaf, "user", context, paired);
-            }
+        writer = [owningStore, edits, runtimeTarget](QObject *context, auto done) {
+            owningStore->writeEdits(edits, runtimeTarget, context,
+                                    ConfigPairedCallback{[done](const ConfigCompletion &pair) {
+                                        done({pair.result, pair.observation, {}, {}, false});
+                                    }});
         };
         break;
     case Owner::Overlay:
-        if (kind == ConfigHandle::Kind::Live) {
-            writer = [owningOverlay, leaves](QObject *context, auto done) {
-                QMap<ConfigPath, std::optional<QVariant>> edits;
-                for (const auto &leaf : leaves)
-                    edits.insert(leaf, std::nullopt);
-                const auto handle =
-                    owningOverlay->writeLive(edits, context, [done](const ConfigCompletion &pair) {
-                        done({pair.result, pair.observation, {}, {}, false});
-                    });
-                if (!handle.accepted)
-                    done({std::nullopt, {}, handle.errors.value(0).code, "admission", false});
-            };
-            break;
-        }
-        if (owningOverlay->busy())
+        if (frozen() && owningOverlay->busy())
             return refuse("overlay-busy", "candidate");
-        writer = [owningOverlay, leaves](QObject *, auto done) {
-            for (const auto &leaf : leaves)
-                if (!owningOverlay->unset(leaf)) {
-                    done({std::nullopt, {}, "overlay-busy", "candidate", false});
-                    return;
-                }
-            done({});
-        };
+        writer = overlayWriter(owningOverlay, edits, frozen());
         break;
     case Owner::Draft:
         if (owningDraft->busy())

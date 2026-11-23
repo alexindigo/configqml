@@ -58,6 +58,7 @@ private:
     bool prepareChanges(const QList<ConfigPath> &paths);
     friend class ConfigStoreHandle;
     friend class ConfigHandleState;
+    Q_DECL_HIDDEN ConfigOperation stageValues(const QMap<ConfigPath, QVariant> &values);
     quint64 applySelection(const std::optional<QList<ConfigPath>> &selection, QObject *context,
                            ConfigStore::Callback callback, bool retained);
     bool discardSelection(const QList<ConfigPath> &selection);

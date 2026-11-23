@@ -3,8 +3,10 @@
 #include "compatfixture.h"
 #include "confighandle.h"
 #include "configdraft.h"
+#include "configoverlayeditor.h"
 #include "configstorehandle.h"
 #include "configpendingreply_p.h"
+#include "storeprobe.h"
 #include <QScopeGuard>
 #include <QSemaphore>
 #include <QSignalSpy>
@@ -34,12 +36,14 @@ struct Fixture {
     std::shared_ptr<QSemaphore> writeHeld = std::make_shared<QSemaphore>();
     std::shared_ptr<QSemaphore> releaseWrite = std::make_shared<QSemaphore>();
     explicit Fixture(const QByteArray &generalBytes = "{\"scaleRatio\":2}",
-                     const QByteArray &barBytes = "{\"position\":\"top\"}") {
+                     const QByteArray &barBytes = "{\"position\":\"top\"}",
+                     std::function<QString(const ConfigInput &)> admission = {}) {
         general = directory.filePath("general.json");
         bar = directory.filePath("bar.json");
         compat::put(general, generalBytes);
         compat::put(bar, barBytes);
         options.autoSave = false;
+        options.admission = std::move(admission);
         auto optional = D::leaf(T::String, QVariant());
         optional.optional = true;
         optional.defaultValue.reset();
@@ -437,6 +441,216 @@ private slots:
         auto observed = settle(reader->observe(reply->value().generation()));
         QVERIFY2(!observed->isError(), qPrintable(observed->error().code()));
         QCOMPARE(observed->value().snapshot().selectedState({}).value(), QVariant(7.0));
+    }
+    void completeBatchBeforeReentry_data() {
+        QTest::addColumn<QString>("target");
+        QTest::newRow("live") << QString("live");
+        QTest::newRow("draft") << QString("draft");
+        QTest::newRow("runtime-worker") << QString("runtime");
+        QTest::newRow("staged-overlay") << QString("staged-overlay");
+        QTest::newRow("live-overlay") << QString("live-overlay");
+    }
+    void completeBatchBeforeReentry() {
+        QFETCH(QString, target);
+        Fixture f;
+        QTRY_COMPARE(f.store->status(), ConfigStore::Status::Ready);
+        auto *view = f.store->root()->scope({"general"});
+        std::unique_ptr<ConfigHandle> editor;
+        std::unique_ptr<ConfigStore> overlayOwner;
+        if (target == "draft") {
+            auto opened = settle(view->edit());
+            QVERIFY(!opened->isError());
+            editor.reset(opened->value().handle());
+            QVERIFY(editor);
+            editor->setParent(nullptr);
+            view = editor.get();
+        } else if (target == "runtime") {
+            view = f.store->runtimeRoot()->scope({"general"});
+        } else if (target.endsWith("overlay")) {
+            auto row = D(T::Record);
+            row.fields = {{"id", D::leaf(T::String, QString())}};
+            ConfigStoreOptions ownerOptions;
+            ownerOptions.autoSave = false;
+            ownerOptions.schema = ConfigSchema(D::group({{"rows", D::list(row, {})}}));
+            ownerOptions.layers = {
+                {"user",
+                 ConfigLayerKind::File,
+                 ConfigAdmissionPolicy::FieldFallback,
+                 {{"user", {}, {{"rows", QVariantList{QVariantMap{{"id", "x"}}}}}}},
+                 true}};
+            overlayOwner = std::make_unique<ConfigStore>(ownerOptions);
+            QTRY_COMPARE(overlayOwner->status(), ConfigStore::Status::Ready);
+            ConfigOverlayOptions options;
+            options.base = f.store->scope({"general"}, false);
+            options.ownerPath = {"rows"};
+            options.ownerGeneration = overlayOwner->info({"rows"}).publicationGeneration;
+            options.entryPath = {{ConfigValueSelector::Kind::Index, {}, 0}};
+            options.identityPath = {{ConfigValueSelector::Kind::Key, "id", 0}};
+            options.identityValue = "x";
+            options.overrideKey = "instanceSettings";
+            options.mode =
+                target == "live-overlay" ? ConfigOverlayMode::Live : ConfigOverlayMode::Editor;
+            const auto opened =
+                compat::request(*overlayOwner, [&] { return overlayOwner->openOverlay(options); });
+            QCOMPARE(opened.status, QString("opened"));
+            auto *overlay = ConfigStoreTestAccess::overlay(*overlayOwner, opened.editorId);
+            QVERIFY(overlay);
+            view = overlay->root();
+        }
+        auto *flag = view->scope({"constructor"});
+        auto *scale = view->scope({"scaleRatio"});
+        auto *label = view->scope({"label"});
+        const auto before = compat::bytes(f.general);
+        const auto refused = settle(
+            view->set(QList<ConfigHandleEdit>{{{"constructor"}, true}, {{"scaleRatio"}, "bad"}}));
+        QVERIFY(refused->isError());
+        QCOMPARE(flag->value(), QVariant(false));
+        QCOMPARE(scale->value(), QVariant(2.0));
+        QCOMPARE(compat::bytes(f.general), before);
+
+        // Reenter from the first consumer notification. The nested edit must
+        // follow the complete outer batch, not run between its leaves.
+        QVariant scaleDuringFlag;
+        std::unique_ptr<ConfigPendingReply> nested;
+        connect(flag, &ConfigHandle::valueChanged, this, [&] {
+            if (nested || scaleDuringFlag.isValid())
+                return;
+            scaleDuringFlag = scale->value();
+            nested.reset(label->set(QStringLiteral("nested")));
+        });
+        const auto batch = settle(
+            view->set(QList<ConfigHandleEdit>{{{"constructor"}, true}, {{"scaleRatio"}, 6.0}}));
+        QVERIFY2(!batch->isError(), qPrintable(batch->error().code()));
+        QCOMPARE(scaleDuringFlag, QVariant(6.0));
+        auto nestedResult = settle(nested.release());
+        QVERIFY2(!nestedResult->isError(), qPrintable(nestedResult->error().code()));
+        QCOMPARE(label->value(), QVariant(QStringLiteral("nested")));
+        QCOMPARE(compat::bytes(f.general), before);
+        if (target == "runtime" || overlayOwner) {
+            const auto unset = view->select({{"constructor"}, {"scaleRatio"}});
+            QSignalSpy notifications(flag, &ConfigHandle::valueChanged);
+            QVariant scaleDuringRemove;
+            bool sawRemove = false;
+            connect(flag, &ConfigHandle::valueChanged, this, [&] {
+                if (!sawRemove) {
+                    sawRemove = true;
+                    scaleDuringRemove = scale->value();
+                }
+            });
+            const auto removed = settle(unset->unset());
+            QVERIFY2(!removed->isError(), qPrintable(removed->error().code()));
+            QVERIFY(!notifications.isEmpty());
+            if (target == "staged-overlay")
+                QVERIFY(!scaleDuringRemove.isValid());
+            else
+                QCOMPARE(scaleDuringRemove, QVariant(2.0));
+            QTRY_COMPARE(scale->value(), QVariant(2.0));
+            QCOMPARE(compat::bytes(f.general), before);
+            return;
+        }
+        auto saved = settle(view->apply());
+        QVERIFY2(!saved->isError(), qPrintable(saved->error().code()));
+        auto cold = std::make_unique<ConfigStore>(f.options);
+        QTRY_COMPARE(cold->status(), ConfigStore::Status::Ready);
+        QCOMPARE(cold->value({"general", "constructor"}), QVariant(true));
+        QCOMPARE(cold->value({"general", "scaleRatio"}), QVariant(6.0));
+        QCOMPARE(cold->value({"general", "label"}), QVariant(QStringLiteral("nested")));
+    }
+
+    void rejectsWholeWorkerBatch() {
+        Fixture f("{\"scaleRatio\":2,\"constructor\":true}", "{\"position\":\"top\"}",
+                  [](const ConfigInput &input) {
+                      return input.path == ConfigPath{"general", "scaleRatio"}
+                                 ? QString("batch-refused")
+                                 : QString();
+                  });
+        QTRY_COMPARE(f.store->status(), ConfigStore::Status::Ready);
+        auto *view =
+            f.store->root()->select({{"general", "constructor"}, {"general", "scaleRatio"}});
+        const auto before = compat::bytes(f.general);
+        const auto checkUnchanged = [&] {
+            QCOMPARE(f.store->value({"general", "constructor"}), QVariant(true));
+            QCOMPARE(f.store->value({"general", "scaleRatio"}), QVariant(2.0));
+            QCOMPARE(compat::bytes(f.general), before);
+        };
+        auto set = settle(view->set(QList<ConfigHandleEdit>{{{"general", "constructor"}, false},
+                                                            {{"general", "scaleRatio"}, 6.0}}));
+        QVERIFY(set->isError());
+        QCOMPARE(set->error().code(), QString("batch-refused"));
+        checkUnchanged();
+        auto remove = settle(view->unset());
+        QVERIFY(remove->isError());
+        QCOMPARE(remove->error().code(), QString("batch-refused"));
+        checkUnchanged();
+        QCOMPARE(compat::request(*f.store, [&] { return f.store->save(); }).status,
+                 QString("nothing_to_save"));
+        checkUnchanged();
+    }
+
+    void batchNotificationSurvivesSiblingDestruction() {
+        Fixture f;
+        QTRY_COMPARE(f.store->status(), ConfigStore::Status::Ready);
+        auto *view = f.store->root()->scope({"general"});
+        auto *flag = view->scope({"constructor"});
+        auto *scale = view->scope({"scaleRatio"});
+        QPointer<ConfigHandle> sibling(scale);
+        connect(flag, &ConfigHandle::valueChanged, this, [scale] { delete scale; });
+        auto reply = settle(
+            view->set(QList<ConfigHandleEdit>{{{"constructor"}, true}, {{"scaleRatio"}, 6.0}}));
+        QVERIFY2(!reply->isError(), qPrintable(reply->error().code()));
+        QVERIFY(!sibling);
+        QCOMPARE(view->scope({"scaleRatio"})->value(), QVariant(6.0));
+    }
+    void retainedApplyAfterReaderLoss_data() {
+        QTest::addColumn<bool>("failWrite");
+        QTest::newRow("saved") << false;
+        QTest::newRow("write-failed") << true;
+    }
+    void retainedApplyAfterReaderLoss() {
+        QFETCH(bool, failWrite);
+        Fixture f;
+        const auto unblock = qScopeGuard([&] { f.releaseWrite->release(); });
+        QTRY_COMPARE(f.store->status(), ConfigStore::Status::Ready);
+        auto *const live = f.store->root()->scope({"general", "scaleRatio"});
+        auto opened = settle(live->edit());
+        QVERIFY(!opened->isError());
+        std::unique_ptr<ConfigHandle> edit(opened->value().handle());
+        QVERIFY(edit);
+        edit->setParent(nullptr);
+        QVERIFY(!settle(edit->set(7.0))->isError());
+
+        ConfigHandleOptions options;
+        options.observe = {live};
+        const auto original = compat::bytes(f.general);
+        f.fail->store(failWrite);
+        f.holdWrite->store(true);
+        std::unique_ptr<ConfigPendingReply> reply(edit->apply(options));
+        QSignalSpy finished(reply.get(), &ConfigPendingReply::finished);
+        QTRY_VERIFY(f.writeHeld->available() == 1);
+        delete live;
+        edit.reset();
+        QCoreApplication::sendPostedEvents(reply.get(), QEvent::MetaCall);
+        QCOMPARE(finished.count(), 0);
+        f.releaseWrite->release();
+        QTRY_COMPARE(finished.count(), 1);
+        QVERIFY(reply->isError());
+        QVERIFY(reply->value().write());
+        QVERIFY(!reply->value().snapshot().valid());
+        if (failWrite) {
+            QCOMPARE(reply->value().write()->status, QString("failed"));
+            QCOMPARE(reply->error().phase(), QString("publication"));
+            QCOMPARE(reply->error().code(), QString("handle-write-fault"));
+            QCOMPARE(compat::bytes(f.general), original);
+        } else {
+            QCOMPARE(reply->value().write()->status, QString("saved"));
+            QCOMPARE(reply->error().phase(), QString("lifetime"));
+            QCOMPARE(reply->error().code(), QString("read-owner"));
+            auto *const replacement = f.store->root()->scope({"general", "scaleRatio"});
+            const auto observed = settle(replacement->observe(reply->value().generation()));
+            QVERIFY2(!observed->isError(), qPrintable(observed->error().code()));
+            QCOMPARE(observed->value().snapshot().selectedState({}).value(), QVariant(7.0));
+            QVERIFY(compat::bytes(f.general).contains("7"));
+        }
     }
     void selectedApplyLeavesDisjointEdits() {
         Fixture f;
