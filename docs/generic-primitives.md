@@ -99,7 +99,8 @@ succeeded but a view's acquisition failed, the reply is an error in phase
 `observation` that still carries `value.write` and `value.generation`; retry with
 `view.observe(value.generation)`, not another write. Losing the presentation
 (closing an editor) never cancels admitted persistence; a retained reply still
-receives its completion.
+receives its completion and waits for explicitly requested readers. The reply
+does not fabricate an initiating snapshot if that editor has closed.
 
 ```qml
 function applyAutoTile() {

@@ -44,7 +44,7 @@ ConfigPendingReply *ConfigPendingReplyState::read(ConfigReadProjection *initiato
 ConfigPendingReply *ConfigPendingReplyState::operation(
     ConfigReadProjection *initiator, bool barrier, const ConfigObservation &after,
     const QList<ConfigReadProjection *> &observe, ConfigReplyWriter writer, ConfigHandle *opened,
-    const ConfigObservation &shape, QObject *parent) {
+    const ConfigObservation &shape, QObject *parent, QObject *retainedWriterOwner) {
     auto *reply = new ConfigPendingReply(parent);
     auto &state = *reply->d;
     state.barrier = barrier;
@@ -78,12 +78,19 @@ ConfigPendingReply *ConfigPendingReplyState::operation(
             return reply;
         }
     }
-    for (const auto &view : state.views) {
-        state.lifetimes.append(QObject::connect(view, &QObject::destroyed, reply, [reply] {
-            reply->d->settle("read-owner", "lifetime");
-        }));
+    for (qsizetype index = 0; index < state.views.size(); ++index) {
+        state.lifetimes.append(QObject::connect(state.views[index], &QObject::destroyed, reply,
+                                                [reply, index] { reply->d->viewLost(index); }));
     }
     if (writer) {
+        // Only a durable writer that delivers independently of the initiating
+        // view can keep a reply pending after that view is destroyed.
+        if (retainedWriterOwner) {
+            state.retainedWriter = state.awaitingWriter = true;
+            state.lifetimes.append(
+                QObject::connect(retainedWriterOwner, &QObject::destroyed, reply,
+                                 [reply] { reply->d->settle("read-owner", "lifetime"); }));
+        }
         // The owner's existing request ordering is preserved: dispatch now, in the
         // caller's order, and continue from its own paired completion.
         const QPointer<ConfigPendingReply> guard(reply);
@@ -105,6 +112,7 @@ void ConfigPendingReplyState::written(const ConfigReplyWrite &write,
                                       const ConfigObservation &after) {
     if (queued || finished)
         return;
+    awaitingWriter = false;
     if (write.result)
         captured.write = write.result;
     if (write.observation.valid())
@@ -124,6 +132,17 @@ void ConfigPendingReplyState::written(const ConfigReplyWrite &write,
             settle(code, published ? "publication" : "admission");
             return;
         }
+    }
+    if (readerLost) {
+        settle("read-owner", "lifetime");
+        return;
+    }
+    if (retainedWriter && !ConfigReadProjectionState::available(views.first())) {
+        if (captured.generation.valid())
+            observeViews();
+        else
+            settle("read-owner", "lifetime");
+        return;
     }
     if (!barrier) {
         staged();
@@ -190,7 +209,7 @@ void ConfigPendingReplyState::observeViews() {
     }
     const QPointer<ConfigPendingReply> reply(q);
     for (qsizetype i = 1; i < views.size(); ++i) {
-        if (!views[i]) {
+        if (!ConfigReadProjectionState::available(views[i])) {
             settle("read-owner", "lifetime");
             return;
         }
@@ -199,6 +218,17 @@ void ConfigPendingReplyState::observeViews() {
                 reply->d->acquired(i - 1, read);
         });
     }
+}
+void ConfigPendingReplyState::viewLost(qsizetype index) {
+    // A closed initiator can't provide a snapshot. It isn't the durable owner
+    // and doesn't stand in for an explicitly requested observation either.
+    if (retainedWriter && index == 0)
+        return;
+    if (awaitingWriter) {
+        readerLost = true;
+        return;
+    }
+    settle("read-owner", "lifetime");
 }
 void ConfigPendingReplyState::settle(const QString &code, const QString &phase) {
     if (finished)
@@ -216,8 +246,8 @@ void ConfigPendingReplyState::finish() {
     if (finished)
         return;
     if (error.empty())
-        for (const auto &view : views)
-            if (!ConfigReadProjectionState::available(view)) {
+        for (qsizetype index = retainedWriter ? 1 : 0; index < views.size(); ++index)
+            if (!ConfigReadProjectionState::available(views[index])) {
                 settle("read-owner", "lifetime");
                 break;
             }

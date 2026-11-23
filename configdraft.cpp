@@ -8,6 +8,7 @@
 #include "configstorehandle.h"
 #include "configshutdown_p.h"
 #include "configreadprojection_p.h"
+#include <QScopeGuard>
 #include <QUuid>
 
 namespace configqml {
@@ -282,12 +283,29 @@ quint64 ConfigDraft::applySelection(const std::optional<QList<ConfigPath>> &sele
         edits, fences, owner,
         ConfigPairedCallback{[guard, target, attempt, edits, selection, retained,
                               callback = std::move(callback)](const ConfigCompletion &completion) {
-            const auto &result = completion.result;
-            if (!guard) {
-                if (retained && target && callback)
+            const auto deliver = [&] {
+                if (!target || !callback)
+                    return;
+                if (target->thread() == QThread::currentThread())
                     invokeCompletion(callback, completion);
+                else
+                    QMetaObject::invokeMethod(
+                        target,
+                        [target, callback, completion] {
+                            if (target)
+                                invokeCompletion(callback, completion);
+                        },
+                        Qt::QueuedConnection);
+            };
+            // Deliver after the publication boundary even when a notification
+            // destroys the draft partway through its presentation updates.
+            const auto retainedDelivery = qScopeGuard([&] {
+                if (retained)
+                    deliver();
+            });
+            const auto &result = completion.result;
+            if (!guard)
                 return;
-            }
             guard->m_busy = false;
             if (result.status != "failed" && selection) {
                 guard->m_admitted.reset();
@@ -351,18 +369,8 @@ quint64 ConfigDraft::applySelection(const std::optional<QList<ConfigPath>> &sele
                     ConfigReadProjectionState::operation(guard->readProjection(), completion);
                 }))
                 return;
-            if (target && callback) {
-                if (target->thread() == QThread::currentThread())
-                    invokeCompletion(callback, completion);
-                else
-                    QMetaObject::invokeMethod(
-                        target,
-                        [target, callback, completion] {
-                            if (target)
-                                invokeCompletion(callback, completion);
-                        },
-                        Qt::QueuedConnection);
-            }
+            if (!retained)
+                deliver();
         }},
         attempt, selection ? edits : m_admittedEdits);
     if (prepareChanges({}))

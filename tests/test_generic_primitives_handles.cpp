@@ -5,6 +5,8 @@
 #include "configdraft.h"
 #include "configstorehandle.h"
 #include "configpendingreply_p.h"
+#include <QScopeGuard>
+#include <QSemaphore>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 
@@ -28,6 +30,9 @@ struct Fixture {
     ConfigStoreOptions options;
     std::unique_ptr<ConfigStore> store;
     std::shared_ptr<std::atomic_bool> fail = std::make_shared<std::atomic_bool>(false);
+    std::shared_ptr<std::atomic_bool> holdWrite = std::make_shared<std::atomic_bool>(false);
+    std::shared_ptr<QSemaphore> writeHeld = std::make_shared<QSemaphore>();
+    std::shared_ptr<QSemaphore> releaseWrite = std::make_shared<QSemaphore>();
     explicit Fixture(const QByteArray &generalBytes = "{\"scaleRatio\":2}",
                      const QByteArray &barBytes = "{\"position\":\"top\"}") {
         general = directory.filePath("general.json");
@@ -54,7 +59,12 @@ struct Fixture {
                            {{"runtime", {}, {}}},
                            false}};
         options.jsonFiles = {{"user", "general", general}, {"user", "bar", bar}};
-        options.fileFault = [fail = fail](const QString &phase, const QString &) {
+        options.fileFault = [fail = fail, hold = holdWrite, held = writeHeld,
+                             release = releaseWrite](const QString &phase, const QString &) {
+            if (phase == "write" && hold->exchange(false)) {
+                held->release();
+                release->acquire();
+            }
             return fail->load() && phase == "write" ? QString("handle-write-fault") : QString();
         };
         store = std::make_unique<ConfigStore>(options);
@@ -369,6 +379,64 @@ private slots:
         edit.reset();
         auto later = settle(view->observe(generation));
         QVERIFY2(!later->isError(), qPrintable(later->error().code()));
+    }
+    void retainedApplyOutlivesHeldEditor_data() {
+        QTest::addColumn<bool>("duringNotification");
+        QTest::newRow("held-write") << false;
+        QTest::newRow("completion-notify") << true;
+    }
+    void retainedApplyOutlivesHeldEditor() {
+        QFETCH(bool, duringNotification);
+        Fixture f;
+        const auto unblock = qScopeGuard([&] { f.releaseWrite->release(); });
+        QTRY_COMPARE(f.store->status(), ConfigStore::Status::Ready);
+        auto *reader = f.store->root()->scope({"general", "scaleRatio"});
+        auto opened = settle(reader->edit());
+        QVERIFY(!opened->isError());
+        std::unique_ptr<ConfigHandle> edit(opened->value().handle());
+        QVERIFY(edit);
+        edit->setParent(nullptr);
+        auto staged = settle(edit->set(7.0));
+        QVERIFY(!staged->isError());
+
+        ConfigHandleOptions options;
+        options.observe = {reader};
+        f.holdWrite->store(true);
+        std::unique_ptr<ConfigPendingReply> reply(edit->apply(options));
+        QSignalSpy finished(reply.get(), &ConfigPendingReply::finished);
+        QTRY_VERIFY(f.writeHeld->available() == 1);
+        if (duringNotification) {
+            auto *draft = edit->findChild<ConfigDraft *>();
+            QVERIFY(draft);
+            connect(draft, &ConfigDraft::stateChanged, this, [&] {
+                auto closing = std::move(edit);
+                closing.reset();
+                QCoreApplication::sendPostedEvents(reply.get(), QEvent::MetaCall);
+                QCOMPARE(finished.count(), 0);
+            });
+        } else {
+            edit.reset();
+            // Still behind the explicit write gate: no terminal result yet.
+            QCoreApplication::sendPostedEvents(reply.get(), QEvent::MetaCall);
+            QVERIFY(!reply->isFinished());
+            QCOMPARE(finished.count(), 0);
+        }
+        f.releaseWrite->release();
+
+        QTRY_COMPARE(finished.count(), 1);
+        QVERIFY(!edit);
+        QVERIFY2(!reply->isError(), qPrintable(reply->error().code()));
+        QVERIFY(reply->value().write());
+        QCOMPARE(reply->value().write()->status, QString("saved"));
+        QVERIFY(reply->value().generation().valid());
+        QVERIFY(!reply->value().snapshot().valid());
+        QCOMPARE(reply->value().observations().size(), 1);
+        QCOMPARE(reply->value().observations().first().snapshot().selectedState({}).value(),
+                 QVariant(7.0));
+        QVERIFY(compat::bytes(f.general).contains("7"));
+        auto observed = settle(reader->observe(reply->value().generation()));
+        QVERIFY2(!observed->isError(), qPrintable(observed->error().code()));
+        QCOMPARE(observed->value().snapshot().selectedState({}).value(), QVariant(7.0));
     }
     void selectedApplyLeavesDisjointEdits() {
         Fixture f;

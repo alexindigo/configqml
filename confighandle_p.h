@@ -94,7 +94,8 @@ private:
     void metadata();
     ConfigPendingReply *start(ConfigReplyWriter writer, bool barrier,
                               const ConfigObservation &after, const ConfigHandleOptions &options,
-                              ConfigHandle *opened = nullptr);
+                              ConfigHandle *opened = nullptr,
+                              QObject *retainedWriterOwner = nullptr);
     ConfigPendingReply *refuse(const QString &code, const QString &phase) const;
     ConfigPendingReply *remove(const ConfigHandleOptions &options);
     ConfigPendingReply *apply(const ConfigHandleOptions &options);

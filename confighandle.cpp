@@ -492,7 +492,7 @@ ConfigPendingReply *ConfigHandleState::refuse(const QString &code, const QString
 ConfigPendingReply *ConfigHandleState::start(ConfigReplyWriter writer, bool barrier,
                                              const ConfigObservation &after,
                                              const ConfigHandleOptions &options,
-                                             ConfigHandle *opened) {
+                                             ConfigHandle *opened, QObject *retainedWriterOwner) {
     QList<ConfigReadProjection *> views;
     for (auto *handle : options.observe) {
         auto *view = handle ? handle->d->projection() : nullptr;
@@ -526,7 +526,7 @@ ConfigPendingReply *ConfigHandleState::start(ConfigReplyWriter writer, bool barr
         };
     }
     return ConfigPendingReplyState::operation(initiator, barrier, after, views, std::move(writer),
-                                              opened, shape);
+                                              opened, shape, nullptr, retainedWriterOwner);
 }
 ConfigPendingReply *ConfigHandleState::observe(const ConfigObservation &after,
                                                const ConfigHandleOptions &options) {
@@ -797,7 +797,8 @@ ConfigPendingReply *ConfigHandleState::apply(const ConfigHandleOptions &options)
     case Owner::Preview:
         break;
     }
-    return start(std::move(writer), !frozen(), {}, options);
+    return start(std::move(writer), !frozen(), {}, options, nullptr,
+                 frozen() ? owningStore.data() : nullptr);
 }
 ConfigPendingReply *ConfigHandleState::discard(const ConfigHandleOptions &options) {
     if (!alive())

@@ -39,12 +39,11 @@ public:
     // Views are captured and validated before the writer admits anything. A
     // barrier initiator is synchronized after the write; a staged (frozen)
     // initiator contributes its installed candidate instead.
-    static ConfigPendingReply *operation(ConfigReadProjection *initiator, bool barrier,
-                                         const ConfigObservation &after,
-                                         const QList<ConfigReadProjection *> &observe,
-                                         ConfigReplyWriter writer, ConfigHandle *opened = nullptr,
-                                         const ConfigObservation &shape = {},
-                                         QObject *parent = nullptr);
+    static ConfigPendingReply *
+    operation(ConfigReadProjection *initiator, bool barrier, const ConfigObservation &after,
+              const QList<ConfigReadProjection *> &observe, ConfigReplyWriter writer,
+              ConfigHandle *opened = nullptr, const ConfigObservation &shape = {},
+              QObject *parent = nullptr, QObject *retainedWriterOwner = nullptr);
     static ConfigPendingReply *refuse(const QString &code, const QString &phase,
                                       QObject *parent = nullptr);
 
@@ -56,10 +55,12 @@ private:
     void staged();
     void observeViews();
     void acquired(qsizetype index, const ConfigReadResult &result);
+    void viewLost(qsizetype index);
     void settle(const QString &code = {}, const QString &phase = {});
     void finish();
     ConfigPendingReply *q;
     bool finished = false, queued = false, barrier = true;
+    bool retainedWriter = false, awaitingWriter = false, readerLost = false;
     ConfigReplyError error;
     ConfigReplyValue value;
     ConfigReplyValueData captured;
