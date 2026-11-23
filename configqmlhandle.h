@@ -76,7 +76,9 @@ private:
     ConfigQmlHandle *wrap(ConfigHandle *handle);
     ConfigQmlPendingReply *reply(ConfigPendingReply *native) const;
     ConfigQmlPendingReply *refuse(const QString &code, const QString &phase) const;
-    bool options(const QJSValue &value, ConfigHandleOptions &result) const;
+    using Verb = ConfigPendingReply *(ConfigHandle::*)(const ConfigHandleOptions &);
+    ConfigQmlPendingReply *invoke(const QJSValue &options, Verb verb,
+                                  const QJSValue *value = nullptr, const QVariant *after = nullptr);
     QJSValue tree(const QString &kind);
     QPointer<ConfigHandle> m_handle;
     QPointer<QJSEngine> m_engine;
