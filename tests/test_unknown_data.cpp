@@ -4,6 +4,7 @@
 #include "configjsoncodec.h"
 #include "configoverlayeditor.h"
 #include "storeprobe.h"
+#include "eventwait.h"
 #include <QTemporaryDir>
 #include <QSignalSpy>
 #include <QFileInfo>
@@ -680,7 +681,10 @@ private slots:
         QList<ConfigError> warnings;
         connect(&store, &ConfigStore::sourceWarning, this,
                 [&](const auto &w) { warnings.append(w); });
-        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        // Startup is an acquisition outcome, not a five-second disk budget.
+        QVERIFY(test::awaitEvent(&store, &ConfigStore::statusChanged,
+                                 [&] { return store.status() != ConfigStore::Status::Loading; }));
+        QCOMPARE(store.status(), ConfigStore::Status::Ready);
         QVERIFY(store.setUser({"n"}, 2).accepted);
         const QByteArray foreign = "{\"n\":1,\"foreign\":18446744073709551615}";
         compat::put(path, foreign);

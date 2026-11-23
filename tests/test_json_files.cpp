@@ -2,6 +2,7 @@
 #include "fileoptions.h"
 #include "storeprobe.h"
 #include "modelbudgets.h"
+#include "eventwait.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFile>
@@ -10,6 +11,7 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <QJsonDocument>
@@ -29,6 +31,20 @@ static QByteArray readFile(const QString &path) {
 class JsonFilesTest : public QObject {
     Q_OBJECT
 private slots:
+    void eventWaitRetainsOutcomeChecks() {
+        QTimer events;
+        int delivered = 0;
+        connect(&events, &QTimer::timeout, this, [&] { ++delivered; });
+        events.start(0);
+        QVERIFY(test::awaitEvent(&events, &QTimer::timeout, [&] { return delivered == 3; }));
+        QCOMPARE(delivered, 3); // Earlier signals cannot manufacture completion.
+        events.stop();
+        QVERIFY(test::awaitEvent(&events, &QTimer::timeout, [&] { return delivered == 3; }));
+        QCOMPARE(delivered, 3); // An already-installed outcome needs no new event.
+        auto *lost = new QTimer;
+        QMetaObject::invokeMethod(lost, [lost] { delete lost; }, Qt::QueuedConnection);
+        QVERIFY(!test::awaitEvent(lost, &QTimer::timeout, [] { return false; }));
+    }
     void borrowedBackendKeys() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
@@ -431,7 +447,11 @@ private slots:
             if (!worstWork.valid || sample.charged() > worstWork.charged())
                 worstWork = sample;
         }
-        QTRY_COMPARE_WITH_TIMEOUT(done.size(), 200, 15000);
+        // This waits for 100 durable saves; disk scheduling is not the GUI work
+        // budget below. Retain the exact completion and fan-out assertions.
+        QVERIFY(
+            test::awaitEvent(&store, &ConfigStore::completed, [&] { return done.size() >= 200; }));
+        QCOMPARE(done.size(), 200);
         QTest::qWait(100); // Deliver actual file/directory hints.
         bool observed = false;
         quint64 targetReads = 0, otherReads = 0;
