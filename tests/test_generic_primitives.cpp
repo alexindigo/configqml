@@ -1296,20 +1296,27 @@ private slots:
         QTest::addColumn<bool>("token");
         QTest::addColumn<bool>("newerInput");
         QTest::addColumn<bool>("acquisitionFailure");
+        QTest::addColumn<bool>("publicHandle");
         for (bool ownerFirst : {false, true}) {
             const auto suffix = ownerFirst ? "-owner-first" : "-base-first";
             QTest::newRow(qPrintable(QString("changed") + suffix))
-                << 3 << ownerFirst << true << true << false << false;
+                << 3 << ownerFirst << true << true << false << false << false;
             QTest::newRow(qPrintable(QString("equal") + suffix))
-                << 4 << ownerFirst << true << true << false << false;
+                << 4 << ownerFirst << true << true << false << false << false;
             QTest::newRow(qPrintable(QString("no-edit") + suffix))
-                << 4 << ownerFirst << false << true << false << false;
+                << 4 << ownerFirst << false << true << false << false << false;
             QTest::newRow(qPrintable(QString("no-token") + suffix))
-                << 3 << ownerFirst << true << false << false << false;
+                << 3 << ownerFirst << true << false << false << false << false;
             QTest::newRow(qPrintable(QString("newer-input") + suffix))
-                << 3 << ownerFirst << true << true << true << false;
+                << 3 << ownerFirst << true << true << true << false << false;
             QTest::newRow(qPrintable(QString("read-failure") + suffix))
-                << 3 << ownerFirst << true << true << false << true;
+                << 3 << ownerFirst << true << true << false << true << false;
+            QTest::newRow(qPrintable(QString("handle-changed") + suffix))
+                << 3 << ownerFirst << true << true << true << false << true;
+            QTest::newRow(qPrintable(QString("handle-equal") + suffix))
+                << 4 << ownerFirst << true << true << false << false << true;
+            QTest::newRow(qPrintable(QString("handle-no-edit") + suffix))
+                << 4 << ownerFirst << false << true << false << false << true;
         }
     }
     void composedSelectedCoverage_data() {
@@ -1498,6 +1505,7 @@ private slots:
         QFETCH(bool, token);
         QFETCH(bool, newerInput);
         QFETCH(bool, acquisitionFailure);
+        QFETCH(bool, publicHandle);
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
         const auto ownerFile = directory.filePath("owner.json");
@@ -1562,6 +1570,72 @@ private slots:
         QCOMPARE(writerResult.status, QString("opened"));
         auto *writer = ConfigStoreTestAccess::overlay(owner, writerResult.editorId);
         QVERIFY(writer);
+        if (publicHandle) {
+            auto *readerHandle = runtime->root()->scope({"count"});
+            auto *writerHandle = writer->root();
+            if (edit) {
+                std::unique_ptr<ConfigPendingReply> staged(
+                    writerHandle->scope({"count"})->set(value));
+                QTRY_VERIFY(staged->isFinished());
+                QVERIFY2(!staged->isError(), qPrintable(staged->error().code()));
+            }
+            QList<ConfigWorkerPacket> held;
+            const std::function<void()> onHeld;
+            QObject scheduler;
+            ConfigStoreTestAccess::holdReader(owner, runtime->editorId(), &scheduler, held, onHeld);
+            const auto exactCount = [&] {
+                qsizetype count = 0;
+                for (const auto &packet : std::as_const(held))
+                    for (const auto &presentation : packet.overlays)
+                        count += presentation.read.requestId != 0;
+                return count;
+            };
+            std::unique_ptr<ConfigPendingReply> reply(writerHandle->apply({{readerHandle}}));
+            QSignalSpy finished(reply.get(), &ConfigPendingReply::finished);
+            QTRY_COMPARE(exactCount(), 1);
+            QVERIFY(!reply->isFinished());
+            QCOMPARE(readerHandle->value().toInt(), 4);
+            QVERIFY(compat::bytes(ownerFile).contains("\"count\":" + QByteArray::number(value)));
+            if (newerInput)
+                QVERIFY(runtime->setValue({"count"}, 7).accepted);
+            const auto older = held;
+            ConfigStoreTestAccess::releaseReader(owner, held);
+            QTRY_COMPARE(finished.size(), 1);
+            QVERIFY2(!reply->isError(), qPrintable(reply->error().code()));
+            const auto receipt = reply->value();
+            QVERIFY(receipt.generation().valid());
+            QVERIFY(receipt.write());
+            const auto reads = receipt.observations();
+            QCOMPARE(reads.size(), 1);
+            QCOMPARE(reads.first().status(), QString("observed"));
+            const auto acknowledged = reads.first().snapshot().selectedState({}).value().toInt();
+            QCOMPARE(acknowledged, value);
+            QCOMPARE(readerHandle->value().toInt(), newerInput ? 7 : value);
+            if (newerInput) {
+                QCOMPARE(reads.first().pending(), QList<ConfigPath>{{}});
+                QCOMPARE(compat::request(owner,
+                                         [&] { return runtime->setValue({"count"}, 7).requestId; })
+                             .status,
+                         QString("accepted"));
+                ConfigStoreTestAccess::releaseReader(owner, held);
+                QCOMPARE(readerHandle->snapshot().selectedState({}).value().toInt(), 7);
+            }
+            QProcess consumer;
+            consumer.start(QCoreApplication::applicationFilePath(),
+                           {"--inert-daemon", QString::number(acknowledged)});
+            QVERIFY(consumer.waitForFinished(10000));
+            QCOMPARE(consumer.exitStatus(), QProcess::NormalExit);
+            QCOMPARE(consumer.exitCode(), 0);
+            QCOMPARE(consumer.readAllStandardOutput().trimmed(),
+                     "DAEMON_ARGV " + QByteArray::number(value));
+            for (const auto &packet : older)
+                ConfigStoreTestAccess::inject(owner, packet);
+            QCoreApplication::processEvents();
+            QCOMPARE(readerHandle->value().toInt(), newerInput ? 7 : value);
+            QCOMPARE(finished.size(), 1);
+            QCOMPARE(exactCount(), 0);
+            return;
+        }
         auto *writerProjection = writer->readProjection();
         QSignalSpy candidates(writerProjection, &ConfigReadProjection::stateChanged);
         const auto inputCount = owner.inputs().size();

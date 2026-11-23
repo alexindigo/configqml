@@ -7,10 +7,13 @@
 #include "configstorehandle.h"
 #include "configpendingreply_p.h"
 #include "storeprobe.h"
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QScopeGuard>
 #include <QSemaphore>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QThread>
 
 using namespace configqml;
 using D = ConfigDescriptor;
@@ -37,7 +40,8 @@ struct Fixture {
     std::shared_ptr<QSemaphore> releaseWrite = std::make_shared<QSemaphore>();
     explicit Fixture(const QByteArray &generalBytes = "{\"scaleRatio\":2}",
                      const QByteArray &barBytes = "{\"position\":\"top\"}",
-                     std::function<QString(const ConfigInput &)> admission = {}) {
+                     std::function<QString(const ConfigInput &)> admission = {},
+                     std::function<QString(const QString &, const QString &)> extraFault = {}) {
         general = directory.filePath("general.json");
         bar = directory.filePath("bar.json");
         compat::put(general, generalBytes);
@@ -63,14 +67,17 @@ struct Fixture {
                            {{"runtime", {}, {}}},
                            false}};
         options.jsonFiles = {{"user", "general", general}, {"user", "bar", bar}};
-        options.fileFault = [fail = fail, hold = holdWrite, held = writeHeld,
-                             release = releaseWrite](const QString &phase, const QString &) {
-            if (phase == "write" && hold->exchange(false)) {
-                held->release();
-                release->acquire();
-            }
-            return fail->load() && phase == "write" ? QString("handle-write-fault") : QString();
-        };
+        options.fileFault =
+            [fail = fail, hold = holdWrite, held = writeHeld, release = releaseWrite,
+             extraFault = std::move(extraFault)](const QString &phase, const QString &file) {
+                if (phase == "write" && hold->exchange(false)) {
+                    held->release();
+                    release->acquire();
+                }
+                if (fail->load() && phase == "write")
+                    return QString("handle-write-fault");
+                return extraFault ? extraFault(phase, file) : QString();
+            };
         store = std::make_unique<ConfigStore>(options);
     }
 };
@@ -704,6 +711,160 @@ private slots:
         auto recovered = settle(reader->observe(applied->value().generation()));
         QVERIFY2(!recovered->isError(), qPrintable(recovered->error().code()));
         QCOMPARE(reader->health(), QString("ok"));
+    }
+    void failedPublicationDoesNotAcknowledge_data() {
+        QTest::addColumn<QString>("faultPhase");
+        QTest::addColumn<QString>("publicationState");
+        QTest::newRow("partial") << QString("write") << QString("partial");
+        QTest::newRow("uncertain") << QString("readback") << QString("uncertain");
+    }
+    void failedPublicationDoesNotAcknowledge() {
+        QFETCH(QString, faultPhase);
+        QFETCH(QString, publicationState);
+        Fixture f("{\"scaleRatio\":2}", "{\"position\":\"top\"}", {},
+                  [&](const QString &phase, const QString &file) {
+                      return phase == faultPhase && file.endsWith("general.json")
+                                 ? QString("handle-publication-fault")
+                                 : QString();
+                  });
+        QTRY_COMPARE(f.store->status(), ConfigStore::Status::Ready);
+        auto *root = f.store->root();
+        auto opened = settle(root->edit());
+        QVERIFY(!opened->isError());
+        auto *edit = opened->value().handle();
+        QList<ConfigHandleEdit> edits{{{"general", "scaleRatio"}, 8.0}};
+        // A known successful shard makes a multi-shard failure partial, even
+        // if another shard is uncertain. Isolate the uncertainty in one shard.
+        if (publicationState == "partial")
+            edits.prepend({{"bar", "position"}, "right"});
+        QVERIFY(!settle(edit->set(edits))->isError());
+        // Capture the store's corresponding operation receipt and the actual
+        // terminal handle signal without assuming success from either file.
+        QSignalSpy writes(f.store.get(), &ConfigStore::completed);
+        std::unique_ptr<ConfigPendingReply> reply(edit->apply({{root}}));
+        QSignalSpy finished(reply.get(), &ConfigPendingReply::finished);
+        std::optional<ConfigResult> callbackReceipt;
+        int callbacks = 0;
+        connect(reply.get(), &ConfigPendingReply::finished, this, [&] {
+            ++callbacks;
+            callbackReceipt = reply->value().write();
+        });
+        QTRY_COMPARE(finished.size(), 1);
+        QVERIFY(reply->isError());
+        QCOMPARE(reply->error().phase(), QString("publication"));
+        QCOMPARE(reply->error().code(), QString("handle-publication-fault"));
+        const auto terminal = reply->value();
+        const auto write = terminal.write();
+        QVERIFY(write);
+        QVERIFY(callbackReceipt);
+        QCOMPARE(callbackReceipt->requestId, write->requestId);
+        QCOMPARE(callbackReceipt->publicationState, publicationState);
+        QCOMPARE(write->status, QString("failed"));
+        QCOMPARE(write->publicationState, publicationState);
+        QVERIFY(!terminal.snapshot().valid());
+        for (const auto &read : terminal.observations())
+            QVERIFY(read.status() != "observed");
+        QList<ConfigResult> matching;
+        for (const auto &arguments : std::as_const(writes)) {
+            const auto result = qvariant_cast<ConfigResult>(arguments.first());
+            if (result.requestId == write->requestId)
+                matching.append(result);
+        }
+        QCOMPARE(matching.size(), 1);
+        QCOMPARE(matching.first().publicationState, write->publicationState);
+        QCOMPARE(matching.first().coveredRevisions, write->coveredRevisions);
+        QCOMPARE(
+            QJsonDocument::fromJson(compat::bytes(f.bar)).object().value("position").toString(),
+            publicationState == "partial" ? QString("right") : QString("top"));
+        QCOMPARE(
+            QJsonDocument::fromJson(compat::bytes(f.general)).object().value("scaleRatio").toInt(),
+            faultPhase == "write" ? 2 : 8);
+        QCoreApplication::processEvents();
+        QCOMPARE(finished.size(), 1);
+        QCOMPARE(callbacks, 1);
+    }
+    void handleObservationAndCrossThreadCallback() {
+        Fixture f;
+        QTRY_COMPARE(f.store->status(), ConfigStore::Status::Ready);
+        auto *root = f.store->root();
+        auto *scale = root->scope({"general", "scaleRatio"});
+        QVERIFY(!settle(scale->set(3.0))->isError());
+        auto applied = settle(scale->apply());
+        QVERIFY(!applied->isError());
+        const auto generation = applied->value().generation();
+        QVERIFY(generation.valid());
+        auto *projection = f.store->readProjection();
+        QList<ConfigReadResult> callbacks;
+        bool onContextThread = false;
+        bool callbackFollowedSignal = false;
+        quint64 callbackId = 0;
+        QObject collector;
+        QList<ConfigWorkerPacket> held;
+        const std::function<void()> onHeld;
+        QObject scheduler;
+        ConfigStoreTestAccess::holdReadReplies(*f.store, &scheduler, held, onHeld);
+
+        QThread thread;
+        auto *context = new QObject;
+        context->moveToThread(&thread);
+        connect(&thread, &QThread::finished, context, &QObject::deleteLater);
+        thread.start();
+        const auto join = qScopeGuard([&] {
+            thread.quit();
+            thread.wait();
+        });
+        QSignalSpy signalsSeen(projection, &ConfigReadProjection::completed);
+        auto emitted = std::make_shared<std::atomic<quint64>>(0);
+        connect(projection, &ConfigReadProjection::completed, &collector,
+                [emitted, &callbackId](const ConfigReadResult &read) {
+                    if (read.requestId() == callbackId)
+                        emitted->store(read.requestId());
+                });
+        callbackId = projection->synchronize(
+            generation, context, [&, emitted](const ConfigReadResult &read) {
+                const bool correctThread = QThread::currentThread() == &thread;
+                const bool signalFirst = emitted->load() == read.requestId();
+                QMetaObject::invokeMethod(
+                    &collector,
+                    [&, read, correctThread, signalFirst] {
+                        callbacks.append(read);
+                        onContextThread = correctThread;
+                        callbackFollowedSignal = signalFirst;
+                    },
+                    Qt::QueuedConnection);
+            });
+        // A separate dead context suppresses only its callback, not the signal
+        // or the public handle that independently waits for the same write.
+        int discardedCallbacks = 0;
+        auto doomed = std::make_unique<QObject>();
+        const auto deadId = projection->synchronize(
+            generation, doomed.get(), [&](const ConfigReadResult &) { ++discardedCallbacks; });
+        std::unique_ptr<ConfigPendingReply> reply(root->whenCurrent(generation));
+        QSignalSpy finished(reply.get(), &ConfigPendingReply::finished);
+        QTRY_COMPARE(held.size(), 3);
+        doomed.reset();
+        QVERIFY(!reply->isFinished());
+        QVERIFY(signalsSeen.isEmpty());
+        QVERIFY(callbacks.isEmpty());
+        ConfigStoreTestAccess::releaseReader(*f.store, held);
+        QTRY_COMPARE(finished.size(), 1);
+        QTRY_COMPARE(callbacks.size(), 1);
+        QVERIFY(onContextThread);
+        QVERIFY(callbackFollowedSignal);
+        QCOMPARE(discardedCallbacks, 0);
+        // The root handle uses this same projection; its own read emits the
+        // third completion before the handle's separate terminal signal.
+        QCOMPARE(signalsSeen.size(), 3);
+        const auto signal = qvariant_cast<ConfigReadResult>(signalsSeen[0][0]);
+        QCOMPARE(signal.requestId(), callbackId);
+        QCOMPARE(qvariant_cast<ConfigReadResult>(signalsSeen[1][0]).requestId(), deadId);
+        QCOMPARE(callbacks.first().requestId(), signal.requestId());
+        QCOMPARE(callbacks.first().observation(), signal.observation());
+        QCOMPARE(callbacks.first().status(), QString("observed"));
+        QVERIFY(!reply->isError());
+        const ConfigPath path{"general", "scaleRatio"};
+        QCOMPARE(callbacks.first().snapshot().selectedState(path).value().toDouble(), 3.0);
+        QCOMPARE(reply->value().snapshot().selectedState(path).value().toDouble(), 3.0);
     }
     void readOnlyAndFrozenCapabilities() {
         Fixture f;

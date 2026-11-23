@@ -121,6 +121,80 @@ private slots:
         QCOMPARE(root->property("bound").toInt(), 7);
         QCOMPARE(store.value({"general", "other"}).toInt(), 3);
     }
+    void lateFieldPresenceNotifications() {
+        using D = ConfigDescriptor;
+        D field(D::Type::SafeInteger);
+        field.optional = true;
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema = ConfigSchema(D::group({{"count", field}}));
+        options.layers = {{"user",
+                           ConfigLayerKind::File,
+                           ConfigAdmissionPolicy::FieldFallback,
+                           {{"settings", {}, {}}},
+                           true}};
+        ConfigStore store(options);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto *native = store.root()->scope({"count"});
+        QSignalSpy nativeNotifies(native, &ConfigHandle::valueChanged);
+        auto wait = [](ConfigPendingReply *pending) {
+            std::unique_ptr<ConfigPendingReply> reply(pending);
+            QTRY_VERIFY(reply->isFinished());
+            QVERIFY2(!reply->isError(), qPrintable(reply->error().code()));
+        };
+        // First prepare and publish the field while no QML property is bound.
+        wait(native->set(5));
+        wait(native->remove());
+        QCOMPARE(nativeNotifies.size(), 2);
+        QVERIFY(!native->present());
+
+        QQmlEngine engine;
+        auto *config = ConfigQmlHandle::owned(store.root(), &engine, &engine, "late-field");
+        QQmlComponent component(&engine);
+        component.setData(R"QML(
+            import QtQml
+            QtObject {
+                required property var config
+                readonly property var field: config.fields.count
+                readonly property int bound: field.present ? field.value : -1
+            }
+        )QML",
+                          QUrl("file:late-field.qml"));
+        std::unique_ptr<QObject> root(
+            component.createWithInitialProperties({{"config", QVariant::fromValue(config)}}));
+        QVERIFY2(root, qPrintable(component.errorString()));
+        auto *qmlField =
+            qobject_cast<ConfigQmlHandle *>(root->property("field").value<QObject *>());
+        QVERIFY(qmlField);
+        QCOMPARE(root->property("bound").toInt(), -1);
+        QSignalSpy qmlNotifies(qmlField, &ConfigQmlHandle::valueChanged);
+        QSignalSpy bindingNotifies(root.get(), SIGNAL(boundChanged()));
+        QVERIFY(bindingNotifies.isValid());
+        nativeNotifies.clear();
+        int expected = 0;
+        auto check = [&](int value) {
+            QCOMPARE(root->property("bound").toInt(), value);
+            QCOMPARE(nativeNotifies.size(), expected);
+            QCOMPARE(qmlNotifies.size(), expected);
+            QCOMPARE(bindingNotifies.size(), expected);
+        };
+        // Repeated prepare/read and equal/repeated writes must not manufacture
+        // value notifications, even as observation/receipt state advances.
+        for (int value : {0, 7}) {
+            wait(native->set(value));
+            ++expected;
+            check(value);
+            wait(native->set(value));
+            wait(native->read());
+            check(value);
+            wait(native->remove());
+            ++expected;
+            check(-1);
+            wait(native->remove());
+            wait(native->read());
+            check(-1);
+        }
+    }
     void sketches() {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
