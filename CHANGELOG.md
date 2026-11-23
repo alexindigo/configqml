@@ -2,6 +2,50 @@
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-11-23
+
+### Added
+
+- Native and QML code can select declared leaves through generated handles,
+  stage Set and RemoveOverride operations, and wait for one or more readers to
+  observe an Apply. The reply distinguishes persistence from observation;
+  consumer activation remains the application's responsibility.
+- Selected snapshots expose presence, authored intent, effective value and
+  generation. Read-only and preview handles can synchronize without writing.
+
+### Fixed
+
+- Closing an editor no longer ends an admitted Apply early. If a requested
+  reader disappears, the reply still reports the actual write outcome, separately
+  from the observation failure.
+- Checked batches install all eligible edits before notifying the first leaf.
+  Reentrant callbacks see the complete batch, a rejected later edit leaves no
+  partial intent, and a callback may safely destroy a sibling handle.
+- Scoped handle lookup and composed observation no longer reuse an unrelated
+  selection's authority or coverage. Transitive overlay reads wait for the
+  correct source cut, and retired worker owners no longer receive work.
+
+### Compatibility
+
+- Existing store, editor, profile and model APIs remain supported. The private
+  QML adapter still requires Qt 6.12.0; native Core links only QtCore. The SONAME
+  stays at `.so.0.5` and the CMake package retains SameMinorVersion.
+- The [reviewed weak-symbol list](https://github.com/alexindigo/configqml/blob/v0.5.4/docs/weak-exports.md)
+  names each exact exception. Every accepted loss was weak in the frozen baseline
+  and unreferenced by audited consumers. No strong symbol, vtable or typeinfo
+  exception was accepted.
+
+### Performance
+
+- Against 0.5.3 at 128 leaves and 16 sources, mixed save completion went from
+  0.966 to 0.992 ms (1.058x median paired ratio; 95% bootstrap interval
+  1.005-1.083), and isolated completion from 0.949 to 1.022 ms (1.066x;
+  1.014-1.101). The originating orchestrator accepted this tens-of-microseconds
+  cost. At 512 leaves and one source, mixed and isolated saves were 86% and 87%
+  faster, respectively. The 128/16/1 fixture uses 20 alternating pairs and the
+  median of nine saves per run; it fails above 1.15x for either workflow. This
+  guard does not change the existing library timing budgets.
+
 ## [0.5.3] - 2026-11-21
 
 ### Fixed
