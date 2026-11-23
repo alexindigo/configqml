@@ -21,5 +21,6 @@ if(CONFIGQML_MEASURE_HANDLES)
     target_link_libraries(layer-structure PRIVATE
         "${CONFIGQML_BUILD}/libconfigqml_core.so.0.5" Qt6::Core Qt6::Test ${CMAKE_DL_LIBS})
     target_compile_definitions(layer-structure PRIVATE
-        CONFIGQML_PUT_VALUE_SYMBOL="${CONFIGQML_PUT_VALUE_SYMBOL}")
+        CONFIGQML_PUT_VALUE_SYMBOL="${CONFIGQML_PUT_VALUE_SYMBOL}"
+        CONFIGQML_STARTS_WITH_SYMBOL="${CONFIGQML_STARTS_WITH_SYMBOL}")
 endif()

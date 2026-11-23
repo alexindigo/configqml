@@ -20,6 +20,81 @@ using T = D::Type;
 class GenericPrimitivesTest : public QObject {
     Q_OBJECT
 private slots:
+    void selectionAncestorIndexPreservesValidation() {
+        const QString opaque = QString("field") + QChar(0x1e) + QChar(0x1f) + "/.__proto__";
+        auto record = D::leaf(T::Record, QVariantMap{{"inside", 1}});
+        record.fields = {{"inside", D::leaf(T::SafeInteger, 1)}};
+        const ConfigSchema schema(
+            D::group({{"a", D::group({{"b", D::leaf(T::SafeInteger, 1)},
+                                      {opaque, D::leaf(T::String, QString())}})},
+                      {"atomic", record},
+                      {"outside", D::leaf(T::Boolean, false)}}));
+        // Retain the previous validator as a finite acceptance oracle, including
+        // invalid selections' partial facts, canonical ordering and both options.
+        const auto previous = [&](const QList<ConfigPath> &paths, const QList<ConfigPath> &allowed,
+                                  bool emptyMeansAll, bool rejectDuplicates) {
+            QPair<QString, QList<ConfigPath>> result;
+            QSet<ConfigPath> seen, included;
+            if (!schema.valid() || (paths.isEmpty() && !emptyMeansAll))
+                result.first = "selection";
+            for (const auto &query : paths) {
+                if (!schema.descriptor(query) || (rejectDuplicates && seen.contains(query))) {
+                    result.first = "selection";
+                    break;
+                }
+                seen.insert(ownPath(query));
+                bool found = false;
+                for (const auto &leaf : allowed)
+                    if (startsWith(leaf, query)) {
+                        included.insert(leaf);
+                        found = true;
+                    }
+                if (!found)
+                    result.first = "selection";
+            }
+            for (const auto &leaf : schema.leaves())
+                if (allowed.contains(leaf) &&
+                    ((paths.isEmpty() && emptyMeansAll) || included.contains(leaf)))
+                    result.second.append(leaf);
+            if (result.second.isEmpty())
+                result.first = "selection";
+            return result;
+        };
+        const QList<ConfigPath> queries{{},
+                                        {"a"},
+                                        {"a", "b"},
+                                        {"a", opaque},
+                                        {"atomic"},
+                                        {"atomic", "inside"},
+                                        {"outside"},
+                                        {"unknown"},
+                                        {"a", "missing"}};
+        QList<QList<ConfigPath>> selections{{}};
+        for (const auto &a : queries) {
+            selections.append(QList<ConfigPath>{a});
+            for (const auto &b : queries)
+                selections.append(QList<ConfigPath>{a, b});
+        }
+        const auto leaves = schema.leaves();
+        for (int mask = 0; mask < (1 << leaves.size()); ++mask) {
+            QList<ConfigPath> allowed;
+            for (qsizetype i = leaves.size(); i > 0; --i)
+                if (mask & (1 << (i - 1)))
+                    allowed.append(leaves[i - 1]);
+            for (bool emptyMeansAll : {false, true})
+                for (bool rejectDuplicates : {false, true})
+                    for (const auto &paths : selections) {
+                        const auto expected =
+                            previous(paths, allowed, emptyMeansAll, rejectDuplicates);
+                        const auto actual = ConfigSelection::capture(
+                            schema, paths, allowed, ConfigSelection::Target::UserLayer, "selection",
+                            emptyMeansAll, rejectDuplicates);
+                        QCOMPARE(actual.error, expected.first);
+                        QCOMPARE(actual.leaves, expected.second);
+                        QVERIFY(actual.matchesSchema(schema));
+                    }
+        }
+    }
     void selectedProjectionPreflightsOnlyItsSources() {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());

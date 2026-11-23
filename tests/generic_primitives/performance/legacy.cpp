@@ -61,7 +61,8 @@ private slots:
         auto *draft = store.draft();
         QVERIFY(draft && draft->valid());
         const ConfigPath leaf{"group0", "field0"};
-        QJsonArray reset, resetDispatch, setters, completion, getter, notification;
+        QJsonArray reset, resetDispatch, setters, completion, isolatedCompletion, getter,
+            notification;
         for (int sample = 0; sample < 9; ++sample) {
             QEventLoop loop;
             quint64 id = 0;
@@ -118,19 +119,52 @@ private slots:
             for (int query = 0; query < 10000; ++query)
                 QVERIFY(draft->presentation(leaf).isValid());
             getter.append(QString::number(timer.nsecsElapsed()));
+            // Keep the original combined completion above: Discard now captures
+            // selected facts asynchronously. Also measure a following ordinary
+            // write after that captured work has actually finished, using only
+            // the same old public APIs in both builds.
+            notices = 0;
+            connections.clear();
+            for (auto *view : views)
+                connections.append(connect(view, &ConfigStoreHandle::valuesChanged, &store,
+                                           [&](const QList<ConfigPath> &changed) {
+                                               notices += changed.contains({"field0"});
+                                           }));
+            QEventLoop isolated;
+            complete = false;
+            QTimer::singleShot(10000, &isolated, &QEventLoop::quit);
+            timer.restart();
+            QVERIFY(store
+                        .setUser(leaf, 100 + sample, &isolated,
+                                 [&](const ConfigResult &value) {
+                                     consumerTime = timer.nsecsElapsed();
+                                     complete = value.status != "failed";
+                                     isolated.quit();
+                                 })
+                        .accepted);
+            isolated.exec();
+            QVERIFY(complete);
+            isolatedCompletion.append(QString::number(consumerTime));
+            QCOMPARE(notices, readers);
+            for (auto connection : connections)
+                disconnect(connection);
+            for (auto *view : views)
+                QCOMPARE(view->value({"field0"}).toInt(), 100 + sample);
             // The next Reset needs an explicitly rebased frozen session after
             // the ordinary store write above. Do not turn conflict into timing.
             QVERIFY(draft->discard());
         }
-        const QJsonObject measurement{{"leaves", leaves},
-                                      {"sources", sources},
-                                      {"readers", readers},
-                                      {"reset_dispatch_ns", resetDispatch},
-                                      {"reset_e2e_ns", reset},
-                                      {"set_ingress_ns", setters},
-                                      {"set_completion_including_consumers_ns", completion},
-                                      {"cached_getter_10000_ns", getter},
-                                      {"reader_value_notifications", notification}};
+        const QJsonObject measurement{
+            {"leaves", leaves},
+            {"sources", sources},
+            {"readers", readers},
+            {"reset_dispatch_ns", resetDispatch},
+            {"reset_e2e_ns", reset},
+            {"set_ingress_ns", setters},
+            {"set_completion_including_consumers_ns", completion},
+            {"isolated_set_completion_including_consumers_ns", isolatedCompletion},
+            {"cached_getter_10000_ns", getter},
+            {"reader_value_notifications", notification}};
         qInfo().noquote() << "LEGACY_PERFORMANCE_SPAN"
                           << QJsonDocument(measurement).toJson(QJsonDocument::Compact);
     }

@@ -1,14 +1,24 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Count the actual old per-leaf rebuilding boundary, not a timing proxy.
 #include "configlayers.h"
+#include "configselection_p.h"
 #include <QTest>
 #include <dlfcn.h>
 #include <limits>
 
 namespace {
 thread_local quint64 individualWrites = 0;
-}
+thread_local quint64 prefixScans = 0;
+} // namespace
 namespace configqml {
+bool startsWith(const ConfigPath &path, const ConfigPath &prefix) {
+    using F = bool (*)(const ConfigPath &, const ConfigPath &);
+    static auto real = reinterpret_cast<F>(dlsym(RTLD_NEXT, CONFIGQML_STARTS_WITH_SYMBOL));
+    if (!real)
+        qFatal("missing actual startsWith boundary");
+    ++prefixScans;
+    return real(path, prefix);
+}
 void putValue(QVariantMap &tree, const ConfigPath &path, const QVariant &value) {
     using F = void (*)(QVariantMap &, const ConfigPath &, const QVariant &);
     static auto real = reinterpret_cast<F>(dlsym(RTLD_NEXT, CONFIGQML_PUT_VALUE_SYMBOL));
@@ -22,6 +32,24 @@ using namespace configqml;
 class LayerStructureTest : public QObject {
     Q_OBJECT
 private slots:
+    void selectionUsesAncestorIndex_data() { oneNamespaceAssembly_data(); }
+    void selectionUsesAncestorIndex() {
+        QFETCH(int, leaves);
+        using D = ConfigDescriptor;
+        QMap<QString, D> fields;
+        for (int i = 0; i < leaves; ++i)
+            fields["field" + QString::number(i)] = D::leaf(D::Type::SafeInteger, 1);
+        const ConfigSchema schema(D::group({{"group", D::group(fields)}}));
+        const auto allowed = schema.leaves();
+        prefixScans = 0;
+        const auto selection = ConfigSelection::capture(
+            schema, allowed, allowed, ConfigSelection::Target::UserLayer, "selection");
+        const auto scans = prefixScans;
+        QVERIFY(selection.valid());
+        QCOMPARE(selection.leaves, allowed);
+        qInfo() << "SELECTION_TREE_STRUCTURE leaves=" << leaves << "prefix_scans=" << scans;
+        QCOMPARE(scans, quint64(0));
+    }
     void projectionLowerAssembly_data() { oneNamespaceAssembly_data(); }
     void projectionLowerAssembly() {
         QFETCH(int, leaves);

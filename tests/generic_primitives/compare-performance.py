@@ -66,13 +66,18 @@ def main():
         metadata["libraries"][side] = {"path": str(library.resolve()), "sha256": digest(library)}
         names = run(output, side + "-symbols", ["nm", "-D", "--defined-only", "--format=posix", library], env=env)
         symbols = []
+        prefix_symbols = []
         for line in names.splitlines():
             name = line.split()[0]
+            if "startsWith" in name:
+                text = run(output, side + "-prefix-name", ["c++filt", name], env=env)
+                if text.startswith("configqml::startsWith("):
+                    prefix_symbols.append(name)
             if "putValue" in name:
                 text = run(output, side + "-put-value-name", ["c++filt", name], env=env)
                 if text.startswith("configqml::putValue("):
                     symbols.append(name)
-        if len(symbols) != 1:
+        if len(symbols) != 1 or len(prefix_symbols) != 1:
             raise RuntimeError("actual per-leaf putValue boundary is not unique")
         metadata["libraries"][side]["put_value_symbol"] = symbols[0]
         build = output / (side + "-fixture")
@@ -82,7 +87,8 @@ def main():
             "-DCMAKE_CXX_FLAGS_RELEASE=" + flags[side]["CMAKE_CXX_FLAGS_RELEASE"],
             "-DCMAKE_EXE_LINKER_FLAGS=" + flags[side]["CMAKE_EXE_LINKER_FLAGS"],
             "-DCONFIGQML_MEASURE_HANDLES=" + ("ON" if side == "candidate" else "OFF"),
-            "-DCONFIGQML_PUT_VALUE_SYMBOL=" + symbols[0],
+             "-DCONFIGQML_PUT_VALUE_SYMBOL=" + symbols[0],
+             "-DCONFIGQML_STARTS_WITH_SYMBOL=" + prefix_symbols[0],
             "-DCONFIGQML_SOURCE=" + str(sources[side]),
             "-DCONFIGQML_BUILD=" + str(builds[side])], env=env)
         run(output, side + "-build", ["cmake", "--build", build, "--parallel", "2"], env=env)
@@ -92,10 +98,11 @@ def main():
             raise RuntimeError("performance fixture escaped its matched library")
     write_json(output / "inputs.json", metadata)
     structural = run(output, "candidate-effective-structure", [output / "candidate-fixture/layer-structure"], env=env)
-    require_marker(structural, "11 passed, 0 failed, 0 skipped")
+    require_marker(structural, "15 passed, 0 failed, 0 skipped")
     results = []
     span_names = ("reset_dispatch_ns", "reset_e2e_ns", "set_ingress_ns",
-                  "set_completion_including_consumers_ns", "cached_getter_10000_ns")
+                  "set_completion_including_consumers_ns",
+                  "isolated_set_completion_including_consumers_ns", "cached_getter_10000_ns")
     expected = {(n, 1, 1) for n in (1, 32, 128, 512)} | {
         (128, 4, 1), (128, 16, 1), (128, 4, 8), (128, 4, 32)}
     for repeat in range(4):
@@ -137,6 +144,7 @@ def main():
     lines = ["# Matched public-workflow performance", "",
         "Same compiler, flags, VM and fixture, four alternating pairs. No new ratio threshold.",
         "Reset/completion spans include worker delivery and fixture consumers, not only library CPU.",
+        "Combined completion includes queued Discard capture; isolated completion follows its drained write.",
         "New handle/observation spans have no v0.5.3 equivalent; their structural assertions and",
         "existing caller/model budgets are separate candidate-only gates.", "",
         "| # | Leaves | Sources | Readers | Span | Baseline median/p95 ms | Candidate median/p95 ms | Median ratio |",

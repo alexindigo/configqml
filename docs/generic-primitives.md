@@ -46,6 +46,11 @@ leaves and requested paths as typed containers. Opaque segment data cannot alias
 path boundaries; a narrowed selection never reuses a wider handle, and an invalid
 lookup cannot poison a valid one. Equivalent validated lookups remain stable.
 
+The shared selection validator indexes allowed path ancestors once and expands
+requested namespaces through that index, retaining canonical schema leaf order.
+A full-leaf capture does not compare every requested path with every allowed
+leaf; opaque segments, duplicate handling and narrowed capabilities are unchanged.
+
 ### Verbs
 
 Every verb returns a `ConfigPendingReply`, including refusals and no-ops, which

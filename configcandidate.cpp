@@ -29,7 +29,12 @@ ConfigSelection ConfigSelection::capture(const ConfigSchema &schema, const QList
     selection.schema = schema;
     selection.schemaIdentity = schema.m_identity;
     selection.target = target;
-    QSet<ConfigPath> seen, included;
+    QSet<ConfigPath> seen, included, allowedAncestors;
+    // Index the allowed boundary once. Looking up every requested leaf against
+    // every allowed leaf makes a complete selected capture quadratic in width.
+    for (const auto &leaf : allowed)
+        for (qsizetype depth = 0; depth <= leaf.size(); ++depth)
+            allowedAncestors.insert(leaf.mid(0, depth));
     if (!schema.valid() || (paths.isEmpty() && !emptyMeansAll))
         selection.error = failure;
     for (const auto &query : paths) {
@@ -38,18 +43,21 @@ ConfigSelection ConfigSelection::capture(const ConfigSchema &schema, const QList
             break;
         }
         seen.insert(ownPath(query));
-        bool found = false;
-        for (const auto &leaf : allowed)
-            if (startsWith(leaf, query)) {
-                included.insert(leaf);
-                found = true;
-            }
-        if (!found)
+        if (!allowedAncestors.contains(query))
             selection.error = failure;
     }
+    for (const auto &leaf : allowed) {
+        if (paths.isEmpty() && emptyMeansAll)
+            included.insert(leaf);
+        else
+            for (qsizetype depth = 0; depth <= leaf.size(); ++depth)
+                if (seen.contains(leaf.mid(0, depth))) {
+                    included.insert(leaf);
+                    break;
+                }
+    }
     for (const auto &leaf : schema.leaves())
-        if (allowed.contains(leaf) &&
-            ((paths.isEmpty() && emptyMeansAll) || included.contains(leaf)))
+        if (included.contains(leaf))
             selection.leaves.append(leaf);
     if (selection.leaves.isEmpty())
         selection.error = failure;
