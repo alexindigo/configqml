@@ -72,7 +72,7 @@ try:
         run(output, name + "-mutated-build", ["cmake", "--build", build, "--parallel", "2",
             "--target", "configqml_core"], env=env)
         text = run(output, name + "-mutated", [fixture / "layer-structure"], env=env, expected=4)
-        require_marker(text, "15 passed, 4 failed, 0 skipped")
+        require_marker(text, "19 passed, 4 failed, 0 skipped")
         require_marker(text, marker)
 finally:
     path.write_bytes(original)
@@ -81,7 +81,7 @@ finally:
     run(output, "restored-build", ["cmake", "--build", build, "--parallel", "2",
         "--target", "configqml_core"], env=env)
 text = run(output, "restored", [fixture / "layer-structure"], env=env)
-require_marker(text, "19 passed, 0 failed, 0 skipped")
+require_marker(text, "23 passed, 0 failed, 0 skipped")
 require_marker(text, "individual_writes= 0")
 write_json(output / "result.json", {"source_sha256": before, "restored_sha256": digest(path),
     "old_reconstruction_rejected": True, "typed_atomic_and_opaque_trees_preserved": True})

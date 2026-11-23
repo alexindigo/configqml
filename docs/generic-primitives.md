@@ -250,6 +250,12 @@ local edit transaction or rerunning source transforms. Selection/schema/lifetime
 checks still apply, and selected facts still pass through current record-list
 metadata projection. This does not alter the public layer `applyEdits` contract.
 
+Candidate-only draft control delivery uses the same publication boundary with
+the existing admitted store cut. It advances delivery/epoch and installs selected
+draft facts without rebuilding unchanged store provenance, values or model plans.
+Real store/source/metadata changes still use complete state publication. No-op
+control delivery is not a content invalidation or a second state cache.
+
 Candidate selected facts are captured directly from that layer cut: declared
 defaults, participating admitted contributions, writable-layer masks and the
 original target's raw presence. They do not construct full per-source provenance

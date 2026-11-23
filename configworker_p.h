@@ -196,6 +196,9 @@ private:
     void acceptIntent(const ConfigInput &input);
     ConfigWorkerPacket publish(const std::optional<ConfigResult> &result = {},
                                bool initial = false);
+    ConfigWorkerPacket publishControl(const std::optional<ConfigResult> &result = {});
+    ConfigWorkerPacket publishPacket(const std::optional<ConfigResult> &result, bool initial,
+                                     bool stateChanged);
     void post(const ConfigWorkerPacket &packet);
     ConfigResult resultFor(const ConfigCommand &command) const;
     bool inheritFailures(ConfigResult &result) const;

@@ -362,7 +362,10 @@ void ConfigWorker::resolveDraft(const ConfigCommand &command) {
             request,           base,         p.frozen,  p.live,
             frozenObservation, p.frozenRead, liveFacts, candidateKey(request->paths)};
     m_draftPackets.append(p);
-    auto packet = publish(command.requestId ? std::optional<ConfigResult>(result) : std::nullopt);
+    // Candidate evaluation is side-effect-free at the admitted store. Reuse that
+    // cut for control delivery instead of recomputing its unrelated provenance.
+    auto packet =
+        publishControl(command.requestId ? std::optional<ConfigResult>(result) : std::nullopt);
     if (error.isEmpty() && command.requestId)
         packet.completionObservation = p.frozenRead.observation();
     post(packet);

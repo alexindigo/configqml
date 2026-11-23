@@ -57,3 +57,22 @@ and all four controls: baseline W, zero consumer imports, no vtable/typeinfo and
 no strong symbol. Each addition is listed in the release PR; other losses still
 require review. The runner continues to reject an unlisted weak name, strong
 substitution, any vtable/typeinfo and a consumer import of a reviewed definition.
+
+## QList initializer-list constructors, 2026-11-22
+
+Authority: the equivalent std/Qt template category explicitly approved by the
+originating orchestrator in `decision-weak-pair-18.md`. The draft-control packet
+refactor changes compiler emission, not a public method or object layout.
+
+| # | Exact mangled name | Demangled form | Frozen baseline origin | Reason |
+|---|---|---|---|---|
+| 1 | `_ZN5QListI8QVariantEC1ESt16initializer_listIS0_E` | `QList<QVariant>::QList(std::initializer_list<QVariant>)` (complete object) | `configworker.cpp.o`, W | Qt template instantiation; an independent O0/no-inline using translation unit against installed public headers emits its own W copy. |
+| 2 | `_ZN5QListI8QVariantEC2ESt16initializer_listIS0_E` | `QList<QVariant>::QList(std::initializer_list<QVariant>)` (base object) | `configworker.cpp.o`, W | The same Qt template; a using consumer emits its own weak copy. |
+
+Evidence: guest `artifacts/weak-list-19/characterization.json`, origin-object and
+using-client symbol logs, plus the original strict refusal in
+`artifacts/unit-draft-control-19/compatibility/`. All 1,321 consumer paths/hashes
+were freshly checked and their undefined-import inventories contain neither name.
+Both baseline definitions are W; neither is strong, vtable or typeinfo. The full
+compatibility renewal repeats import checks and exact-name rejection controls.
+These additions must be listed in the release PR alongside earlier reviewed names.

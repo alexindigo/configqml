@@ -3,6 +3,10 @@
 #include "configlayers.h"
 #include "configselection_p.h"
 #include "configcandidate_p.h"
+#include "tests/storeprobe.h"
+#include "configdraft.h"
+#include "configreadprojection.h"
+#include <QSignalSpy>
 #include <QTest>
 #include <dlfcn.h>
 #include <limits>
@@ -42,6 +46,58 @@ using namespace configqml;
 class LayerStructureTest : public QObject {
     Q_OBJECT
 private slots:
+    void draftControlReusesAdmittedCut_data() { oneNamespaceAssembly_data(); }
+    void draftControlReusesAdmittedCut() {
+        QFETCH(int, leaves);
+        using D = ConfigDescriptor;
+        QMap<QString, D> fields;
+        QVariantMap raw;
+        for (int i = 0; i < leaves; ++i) {
+            const auto key = "field" + QString::number(i);
+            fields[key] = D::leaf(D::Type::SafeInteger, 1);
+            raw[key] = 4;
+        }
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema = ConfigSchema(D::group({{"group", D::group(fields)}}));
+        options.layers = {{"user",
+                           ConfigLayerKind::File,
+                           ConfigAdmissionPolicy::FieldFallback,
+                           {{"user", {"group"}, raw}},
+                           true}};
+        ConfigStore store(options);
+        QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
+        auto fence = [&](std::function<void(ConfigWorker &)> action = {}) {
+            QEventLoop loop;
+            ConfigStoreTestAccess::run(
+                store,
+                [action](ConfigWorker &worker) {
+                    if (action)
+                        action(worker);
+                },
+                &loop, [&] { loop.quit(); });
+            loop.exec();
+        };
+        auto *draft = store.draft();
+        QVERIFY(draft->valid());
+        fence();
+        const auto before = store.snapshot();
+        const auto read = store.readProjection()->snapshot();
+        QSignalSpy changed(&store, &ConfigStore::valuesChanged);
+        fence([](ConfigWorker &) { provenanceQueries = 0; });
+        QVERIFY(draft->discard());
+        quint64 queries = 0;
+        fence([&](ConfigWorker &) { queries = provenanceQueries; });
+        QCOMPARE(store.snapshot().values, before.values);
+        QCOMPARE(store.snapshot().inputPrefix, before.inputPrefix);
+        QCOMPARE(store.readProjection()->snapshot().selectedState({"group", "field0"}).value(),
+                 read.selectedState({"group", "field0"}).value());
+        QCOMPARE(draft->presentation({"group", "field0"}).toInt(), 4);
+        QVERIFY(store.inputs().isEmpty());
+        QVERIFY(changed.isEmpty());
+        qInfo() << "DRAFT_CONTROL_STRUCTURE leaves=" << leaves << "provenance_queries=" << queries;
+        QCOMPARE(queries, quint64(0));
+    }
     void candidateCapturesSelectedFacts_data() { oneNamespaceAssembly_data(); }
     void candidateCapturesSelectedFacts() {
         QFETCH(int, leaves);

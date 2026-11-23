@@ -359,6 +359,13 @@ static bool sameConfirmedContent(const QVariant &a, const QVariant &b) {
     return left.ok() && right.ok() && left.bytes == right.bytes;
 }
 ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &result, bool initial) {
+    return publishPacket(result, initial, true);
+}
+ConfigWorkerPacket ConfigWorker::publishControl(const std::optional<ConfigResult> &result) {
+    return publishPacket(result, false, false);
+}
+ConfigWorkerPacket ConfigWorker::publishPacket(const std::optional<ConfigResult> &result,
+                                               bool initial, bool stateChanged) {
     ConfigWorkerPacket packet;
     packet.deliveryGeneration = ++m_deliveryGeneration;
     auto &groups = packet.retainedGroups.emplace();
@@ -370,27 +377,28 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
         groups.generations[info.groupToken] = capture.generation;
     }
     packet.initial = initial;
-    for (auto it = m_overlayCaptures.cbegin(); it != m_overlayCaptures.cend(); ++it) {
-        ConfigOverlayPresentation state;
-        state.editorId = it.key();
-        state.placementToken = overlayPlacementToken(it.key(), it->selection);
-        state.dirtyKnown = it->selection.mode == ConfigOverlayMode::Live;
-        state.dirty = state.dirtyKnown &&
-                      m_dirty.contains(m_layers->info(it->selection.ownerPath).route.sourceId);
-        const auto metadata = qMakePair(state.placementToken, state.dirty);
-        bool found = false;
-        for (auto &presentation : m_overlayPackets)
-            if (presentation.editorId == it.key()) {
-                presentation.placementToken = state.placementToken;
-                presentation.dirtyKnown = state.dirtyKnown;
-                presentation.dirty = state.dirty;
-                found = true;
-            }
-        if (!found && (!m_overlayDelivered.contains(it.key()) ||
-                       m_overlayDelivered.value(it.key()) != metadata))
-            m_overlayPackets.append(state);
-        m_overlayDelivered[it.key()] = metadata;
-    }
+    if (stateChanged)
+        for (auto it = m_overlayCaptures.cbegin(); it != m_overlayCaptures.cend(); ++it) {
+            ConfigOverlayPresentation state;
+            state.editorId = it.key();
+            state.placementToken = overlayPlacementToken(it.key(), it->selection);
+            state.dirtyKnown = it->selection.mode == ConfigOverlayMode::Live;
+            state.dirty = state.dirtyKnown &&
+                          m_dirty.contains(m_layers->info(it->selection.ownerPath).route.sourceId);
+            const auto metadata = qMakePair(state.placementToken, state.dirty);
+            bool found = false;
+            for (auto &presentation : m_overlayPackets)
+                if (presentation.editorId == it.key()) {
+                    presentation.placementToken = state.placementToken;
+                    presentation.dirtyKnown = state.dirtyKnown;
+                    presentation.dirty = state.dirty;
+                    found = true;
+                }
+            if (!found && (!m_overlayDelivered.contains(it.key()) ||
+                           m_overlayDelivered.value(it.key()) != metadata))
+                m_overlayPackets.append(state);
+            m_overlayDelivered[it.key()] = metadata;
+        }
     packet.overlays = std::move(m_overlayPackets);
     for (auto &presentation : packet.overlays)
         presentation.deliveryGeneration = packet.deliveryGeneration;
@@ -399,104 +407,110 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
     packet.snapshot.generation = ++m_generation;
     groups.publicationGeneration = m_generation;
     packet.snapshot.inputPrefix = m_prefix;
-    auto effective = m_layers->effective(); // One full-tree owner, never the GUI.
-    QSet<ConfigPath> listPaths;
-    for (const auto &policy : m_listPolicies)
-        listPaths.insert(policy.path);
-    for (const auto &path : listPaths) {
-        const auto value = m_layers->unmaskedValue(path);
-        if (!value)
-            continue;
-        QStringList revisions;
+    // A candidate-only control changed no admitted layer. Its delivery and draft
+    // epochs still advance through this same packet boundary, while values,
+    // provenance, content fences and model plans retain the existing admitted cut.
+    if (stateChanged) {
+        auto effective = m_layers->effective(); // One full-tree owner, never the GUI.
+        QSet<ConfigPath> listPaths;
         for (const auto &policy : m_listPolicies)
-            if (policy.path == path)
-                revisions.append(QString::number(m_listRevisions.value(policy.policyId)));
-        if (!m_listInputs.contains(path) || m_listInputs.value(path) != *value ||
-            m_listMetadataKeys.value(path) != revisions) {
-            const auto projected =
-                projectCandidateLeaf(path, *value, m_listPolicies, m_listMetadata);
-            if (!projected.ok()) {
-                packet.error = projected.errors.first().code;
-                packet.terminal = !initial;
-            } else {
-                m_listInputs[path] = *value;
-                m_listMetadataKeys[path] = revisions;
-                m_listOutputs[path] = projected.value;
-            }
-        }
-        if (m_layers->info(path).maskedBy.isEmpty() && m_listOutputs.contains(path))
-            putValue(effective, path, m_listOutputs.value(path));
-    }
-    for (const auto &path : m_options.schema.leaves()) {
-        const auto next = valueAt(effective, path).value_or(QVariant());
-        ConfigPathState state;
-        state.provenance = m_layers->info(path);
-        state.workerCovered = qMax(m_prefix, m_pathInputs.value(path));
-        state.latestInput = m_pathInputs.value(path);
-        state.intentRevision = m_pathIntents.value(path);
-        const auto before = m_previous.information.value(path);
-        const auto confirmation = m_ownConfirmations.constFind(path);
-        const bool ownConfirmation = confirmation != m_ownConfirmations.cend() &&
-                                     confirmation->first == before.provenance.contributions &&
-                                     confirmation->second == state.provenance.contributions;
-        QVariantList content{next, QString::number(state.intentRevision)};
-        for (const auto &policy : m_listPolicies)
-            if (policy.path == path)
-                content.append(QString::number(m_listRevisions.value(policy.policyId)));
-        for (const auto &contribution : state.provenance.contributions) {
-            const auto source = m_layers->source(contribution.layerId, contribution.sourceId);
-            if (!source)
+            listPaths.insert(policy.path);
+        for (const auto &path : listPaths) {
+            const auto value = m_layers->unmaskedValue(path);
+            if (!value)
                 continue;
-            const auto raw = valueAt(source->raw, path.mid(source->prefix.size()));
-            content.append(
-                QVariantMap{{"present", bool(raw)}, {"value", raw.value_or(QVariant())}});
-        }
-        const bool sameContent =
-            m_content.contains(path) &&
-            (m_content.value(path) == content ||
-             (ownConfirmation && sameConfirmedContent(m_content.value(path), content)));
-        if (!sameContent)
-            ++m_contentRevisions[path];
-        m_content[path] = content;
-        state.contentRevision = m_contentRevisions.value(path);
-        state.pathGeneration = m_pathGenerations.value(path);
-        state.publicationGeneration = packet.snapshot.generation;
-        const bool selectionChanged =
-            initial || !sameContent || state.pathGeneration != before.pathGeneration ||
-            state.provenance.layerId != before.provenance.layerId ||
-            state.provenance.sourceId != before.provenance.sourceId ||
-            state.provenance.maskedBy != before.provenance.maskedBy ||
-            (!ownConfirmation && state.provenance.contributions != before.provenance.contributions);
-        if (!selectionChanged)
-            state.publicationGeneration = before.publicationGeneration;
-        // Metadata still advances in packet order, not in command-fence order.
-        if (selectionChanged || next != m_previous.values.value(path) ||
-            state.provenance.contributions != before.provenance.contributions) {
-            packet.snapshot.values[path] = next;
-            packet.snapshot.information[path] = state;
-            const auto descriptor = *m_options.schema.descriptor(path);
-            if (descriptor.type == ConfigDescriptor::Type::List ||
-                descriptor.type == ConfigDescriptor::Type::Map) {
-                auto &versions = m_modelVersions[path];
-                QElapsedTimer planningTimer;
-                planningTimer.start();
-                if (versions.isEmpty())
-                    versions[0] = {};
-                const auto rows = projectionRows(descriptor, next);
-                for (auto it = versions.cbegin(); it != versions.cend(); ++it) {
-                    auto plan = reconcileProjection(descriptor, it.value(), rows);
-                    plan.base = it.key();
-                    plan.generation = packet.snapshot.generation;
-                    packet.models[path][it.key()] = std::move(plan);
+            QStringList revisions;
+            for (const auto &policy : m_listPolicies)
+                if (policy.path == path)
+                    revisions.append(QString::number(m_listRevisions.value(policy.policyId)));
+            if (!m_listInputs.contains(path) || m_listInputs.value(path) != *value ||
+                m_listMetadataKeys.value(path) != revisions) {
+                const auto projected =
+                    projectCandidateLeaf(path, *value, m_listPolicies, m_listMetadata);
+                if (!projected.ok()) {
+                    packet.error = projected.errors.first().code;
+                    packet.terminal = !initial;
+                } else {
+                    m_listInputs[path] = *value;
+                    m_listMetadataKeys[path] = revisions;
+                    m_listOutputs[path] = projected.value;
                 }
-                versions[packet.snapshot.generation] = rows;
-                packet.planningNanos += planningTimer.nsecsElapsed();
             }
+            if (m_layers->info(path).maskedBy.isEmpty() && m_listOutputs.contains(path))
+                putValue(effective, path, m_listOutputs.value(path));
         }
-        m_previous.values[path] = next;
-        m_previous.information[path] = state;
+        for (const auto &path : m_options.schema.leaves()) {
+            const auto next = valueAt(effective, path).value_or(QVariant());
+            ConfigPathState state;
+            state.provenance = m_layers->info(path);
+            state.workerCovered = qMax(m_prefix, m_pathInputs.value(path));
+            state.latestInput = m_pathInputs.value(path);
+            state.intentRevision = m_pathIntents.value(path);
+            const auto before = m_previous.information.value(path);
+            const auto confirmation = m_ownConfirmations.constFind(path);
+            const bool ownConfirmation = confirmation != m_ownConfirmations.cend() &&
+                                         confirmation->first == before.provenance.contributions &&
+                                         confirmation->second == state.provenance.contributions;
+            QVariantList content{next, QString::number(state.intentRevision)};
+            for (const auto &policy : m_listPolicies)
+                if (policy.path == path)
+                    content.append(QString::number(m_listRevisions.value(policy.policyId)));
+            for (const auto &contribution : state.provenance.contributions) {
+                const auto source = m_layers->source(contribution.layerId, contribution.sourceId);
+                if (!source)
+                    continue;
+                const auto raw = valueAt(source->raw, path.mid(source->prefix.size()));
+                content.append(
+                    QVariantMap{{"present", bool(raw)}, {"value", raw.value_or(QVariant())}});
+            }
+            const bool sameContent =
+                m_content.contains(path) &&
+                (m_content.value(path) == content ||
+                 (ownConfirmation && sameConfirmedContent(m_content.value(path), content)));
+            if (!sameContent)
+                ++m_contentRevisions[path];
+            m_content[path] = content;
+            state.contentRevision = m_contentRevisions.value(path);
+            state.pathGeneration = m_pathGenerations.value(path);
+            state.publicationGeneration = packet.snapshot.generation;
+            const bool selectionChanged = initial || !sameContent ||
+                                          state.pathGeneration != before.pathGeneration ||
+                                          state.provenance.layerId != before.provenance.layerId ||
+                                          state.provenance.sourceId != before.provenance.sourceId ||
+                                          state.provenance.maskedBy != before.provenance.maskedBy ||
+                                          (!ownConfirmation && state.provenance.contributions !=
+                                                                   before.provenance.contributions);
+            if (!selectionChanged)
+                state.publicationGeneration = before.publicationGeneration;
+            // Metadata still advances in packet order, not in command-fence order.
+            if (selectionChanged || next != m_previous.values.value(path) ||
+                state.provenance.contributions != before.provenance.contributions) {
+                packet.snapshot.values[path] = next;
+                packet.snapshot.information[path] = state;
+                const auto descriptor = *m_options.schema.descriptor(path);
+                if (descriptor.type == ConfigDescriptor::Type::List ||
+                    descriptor.type == ConfigDescriptor::Type::Map) {
+                    auto &versions = m_modelVersions[path];
+                    QElapsedTimer planningTimer;
+                    planningTimer.start();
+                    if (versions.isEmpty())
+                        versions[0] = {};
+                    const auto rows = projectionRows(descriptor, next);
+                    for (auto it = versions.cbegin(); it != versions.cend(); ++it) {
+                        auto plan = reconcileProjection(descriptor, it.value(), rows);
+                        plan.base = it.key();
+                        plan.generation = packet.snapshot.generation;
+                        packet.models[path][it.key()] = std::move(plan);
+                    }
+                    versions[packet.snapshot.generation] = rows;
+                    packet.planningNanos += planningTimer.nsecsElapsed();
+                }
+            }
+            m_previous.values[path] = next;
+            m_previous.information[path] = state;
+        }
+        m_ownConfirmations.clear();
     }
-    m_ownConfirmations.clear();
     m_previous.generation = m_generation;
     m_previous.inputPrefix = m_prefix;
     checkApplyCaptures();
@@ -525,9 +539,11 @@ ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &resu
                     .observation();
         }
     }
-    packet.sourceStates = m_sourceStates;
-    for (auto &state : *packet.sourceStates)
-        state.fallbackState = m_layers->fallbackState(state.sourceId);
+    if (stateChanged) {
+        packet.sourceStates = m_sourceStates;
+        for (auto &state : *packet.sourceStates)
+            state.fallbackState = m_layers->fallbackState(state.sourceId);
+    }
     packet.projectionEffects = m_layers->takeProjectionEffects();
     if (m_diskLayers)
         m_diskLayers->takeUnknownDataDiagnostics();

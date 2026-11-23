@@ -43,6 +43,11 @@ ALLOWLIST = {
         "STL pair complete destructor template; an independent using TU emits its own weak copy",
     "_ZNSt4pairIK5QListI7QStringESt8optionalI8QVariantEED2Ev":
         "STL pair base destructor template; an independent using TU emits its own weak copy",
+    # Equivalent Qt template category approved in decision-weak-pair-18.md.
+    "_ZN5QListI8QVariantEC1ESt16initializer_listIS0_E":
+        "Qt QList initializer-list complete constructor template; an independent using TU emits its own weak copy",
+    "_ZN5QListI8QVariantEC2ESt16initializer_listIS0_E":
+        "Qt QList initializer-list base constructor template; an independent using TU emits its own weak copy",
 }
 
 
