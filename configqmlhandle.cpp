@@ -4,6 +4,7 @@
 #include "configqmlevent_p.h"
 #include "configqmlstore.h"
 #include "configqmloverlay.h"
+#include "configqmlvalue.h"
 #include "configstorehandle.h"
 #include <QQmlEngine>
 
@@ -63,10 +64,10 @@ public:
             get = engine->evaluate(QStringLiteral(R"JS((function(object, key, own) {
                 'use strict';
                 try {
-                    if (own && !Object.prototype.hasOwnProperty.call(object, key)) return [];
+                    if (own && !Object.prototype.hasOwnProperty.call(object, key)) return null;
                     return [true, object[key]];
                 } catch (_) {
-                    return [];
+                    return null;
                 }
             }))JS"));
         }
@@ -91,7 +92,7 @@ public:
         const auto size = length.toUInt();
         for (quint32 i = 0; i < size; ++i) {
             QJSValue item;
-            if (!property(observed, i, item))
+            if (!property(observed, i, item, true))
                 return false;
             auto *handle = qobject_cast<ConfigQmlHandle *>(item.toQObject());
             if (!handle || !handle->native())
@@ -104,10 +105,8 @@ public:
     bool edits(const QJSValue &value, QList<ConfigHandleEdit> &batch) {
         if (!wrapper || !native)
             return false;
-        if (native->isField()) {
-            batch.append({{}, value.toVariant()});
-            return true;
-        }
+        if (native->isField())
+            return appendEdit({}, value, batch);
         // A scope accepts only an explicit relative batch; omission is no edit.
         QJSValue length;
         if (!value.isArray() || !property(value, QStringLiteral("length"), length))
@@ -115,24 +114,38 @@ public:
         const auto size = length.toUInt();
         for (quint32 i = 0; i < size; ++i) {
             QJSValue entry, parts, count, payload;
-            if (!property(value, i, entry) || !entry.isObject() ||
-                !property(entry, QStringLiteral("path"), parts) || !parts.isArray() ||
+            if (!property(value, i, entry, true) || !entry.isObject() ||
+                !property(entry, QStringLiteral("path"), parts, true) || !parts.isArray() ||
                 !property(parts, QStringLiteral("length"), count))
                 return false;
             ConfigPath path;
             const auto pathSize = count.toUInt();
             for (quint32 j = 0; j < pathSize; ++j) {
                 QJSValue part;
-                if (!property(parts, j, part) || !part.isString())
+                if (!property(parts, j, part, true) || !part.isString())
                     return false;
                 path.append(part.toString());
             }
-            if (!property(entry, QStringLiteral("value"), payload, true))
+            if (!property(entry, QStringLiteral("value"), payload, true) ||
+                !appendEdit(std::move(path), payload, batch))
                 return false;
-            batch.append({std::move(path), payload.toVariant()});
         }
         return true;
     }
+
+    bool appendEdit(ConfigPath path, const QJSValue &payload, QList<ConfigHandleEdit> &batch) {
+        auto captured = captureQmlValue(QVariant::fromValue(payload));
+        if (!wrapper || !native || !engine)
+            return false;
+        if (!captured.ok()) {
+            editError = captured.errors.first().code;
+            return false;
+        }
+        batch.append({std::move(path), std::move(captured.value)});
+        return true;
+    }
+
+    QString editError;
 
     bool admit(ConfigHandleOptions &selected) const {
         for (const auto &reader : readers) {
@@ -358,8 +371,11 @@ ConfigQmlPendingReply *ConfigQmlHandle::invoke(const QJSValue &options, Verb ver
     ConfigHandleOptions selected;
     if (!parsedOptions || !args.admit(selected))
         return args.wrapper->refuse("read-observation", "selection");
-    if (!parsedEdits)
+    if (!parsedEdits) {
+        if (!args.editError.isEmpty())
+            return args.wrapper->refuse(args.editError, "capture");
         return args.wrapper->refuse("invalid-batch", "selection");
+    }
     ConfigPendingReply *result;
     if (value) {
         result =
