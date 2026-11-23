@@ -915,11 +915,7 @@ QVariant ConfigHandle::value() const {
     return d->current(present);
 }
 ConfigSelectedState ConfigHandle::state() const {
-    if (!d->field || !d->alive())
-        return {};
-    auto *projection = d->ownerProjection();
-    return projection ? projection->selectedState(d->ownerPath(d->selection.prefix()))
-                      : ConfigSelectedState();
+    return d->field ? snapshot().selectedState({}) : ConfigSelectedState();
 }
 ConfigReadSnapshot ConfigHandle::snapshot() const {
     auto *projection = d->alive() ? d->ownerProjection() : nullptr;

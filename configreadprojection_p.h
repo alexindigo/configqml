@@ -47,6 +47,7 @@ public:
 private:
     friend class ConfigReadProjection;
     explicit ConfigReadProjectionState(ConfigReadProjection *projection);
+    void inheritSelection(const ConfigReadProjectionState &parent);
     static ConfigReadProjection *create(QObject *owner, ConfigStore *store, const QString &name);
     bool live() const;
     ConfigReadProjectionState *origin();

@@ -24,6 +24,13 @@ ConfigReadProjection::~ConfigReadProjection() { d->lifetime->store(false); }
 ConfigReadProjectionState::ConfigReadProjectionState(ConfigReadProjection *projection)
     : q(projection), id(QUuid::createUuid().toString(QUuid::Id128)),
       lifetime(std::make_shared<std::atomic_bool>(true)) {}
+void ConfigReadProjectionState::inheritSelection(const ConfigReadProjectionState &parent) {
+    order = parent.order;
+    coveredSequence = parent.coveredSequence;
+    installed = ConfigObservationAccess::select(parent.installed, paths, prefix);
+    completed = ConfigObservationAccess::select(parent.completed, paths, prefix);
+    changed = parent.changed;
+}
 ConfigReadProjection *ConfigReadProjectionState::create(QObject *owner, ConfigStore *store,
                                                         const QString &name) {
     if (const auto existing =
@@ -76,10 +83,7 @@ ConfigReadProjection *ConfigReadProjectionState::select(ConfigReadProjection *so
     state.frozen = parent.frozen;
     state.prefix = selection.prefix();
     state.paths = identity.leaves;
-    state.order = parent.order;
-    state.coveredSequence = parent.coveredSequence;
-    state.installed = ConfigObservationAccess::select(parent.installed, state.paths, state.prefix);
-    state.completed = ConfigObservationAccess::select(parent.completed, state.paths, state.prefix);
+    state.inheritSelection(parent);
     if (state.preview && state.draft)
         state.selectedPreviewLifetime = state.draft->m_previewLifetime;
     QObject::connect(source, &QObject::destroyed, projection,
@@ -121,9 +125,8 @@ ConfigReadProjection *ConfigReadProjectionState::get(ConfigStoreHandle *handle) 
     for (const auto &path : schema.leaves())
         if (startsWith(path, state.prefix) && !state.paths.contains(path))
             state.paths.append(path);
-    if (!state.installed.valid() && state.store && !state.preview)
-        state.installed = state.completed = ConfigObservationAccess::select(
-            get(state.store)->d->completed, state.paths, state.prefix);
+    if (!state.installed.valid() && !state.preview)
+        state.inheritSelection(*get(state.store)->d);
     return projection;
 }
 ConfigReadProjection *ConfigReadProjectionState::get(ConfigOverlayEditor *overlay) {
