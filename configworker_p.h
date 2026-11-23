@@ -43,6 +43,8 @@ struct ConfigWorkerPacket {
     QMap<ConfigPath, QMap<quint64, ConfigModelPlan>> models;
     qint64 planningNanos = 0;
     quint64 deliveryGeneration = 0;
+    // The request producing a pre-completion publication (for example Apply).
+    quint64 publicationRequest = 0;
     ConfigObservation completionObservation;
     ConfigReadSnapshot readSnapshot;
     QList<ConfigReadCapture> reads;
@@ -197,6 +199,7 @@ private:
     void acceptIntent(const ConfigInput &input);
     ConfigWorkerPacket publish(const std::optional<ConfigResult> &result = {},
                                bool initial = false);
+    void publishBeforeCompletion(quint64 requestId);
     ConfigWorkerPacket publishControl(const std::optional<ConfigResult> &result = {});
     ConfigWorkerPacket publishPacket(const std::optional<ConfigResult> &result, bool initial,
                                      bool stateChanged);

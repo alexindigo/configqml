@@ -11,6 +11,7 @@
 #include <QUuid>
 #include <QElapsedTimer>
 #include <QCoreApplication>
+#include <algorithm>
 
 namespace configqml {
 ConfigValueResult ConfigStore::copyValue(const QVariant &value) const {
@@ -331,14 +332,23 @@ ConfigRequestHandle ConfigStore::queueWrite(ConfigCommand command, const ConfigP
     };
     if (input.kind == ConfigInput::Kind::User)
         installUserValue(input.path, input.value);
-    if (input.kind == ConfigInput::Kind::Group && !command.runtimeEdits)
+    // A removal needs the worker's layer resolution. Never preview just the
+    // Set subset: the worker publishes the effective values of the whole group.
+    if (input.kind == ConfigInput::Kind::Group && !command.runtimeEdits &&
+        std::all_of(input.edits.cbegin(), input.edits.cend(),
+                    [](const auto &edit) { return edit.has_value(); }))
         for (auto it = input.edits.cbegin(); it != input.edits.cend(); ++it)
-            if (it.value())
-                installUserValue(it.key(), *it.value());
+            installUserValue(it.key(), *it.value());
     // Owned input, sequence, queueing and cache installation all precede consumer reentry.
-    const ConfigPublicationScope publication(this);
-    if (!changed.isEmpty() && ConfigChangePublisher::prepare(this, {{m_changes.get(), changed}}))
+    if (!changed.isEmpty()) {
+        const ConfigProjectionNotificationScope notify(this);
+        {
+            const ConfigPublicationScope publication(this);
+            if (!ConfigChangePublisher::prepare(this, {{m_changes.get(), changed}}))
+                return handle;
+        }
         boundary.invoke([&] { emit valuesChanged(changed); });
+    }
     return handle;
 }
 ConfigRequestHandle ConfigStore::setUser(const ConfigAdmission &value, QObject *context,
@@ -416,7 +426,9 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
         QMetaObject::invokeMethod(this, [this, packet] { receive(packet); }, Qt::QueuedConnection);
         return;
     }
-    const ConfigWorkPublication callerWork(this, !packet.models.isEmpty());
+    ConfigWorkPublication callerWork(this, packet.deliveryGeneration,
+                                     packet.result ? packet.result->requestId
+                                                   : packet.publicationRequest);
     QElapsedTimer publicationTimer;
     publicationTimer.start();
     if (!packet.models.isEmpty())
@@ -523,10 +535,6 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
     m_publishingModels = true;
     if (!ConfigChangePublisher::prepare(this, preparations))
         return;
-    for (const auto &notification : overlayNotifications)
-        if (notification.first &&
-            !boundary.invoke([&] { notification.first->notifyInstalled(notification.second); }))
-            return;
     QMap<ConfigPath, quint64> acknowledgements;
     qint64 modelNotifications = 0;
     for (auto it = modelPlans.cbegin(); it != modelPlans.cend(); ++it) {
@@ -534,35 +542,48 @@ void ConfigStore::receive(const ConfigWorkerPacket &packet) {
         if (native) {
             if (!boundary.invoke([&] { native->apply(it.value(), this); }))
                 return;
+            callerWork.appliedModel();
             modelNotifications += native->m_lastNotificationNanos;
             acknowledgements[it.key()] = it->generation;
         }
     }
     m_owner->acknowledgeModels(acknowledgements);
-    if (packet.admitted && !boundary.invoke([&] { emit published(); }))
-        return;
-    if (!changed.isEmpty() && !boundary.invoke([&] { emit valuesChanged(changed); }))
-        return;
-    if (packet.sourceStates) {
-        if (!boundary.invoke([&] { emit sourceStatesChanged(); }))
-            return;
-    }
-    for (const auto &event : packet.projectionEffects)
-        if (!boundary.invoke([&] { emit projectionEffects(event); }))
-            return;
-    for (const auto &diagnostic : packet.projectionDiagnostics)
-        if (!boundary.invoke(
-                [&] { emit sourceWarning(m_schema.diagnostics().sanitize(diagnostic)); }))
-            return;
-    if (packet.sourceAccepted &&
-        !boundary.invoke([&] { emit sourceAccepted(*packet.sourceAccepted); }))
-        return;
-    if (statusChange && !boundary.invoke([&] { emit statusChanged(); }))
-        return;
-    if (!boundary.invoke([&] { ConfigReadProjectionState::complete(this); }))
-        return;
+    // Promote all cuts before any post-publication callback. A nested packet
+    // may now run, so this continuation must not install an older cut later.
+    const auto projections = ConfigReadProjectionState::promote(this);
     m_publishingModels = false;
-    if (!boundary.invoke([&] { ConfigReadProjectionState::deliver(this); }))
+    {
+        const ConfigProjectionNotificationScope notify(this);
+        for (const auto &notification : overlayNotifications) {
+            const auto notifyOverlay = [&] {
+                notification.first->notifyInstalled(notification.second);
+            };
+            if (notification.first && !boundary.invoke(notifyOverlay))
+                return;
+        }
+        if (packet.admitted && !boundary.invoke([&] { emit published(); }))
+            return;
+        if (!changed.isEmpty() && !boundary.invoke([&] { emit valuesChanged(changed); }))
+            return;
+        if (packet.sourceStates && !boundary.invoke([&] { emit sourceStatesChanged(); }))
+            return;
+        for (const auto &event : packet.projectionEffects)
+            if (!boundary.invoke([&] { emit projectionEffects(event); }))
+                return;
+        for (const auto &diagnostic : packet.projectionDiagnostics)
+            if (!boundary.invoke(
+                    [&] { emit sourceWarning(m_schema.diagnostics().sanitize(diagnostic)); }))
+                return;
+        if (packet.sourceAccepted &&
+            !boundary.invoke([&] { emit sourceAccepted(*packet.sourceAccepted); }))
+            return;
+        if (statusChange && !boundary.invoke([&] { emit statusChanged(); }))
+            return;
+        for (const auto &projection : projections)
+            if (projection && !boundary.invoke([&] { emit projection->stateChanged(); }))
+                return;
+    }
+    if (!boundary.alive())
         return;
     if (packet.result) {
         if (packet.result->operation == "close" && !m_threadStopped) {

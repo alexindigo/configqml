@@ -178,7 +178,7 @@ void ConfigWorker::processGroup(const ConfigCommand &inputCommand) {
         return;
     }
     if (command.applyAttempt) {
-        post(publish());
+        publishBeforeCompletion(command.requestId);
         rememberApply(command, fences.keys(), acceptedEdits);
     }
     beginSave(command);

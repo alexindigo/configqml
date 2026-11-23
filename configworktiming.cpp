@@ -141,7 +141,11 @@ void ConfigWorkTiming::enable(QObject *owner) {
                            QVariant::fromValue<QObject *>(new ConfigWorkTiming(owner)));
 }
 ConfigWorkPublication::ConfigWorkPublication(QObject *owner, bool models)
-    : m_state(ConfigWorkTiming::get(owner)), m_models(models) {
+    : ConfigWorkPublication(owner, 0, 0) {
+    m_models = models;
+}
+ConfigWorkPublication::ConfigWorkPublication(QObject *owner, quint64 delivery, quint64 request)
+    : m_state(ConfigWorkTiming::get(owner)), m_delivery(delivery), m_request(request) {
     if (m_state) {
         m_frame = std::make_shared<ConfigWorkFrame>();
         m_state->frames.append(m_frame);
@@ -156,8 +160,17 @@ ConfigWorkPublication::~ConfigWorkPublication() {
     Q_ASSERT(!m_state->frames.isEmpty() && m_state->frames.last() == m_frame);
     m_state->frames.removeLast();
     m_state->validMeasurements &= sample.valid;
-    if (m_models)
-        m_state->lastModel = sample;
+    if (m_models) {
+        // One request can install models before persistence and again at
+        // settlement. Charge both, without replacing the earlier work.
+        if (m_request && m_state->lastModelRequest == m_request)
+            m_state->lastModel += sample;
+        else if (m_delivery >= m_state->lastModelDelivery) {
+            m_state->lastModel = sample;
+            m_state->lastModelRequest = m_request;
+        }
+        m_state->lastModelDelivery = qMax(m_state->lastModelDelivery, m_delivery);
+    }
     if (!m_state->worst.valid || sample.charged() > m_state->worst.charged())
         m_state->worst = sample;
     m_state->lastModel.valid &= m_state->validMeasurements;

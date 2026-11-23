@@ -51,6 +51,7 @@ public:
     static ConfigWorkTiming *get(QObject *owner);
     static void enable(QObject *owner);
     ConfigThreadWorkSample lastModel, worst;
+    quint64 lastModelRequest = 0, lastModelDelivery = 0;
     bool validMeasurements = true;
     QList<std::shared_ptr<ConfigWorkFrame>> frames;
     explicit ConfigWorkTiming(QObject *owner) : QObject(owner) {}
@@ -59,12 +60,15 @@ public:
 class ConfigWorkPublication {
 public:
     ConfigWorkPublication(QObject *owner, bool models);
+    ConfigWorkPublication(QObject *owner, quint64 delivery, quint64 request);
     ~ConfigWorkPublication();
+    void appliedModel() { m_models = true; }
 
 private:
     QPointer<ConfigWorkTiming> m_state;
     std::shared_ptr<ConfigWorkFrame> m_frame;
     std::optional<ConfigThreadWorkTimer> m_timer;
-    bool m_models;
+    quint64 m_delivery, m_request;
+    bool m_models = false;
 };
 } // namespace configqml

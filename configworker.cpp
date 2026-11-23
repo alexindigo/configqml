@@ -361,6 +361,11 @@ static bool sameConfirmedContent(const QVariant &a, const QVariant &b) {
 ConfigWorkerPacket ConfigWorker::publish(const std::optional<ConfigResult> &result, bool initial) {
     return publishPacket(result, initial, true);
 }
+void ConfigWorker::publishBeforeCompletion(quint64 requestId) {
+    auto packet = publish();
+    packet.publicationRequest = requestId;
+    post(packet);
+}
 ConfigWorkerPacket ConfigWorker::publishControl(const std::optional<ConfigResult> &result) {
     return publishPacket(result, false, false);
 }
@@ -1282,7 +1287,7 @@ void ConfigWorker::finishSave() {
         auto receipt = m_saveResult;
         receipt.editorId = command.editorId;
         receipt.refreshState = "not_refreshed";
-        post(publish());
+        publishBeforeCompletion(command.requestId);
         m_busy = false;
         if (receipt.status == "failed") {
             post(publish(receipt));

@@ -18,6 +18,24 @@ ConfigPublicationScope::~ConfigPublicationScope() {
             ConfigReadProjectionState::deliver(m_store);
     }
 }
+thread_local const ConfigProjectionNotificationScope *ConfigProjectionNotificationScope::s_current =
+    nullptr;
+ConfigProjectionNotificationScope::ConfigProjectionNotificationScope(ConfigStore *store)
+    : m_previous(s_current), m_store(store) {
+    s_current = this;
+}
+ConfigProjectionNotificationScope::~ConfigProjectionNotificationScope() {
+    s_current = m_previous;
+    if (m_store)
+        ConfigReadProjectionState::deliver(m_store);
+}
+bool ConfigProjectionNotificationScope::defers(const ConfigStore *store) {
+    if (store)
+        for (auto scope = s_current; scope; scope = scope->m_previous)
+            if (scope->m_store == store)
+                return true;
+    return false;
+}
 ConfigReadProjection::ConfigReadProjection(QObject *parent)
     : QObject(parent), d(new ConfigReadProjectionState(this)) {}
 ConfigReadProjection::~ConfigReadProjection() { d->lifetime->store(false); }
@@ -386,17 +404,9 @@ void ConfigReadProjectionState::install(ConfigStore *store, const ConfigWorkerPa
                 }
     }
 }
-bool ConfigReadProjectionState::prepare() {
-    ConfigConsumerGuard guard(q);
-    if (changed) {
-        changed = false;
-        completed = installed;
-        if (!guard.invoke([&] { emit q->stateChanged(); }))
-            return false;
-    }
-    return guard.alive();
-}
 bool ConfigReadProjectionState::finish() {
+    if (ConfigProjectionNotificationScope::defers(store))
+        return true;
     ConfigConsumerGuard guard(q);
     while (!requests.isEmpty()) {
         const auto first = requests.cbegin();
@@ -451,17 +461,23 @@ void ConfigReadProjectionState::invalidate() {
     if (!store || !store->m_publishingModels)
         finish();
 }
-bool ConfigReadProjectionState::complete(ConfigStore *store) {
+QList<QPointer<ConfigReadProjection>> ConfigReadProjectionState::promote(ConfigStore *store) {
     auto *root = get(store);
     QList<QPointer<ConfigReadProjection>> projections{root};
     projections.append(root->d->views);
-    ConfigConsumerGuard guard(store);
-    for (const auto &projection : projections)
-        if (projection && !guard.invoke([&] { projection->d->prepare(); }))
-            return false;
-    return guard.alive();
+    QList<QPointer<ConfigReadProjection>> changed;
+    for (const auto &projection : projections) {
+        if (!projection || !projection->d->changed)
+            continue;
+        projection->d->changed = false;
+        projection->d->completed = projection->d->installed;
+        changed.append(projection);
+    }
+    return changed;
 }
 bool ConfigReadProjectionState::deliver(ConfigStore *store) {
+    if (store->m_publishingModels || ConfigProjectionNotificationScope::defers(store))
+        return true;
     auto *root = get(store);
     QList<QPointer<ConfigReadProjection>> projections{root};
     projections.append(root->d->views);

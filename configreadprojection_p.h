@@ -24,6 +24,22 @@ private:
     QPointer<ConfigStore> m_store;
     bool m_previous = false;
 };
+// Readers promise not to complete inside the notifying callback. Unlike the
+// model fence, this scope does not stall incoming packets or store replies.
+class ConfigProjectionNotificationScope {
+public:
+    explicit ConfigProjectionNotificationScope(ConfigStore *store);
+    ~ConfigProjectionNotificationScope();
+    ConfigProjectionNotificationScope(const ConfigProjectionNotificationScope &) = delete;
+    ConfigProjectionNotificationScope &
+    operator=(const ConfigProjectionNotificationScope &) = delete;
+    static bool defers(const ConfigStore *store);
+
+private:
+    static thread_local const ConfigProjectionNotificationScope *s_current;
+    const ConfigProjectionNotificationScope *m_previous;
+    QPointer<ConfigStore> m_store;
+};
 class ConfigReadProjectionState {
 public:
     static ConfigReadProjection *get(ConfigStore *store);
@@ -36,7 +52,7 @@ public:
     static ConfigOverlayPresentation eligible(ConfigOverlayEditor *overlay,
                                               const ConfigOverlayPresentation &presentation);
     static void install(ConfigStore *store, const ConfigWorkerPacket &packet);
-    static bool complete(ConfigStore *store);
+    static QList<QPointer<ConfigReadProjection>> promote(ConfigStore *store);
     static bool deliver(ConfigStore *store);
     static bool operation(ConfigReadProjection *projection, const ConfigCompletion &pair);
     static void refresh(ConfigDraft *draft);
@@ -53,7 +69,6 @@ private:
     ConfigReadProjectionState *origin();
     QList<ConfigPath> pending(quint64 covered) const;
     void receive(const ConfigReadCapture &capture);
-    bool prepare();
     bool finish();
     void fail(quint64 requestId, const QString &error);
     void invalidate();

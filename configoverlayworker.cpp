@@ -657,7 +657,7 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
     }
     // Advance only the own causal owner base; the frozen plugin base is unchanged.
     t->captured.ownerIngress = m_endpoint->revision(t->selection.ownerPath);
-    post(publish());
+    publishBeforeCompletion(command.requestId);
     t->captured.ownerFence = m_previous.information.value(t->selection.ownerPath);
     m_overlayCaptures[t->editorId] = t->captured;
     rememberApply(command, {t->selection.ownerPath}, input.edits);
