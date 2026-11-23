@@ -184,6 +184,9 @@ ConfigCandidate resolveCandidate(const ConfigLayers &base, const ConfigEditBatch
     }
     result.facts =
         ConfigLayerEditAccess::capture(*candidate, base, batch.selection.leaves, runtime);
+    QSet<ConfigPath> policyPaths;
+    for (const auto &policy : policies)
+        policyPaths.insert(policy.path);
     for (auto it = result.facts.begin(); it != result.facts.end(); ++it) {
         const auto &path = it.key();
         auto &fact = it.value();
@@ -196,13 +199,18 @@ ConfigCandidate resolveCandidate(const ConfigLayers &base, const ConfigEditBatch
             fact.pending = operation->kind;
             fact.authored = operation->value;
         }
-        if (fact.effective.isValid() && !masked) {
-            const auto projected = projectCandidateLeaf(path, fact.effective, policies, metadata);
+        // Publication validates the file-layer value even if runtime hides it.
+        // A mask controls presentation, not admission of the underlying value.
+        if (!policyPaths.contains(path))
+            continue;
+        if (const auto value = candidate->unmaskedValue(path)) {
+            const auto projected = projectCandidateLeaf(path, *value, policies, metadata);
             if (!projected.ok()) {
                 result.error = projected.errors.first().code;
                 return result;
             }
-            fact.effective = projected.value;
+            if (!masked)
+                fact.effective = projected.value;
         }
     }
     result.layers = std::move(candidate);
