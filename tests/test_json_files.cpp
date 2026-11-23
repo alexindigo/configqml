@@ -177,23 +177,30 @@ private slots:
         QCOMPARE(store.value({"a"}).toLongLong(), 1);
         QSignalSpy errors(&store, &ConfigStore::sourceError);
         QVERIFY(writeFile(path, "{\n\"a\": }"));
-        QTRY_COMPARE(errors.size(), 1);
+        // File and parent-directory notifications can reread the same rejected
+        // revision. The contract is a diagnostic and intact last-good values.
+        QVERIFY(
+            test::awaitEvent(&store, &ConfigStore::sourceError, [&] { return !errors.isEmpty(); }));
         const auto error = qvariant_cast<ConfigError>(errors[0][0]);
         QCOMPARE(error.file, path);
         QCOMPARE(error.line, 2);
         QCOMPARE(store.value({"a"}).toLongLong(), 1);
-        QVERIFY(writeFile(path, "{\"a\":2,\"b\":3}"));
         bool coherent = false;
         connect(&store, &ConfigStore::valuesChanged, this, [&](const auto &) {
             if (store.value({"a"}).toLongLong() == 2)
                 coherent = store.value({"b"}).toLongLong() == 3;
         });
-        QTRY_COMPARE(store.value({"a"}).toLongLong(), 2);
+        const auto awaitValue = [&](qint64 expected) {
+            return test::awaitEvent(&store, &ConfigStore::valuesChanged,
+                                    [&] { return store.value({"a"}).toLongLong() == expected; });
+        };
+        QVERIFY(writeFile(path, "{\"a\":2,\"b\":3}"));
+        QVERIFY(awaitValue(2));
         QVERIFY(coherent);
         QVERIFY(QFile::remove(path));
-        QTRY_COMPARE(store.value({"a"}).toLongLong(), 0);
+        QVERIFY(awaitValue(0));
         QVERIFY(writeFile(path, "{\"a\":7}"));
-        QTRY_COMPARE(store.value({"a"}).toLongLong(), 7);
+        QVERIFY(awaitValue(7));
         QCOMPARE(store.inputs().size(), 0);
     }
     void modesAndFreshConditional() {
@@ -794,11 +801,11 @@ private slots:
         QTRY_COMPARE(store.status(), ConfigStore::Status::Ready);
         QCOMPARE(store.value({"a"}).toLongLong(), 4);
         QCOMPARE(store.value({"b"}).toLongLong(), 3);
-        QVERIFY(writeFile(system, "{\"a\":7,\"b\":\"invalid\"}"));
         QSignalSpy errors(&store, &ConfigStore::sourceError);
-        QTest::qWait(100);
+        QVERIFY(writeFile(system, "{\"a\":7,\"b\":\"invalid\"}"));
+        QVERIFY(
+            test::awaitEvent(&store, &ConfigStore::sourceError, [&] { return !errors.isEmpty(); }));
         QCOMPARE(store.value({"b"}).toLongLong(), 3); // Whole source projection rejected.
-        QCOMPARE(errors.size(), 1);
         store.setUser({"a"}, 9);
         store.close();
         QTRY_COMPARE(store.status(), ConfigStore::Status::Closed);
