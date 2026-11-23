@@ -18,6 +18,21 @@ the host as read/copy work; compilation and runtime verification stay in the VM.
 
 From the guest workspace with the candidate delivered into `source/`:
 
+Enable the Linux scheduler's own run-queue accounting inside the assigned test
+VM before either suite (`sudo sysctl -w kernel.sched_schedstats=1`), recording and
+restoring its previous value when closing the VM. Release qualification runs the
+full gate: the 16 ms thread-CPU check and the CPU-plus-blocked check. The CPU check
+needs no scheduler accounting and always runs. Without run-queue accounting the
+blocked check is not run and every sample prints `CALLER_WORK_BLOCKED_NOT_MEASURED`
+with its reason; missing data is never treated as zero wait or as a pass. CI
+enables accounting on its runners, so every pull request runs both checks; an
+unprivileged package `check()` reports the blocked check as not measured.
+The thread_work controls use a short guest-only sudo FIFO child on one CPU to
+prove scheduler delay is distinct from blocking; where accounting or passwordless
+sudo is missing they report themselves as skipped with that reason. Do not enable or run these
+controls on the physical VM host. See docs/models.md for the unchanged 16 ms CPU
+and CPU-plus-blocked budget and the separately reported wall/run-queue spans.
+
 ```sh
 timeout 1800 cmake -S source -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 timeout 1800 cmake --build build-release --parallel 4
@@ -63,16 +78,16 @@ timeout 1800 cmake --build core-consumer --parallel 2
 timeout 60 core-consumer/configqml-native
 ```
 
-Require `CONFIGQML_NATIVE_OK 0.5.3`, exit 0, no QtQml imported target or dependency.
+Require `CONFIGQML_NATIVE_OK 0.5.4`, exit 0, no QtQml imported target or dependency.
 BUILD_TESTING defaults off; packaging must not require Qt Test or Quick.
 
 ## Gate 3 — Arch package
 
-The host transport creates `qt6-configqml-0.5.3.tar.gz` from the release commit:
+The host transport creates `qt6-configqml-0.5.4.tar.gz` from the release commit:
 
 ```sh
-git archive --format=tar.gz --prefix=configqml-0.5.3/ \
-  --output=qt6-configqml-0.5.3.tar.gz <release-commit>
+git archive --format=tar.gz --prefix=configqml-0.5.4/ \
+  --output=qt6-configqml-0.5.4.tar.gz <release-commit>
 ```
 
 Archiving/delivery is read/copy work only. It delivers that archive and the
@@ -84,8 +99,8 @@ without a network fetch. In that guest directory:
 timeout 60 makepkg --printsrcinfo > generated.SRCINFO
 timeout 60 diff -u .SRCINFO generated.SRCINFO
 timeout 1800 makepkg --cleanbuild --noconfirm
-timeout 120 sudo pacman -U --noconfirm qt6-configqml-0.5.3-1-x86_64.pkg.tar.zst
-timeout 60 namcap PKGBUILD qt6-configqml-0.5.3-1-x86_64.pkg.tar.zst
+timeout 120 sudo pacman -U --noconfirm qt6-configqml-0.5.4-1-x86_64.pkg.tar.zst
+timeout 60 namcap PKGBUILD qt6-configqml-0.5.4-1-x86_64.pkg.tar.zst
 timeout 60 pacman -Qkk qt6-configqml
 env -u QML_IMPORT_PATH -u QML2_IMPORT_PATH -u LD_LIBRARY_PATH QT_FORCE_STDERR_LOGGING=1 \
   timeout 60 /usr/lib/qt6/bin/qml -a core ../source/examples/qml/Settings.qml
@@ -97,7 +112,7 @@ timeout 60 ldd ../package-native/configqml-native
 ```
 
 Require clean namcap output, 0 altered package files, `CONFIGQML_QML_OK` and
-`CONFIGQML_NATIVE_OK 0.5.3`, exit 0, with native libraries from `/usr/lib`.
+`CONFIGQML_NATIVE_OK 0.5.4`, exit 0, with native libraries from `/usr/lib`.
 Check package headers,
 CMake exports, libraries, QML metadata/plugin and both license texts. The external
 packaging checkout needs the published archive's real checksum before submission.

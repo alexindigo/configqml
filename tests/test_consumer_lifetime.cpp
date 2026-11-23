@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "storeprobe.h"
+#include <QSignalSpy>
 #include <QTest>
+#include <thread>
 using namespace configqml;
 static ConfigStoreOptions options() {
     ConfigStoreOptions o;
@@ -58,6 +60,28 @@ private slots:
         QTRY_VERIFY(store.isNull());
         QCOMPARE(callback, boundary == "completion-callback");
         QVERIFY(!second);
+    }
+    void retiredOwnerAfterForeignRelease() {
+        // An overlay endpoint send can hold the worker owner on another store's
+        // worker thread. When that is the last reference, deletion is deferred
+        // and queued owner events, such as the thread-finished join, still arrive.
+        auto store = std::make_unique<ConfigStore>(options());
+        QTRY_COMPARE(store->status(), ConfigStore::Status::Ready);
+        auto foreign = ConfigStoreTestAccess::owner(*store);
+        QPointer<ConfigWorkerOwner> owner = foreign.get();
+        QSignalSpy joined(owner.data(), &ConfigWorkerOwner::joined);
+        store.reset();
+        QTRY_COMPARE(joined.count(), 1);
+        QVERIFY(owner->stopped());
+        std::thread([held = std::move(foreign)]() mutable { held.reset(); }).join();
+        QVERIFY(owner);
+        try {
+            owner->pollJoin();
+        } catch (const std::bad_weak_ptr &) {
+            QFAIL("a queued event of a retired owner required ownership");
+        }
+        QCOMPARE(joined.count(), 1);
+        QTRY_VERIFY(owner.isNull());
     }
 };
 QTEST_GUILESS_MAIN(ConsumerLifetimeTest)

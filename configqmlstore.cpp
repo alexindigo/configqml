@@ -6,6 +6,7 @@
 #include "configqmlmodel.h"
 #include "configstorehandle.h"
 #include "configchange_p.h"
+#include "configobservation_p.h"
 #include <QQmlEngine>
 #include <QTimer>
 
@@ -198,11 +199,16 @@ void ConfigQmlStore::componentComplete() {
     connect(m_core, &ConfigStore::valuesChanged, this, &ConfigQmlStore::settingValuesChanged);
     m_values = createConfigNamespace(this, *m_core->schema().descriptor({}), {}, this);
     initializeNotifications();
+    if (findChild<ConfigQmlReadProjection *>("_configqml_qml_read_projection",
+                                             Qt::FindDirectChildrenOnly))
+        readProjection();
     connect(m_core, &ConfigStore::statusChanged, this,
             [this] { ConfigConsumerGuard(this).invoke([&] { emit statusChanged(); }); });
-    connect(m_core, &ConfigStore::completed, this, [this](const auto &result) {
-        ConfigConsumerGuard(this).invoke([&] { emit completed(resultMap(result)); });
-    });
+    connect(m_core->readProjection(), &ConfigReadProjection::operationCompleted, this,
+            [this](const ConfigResult &result, const ConfigObservation &observation) {
+                ConfigConsumerGuard(this).invoke(
+                    [&] { emit completed(resultMap(result, observation)); });
+            });
     connect(m_core, &ConfigStore::autoSaved, this, [this](const auto &result) {
         ConfigConsumerGuard(this).invoke([&] { emit autoSaved(resultMap(result)); });
     });
@@ -242,34 +248,43 @@ ConfigStore::Callback ConfigQmlStore::callback(const QJSValue &function) {
     if (!function.isCallable())
         return {};
     QPointer<ConfigQmlStore> guard(this);
-    return [guard, function](const ConfigResult &result) {
+    return ConfigPairedCallback{[guard, function](const ConfigCompletion &completion) {
         if (!guard || (guard->m_isHandle && !guard->m_core))
             return;
         if (auto *engine = guard->scriptEngine()) {
             ConfigConsumerGuard boundary(guard, engine);
             QJSValue returned;
-            if (!boundary.invoke([&] { returned = function.call({guard->resultMap(result)}); }))
+            if (!boundary.invoke([&] {
+                    returned = function.call(
+                        {guard->resultMap(completion.result, completion.observation)});
+                }))
                 return;
             if (returned.isError())
                 qWarning("configqml: completion callback threw");
         }
-    };
+    }};
 }
-QVariant ConfigQmlStore::read(const ConfigPath &path) const {
+QVariant ConfigQmlStore::readValue(const ConfigPath &path, bool presentation) const {
     if (m_isPreview && !ready())
         return {};
     if (!m_core && !m_overlay)
         return {};
+    if (m_isPreview)
+        return presentation ? m_previewDraft->previewPresentation(path)
+                            : m_previewDraft->previewValue(path);
+    if (m_overlay)
+        return presentation ? m_overlay->presentation(path) : m_overlay->value(path);
+    if (m_draft)
+        return presentation ? m_draft->presentation(path) : m_draft->value(path);
+    return presentation ? m_core->presentation(path) : m_core->value(path);
+}
+QVariant ConfigQmlStore::read(const ConfigPath &path) const {
+    if ((m_isPreview && !ready()) || (!m_core && !m_overlay))
+        return {};
     const auto cached = m_scriptPresentations.constFind(path);
     if (cached != m_scriptPresentations.cend())
         return cached.value();
-    QVariant value;
-    if (m_isPreview)
-        value = m_previewDraft->previewPresentation(path);
-    else if (m_overlay)
-        value = m_overlay->presentation(path);
-    else if (m_core)
-        value = m_draft ? m_draft->presentation(path) : m_core->presentation(path);
+    const auto value = readValue(path, true);
     auto *engine = scriptEngine();
     if (!engine)
         return value;

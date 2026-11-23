@@ -156,6 +156,44 @@ std::optional<QVariant> overlayAt(const QVariant &root, const QList<ConfigValueS
     }
     return value;
 }
+ConfigEditBatch overlayBatch(const ConfigSchema &ownerSchema, const ConfigOverlayCapture &base,
+                             const ConfigOverlayCapture &destination,
+                             const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                             bool resetAll) {
+    const auto selected =
+        ConfigSelection::capture(base.schema, base.schema.leaves(), base.schema.leaves(),
+                                 ConfigSelection::Target::RecordSlot, "overlay-selection");
+    const auto relative = ConfigEditBatch::capture(selected, edits);
+    ConfigEditBatch result;
+    result.error = relative.error;
+    if (!result.error.isEmpty())
+        return result;
+    const auto difference = resetAll ? QVariantMap{}
+                                     : overlayDifference(base.schema, base.baseValues,
+                                                         relative.layerEdits(), base.overrides);
+    const auto original = overlayAt(destination.ownerValue, destination.rawEntryPath);
+    if (!original) {
+        result.error = "overlay-selection";
+        return result;
+    }
+    auto record = original->toMap();
+    if (difference.isEmpty())
+        record.remove(destination.selection.overrideKey);
+    else
+        record[destination.selection.overrideKey] = difference;
+    const auto replacement =
+        overlayReplace(destination.ownerValue, destination.rawEntryPath, record);
+    if (!replacement) {
+        result.error = "overlay-selection";
+        return result;
+    }
+    auto ownerSelection = ConfigSelection::capture(
+        ownerSchema, {destination.selection.ownerPath}, ownerSchema.leaves(),
+        ConfigSelection::Target::RecordSlot, "overlay-selection");
+    ownerSelection.owner = destination.selection.owner;
+    return ConfigEditBatch::capture(ownerSelection,
+                                    {{destination.selection.ownerPath, replacement}});
+}
 std::optional<QVariant> overlayReplace(const QVariant &root, const QList<ConfigValueSelector> &path,
                                        const QVariant &replacement) {
     if (path.isEmpty())

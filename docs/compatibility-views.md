@@ -74,6 +74,11 @@ and cause distinguish startup, foreign reads, own saves and metadata projection.
 An unchanged confirmed own echo generates no acceptance event. Metadata-only
 events do not pretend to be an external settings choice.
 
+The worker resolves that disk branch once per event capture and selects every
+fact from the resulting immutable tree, including absent leaves. Adding declared
+leaves does not repeat the full layer merge for each fact. This does not skip
+source preflight, readback, revision checks or file/directory synchronization.
+
 Each event is one coherent accepted generation, not a transaction spanning
 independent file replacements. With Live watching, two replacements may produce
 one combined event or two successive complete disk-branch events. Consume each

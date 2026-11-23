@@ -95,6 +95,7 @@ void ConfigWorker::processGroup(const ConfigCommand &inputCommand) {
     if (command.selectsPublication() && !prepareSelected(command))
         return;
     const auto input = command.input.value_or(ConfigInput{});
+    const bool ordinaryWrite = command.operation == "write";
     const bool retry = command.applyAttempt && command.applyAttempt->expected;
     auto fences = input.fences;
     auto acceptedEdits = input.edits;
@@ -134,41 +135,50 @@ void ConfigWorker::processGroup(const ConfigCommand &inputCommand) {
         beginSave(command);
         return;
     }
-    auto candidate = *m_layers;
     const auto before = *m_layers;
-    for (auto it = input.edits.cbegin(); error.isEmpty() && it != input.edits.cend(); ++it) {
-        error = quarantined(it.key());
-        if (!error.isEmpty())
-            break;
-        ConfigInput leaf;
-        leaf.kind = it.value() ? ConfigInput::Kind::User : ConfigInput::Kind::Reset;
-        leaf.path = it.key();
-        leaf.value = it.value().value_or(QVariant());
-        leaf.sequence = input.sequence;
-        if (m_options.admission)
-            error = m_options.admission(leaf);
-        if (!error.isEmpty())
-            break;
-    }
+    auto selection =
+        ConfigSelection::capture(m_options.schema, input.edits.keys(), m_options.schema.leaves(),
+                                 command.runtimeEdits ? ConfigSelection::Target::RuntimeLayer
+                                                      : ConfigSelection::Target::UserLayer,
+                                 "admission", true);
+    selection.owner = m_endpoint;
+    auto batch = ConfigEditBatch::capture(selection, input.edits);
+    batch.sequence = input.sequence;
+    batch.fences = fences;
+    if (!command.runtimeEdits)
+        for (auto it = input.edits.cbegin(); error.isEmpty() && it != input.edits.cend(); ++it)
+            error = quarantined(it.key());
+    ConfigCandidate candidate;
     if (error.isEmpty()) {
-        const auto outcome = candidate.applyEdits(input.edits);
-        if (!outcome.accepted)
-            error = outcome.errors.isEmpty() ? QString("admission") : outcome.errors.first().code;
+        candidate =
+            resolveCandidate(*m_layers, batch, m_listPolicies, m_listMetadata, m_options.admission);
+        error = candidate.error;
     }
     if (!error.isEmpty()) {
         auto result = resultFor(command);
         result.status = "failed";
-        result.error = {error, {}, "apply"};
+        result.error = {error, {}, ordinaryWrite ? "write" : "apply"};
         result.rejectedPathGenerations = input.pathGenerations;
         reconcileApplyRejection(command);
         post(publish(result));
         return;
     }
-    *m_layers = std::move(candidate);
+    *m_layers = std::move(*candidate.layers);
     acceptIntent(input);
-    recordPersistent(input, before);
+    if (!command.runtimeEdits)
+        recordPersistent(input, before);
+    if (ordinaryWrite) {
+        if (!command.runtimeEdits)
+            scheduleAutoSave();
+        auto result = resultFor(command);
+        result.status = "accepted";
+        if (input.edits.size() == 1)
+            result.maskedBy = m_layers->info(input.edits.firstKey()).maskedBy;
+        post(publish(result));
+        return;
+    }
     if (command.applyAttempt) {
-        post(publish());
+        publishBeforeCompletion(command.requestId);
         rememberApply(command, fences.keys(), acceptedEdits);
     }
     beginSave(command);

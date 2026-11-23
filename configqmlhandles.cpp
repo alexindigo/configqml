@@ -36,9 +36,11 @@ void ConfigQmlStore::initializeHandle(ConfigStore *core, const ConfigPath &prefi
     } else
         connect(core, &ConfigStore::valuesChanged, this, &ConfigQmlStore::settingValuesChanged);
     connect(core, &ConfigStore::statusChanged, this, &ConfigQmlStore::statusChanged);
-    connect(core, &ConfigStore::completed, this, [this](const ConfigResult &result) {
-        ConfigConsumerGuard(this).invoke([&] { emit completed(resultMap(result)); });
-    });
+    connect(core->readProjection(), &ConfigReadProjection::operationCompleted, this,
+            [this](const ConfigResult &result, const ConfigObservation &observation) {
+                ConfigConsumerGuard(this).invoke(
+                    [&] { emit completed(resultMap(result, observation)); });
+            });
     const auto schema = preview ? draft->previewSchema() : core->schema();
     m_values = createConfigNamespace(this, *schema.descriptor(prefix), prefix, this);
     initializeNotifications();
@@ -176,6 +178,15 @@ QString ConfigQmlStore::apply(const QJSValue &function) {
     }
     quint64 id = 0;
     ConfigConsumerGuard(this).invoke([&] { id = m_draft->apply(this, callback(function)); });
+    return QString::number(id);
+}
+QString ConfigQmlStore::abandonApply(const QJSValue &function) {
+    if (!m_draft || !m_core || m_isPreview || m_overlay || m_draft->busy()) {
+        reject({}, "not-an-idle-draft");
+        return {};
+    }
+    quint64 id = 0;
+    ConfigConsumerGuard(this).invoke([&] { id = m_draft->abandonApply(this, callback(function)); });
     return QString::number(id);
 }
 QString ConfigQmlStore::stageReset(const QVariantList &paths, const QJSValue &function) {

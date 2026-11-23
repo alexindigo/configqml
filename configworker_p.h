@@ -8,6 +8,7 @@
 #include "configdraft_p.h"
 #include "configevidence_p.h"
 #include "configapply_p.h"
+#include "configcandidate_p.h"
 #include <QQueue>
 #include <QTimer>
 #include <QFileSystemWatcher>
@@ -41,6 +42,12 @@ struct ConfigWorkerPacket {
     QList<ConfigDraftPresentation> drafts;
     QMap<ConfigPath, QMap<quint64, ConfigModelPlan>> models;
     qint64 planningNanos = 0;
+    quint64 deliveryGeneration = 0;
+    // The request producing a pre-completion publication (for example Apply).
+    quint64 publicationRequest = 0;
+    ConfigObservation completionObservation;
+    ConfigReadSnapshot readSnapshot;
+    QList<ConfigReadCapture> reads;
 };
 struct ConfigCommand {
     ConfigCommand() = default;
@@ -52,6 +59,7 @@ struct ConfigCommand {
     quint64 prefix = 0;
     QString operation;
     std::optional<ConfigInput> input;
+    bool runtimeEdits = false;
     QString file;
     QString profileName;
     QList<ConfigPath> selection;
@@ -71,6 +79,7 @@ struct ConfigCommand {
     std::shared_ptr<const ConfigDraftPreview> preview;
     std::shared_ptr<const ConfigDraftRequest> draft;
     std::shared_ptr<ConfigApplyAttempt> applyAttempt;
+    std::shared_ptr<const ConfigReadRequest> read;
     bool selectsPublication() const {
         return operation == "saveSelected" || (applyAttempt && applyAttempt->selectedPublication);
     }
@@ -150,6 +159,7 @@ private:
     void rememberApply(const ConfigCommand &command, const QList<ConfigPath> &paths,
                        const QMap<ConfigPath, std::optional<QVariant>> &edits);
     void reconcileApplyRejection(const ConfigCommand &command);
+    void abandonApply(const ConfigCommand &command);
     struct OwnPublication {
         ConfigSourcePreimage output, predecessor, recoveryBase;
         ConfigCommand origin;
@@ -189,6 +199,10 @@ private:
     void acceptIntent(const ConfigInput &input);
     ConfigWorkerPacket publish(const std::optional<ConfigResult> &result = {},
                                bool initial = false);
+    void publishBeforeCompletion(quint64 requestId);
+    ConfigWorkerPacket publishControl(const std::optional<ConfigResult> &result = {});
+    ConfigWorkerPacket publishPacket(const std::optional<ConfigResult> &result, bool initial,
+                                     bool stateChanged);
     void post(const ConfigWorkerPacket &packet);
     ConfigResult resultFor(const ConfigCommand &command) const;
     bool inheritFailures(ConfigResult &result) const;
@@ -211,18 +225,37 @@ private:
     void scheduleAutoSave();
     void processGroup(const ConfigCommand &command);
     void resolveDraft(const ConfigCommand &command);
+    void synchronizeRead(const ConfigCommand &command);
+    ConfigReadSnapshot
+    readSnapshot(const QList<ConfigPath> &paths,
+                 const std::shared_ptr<const ConfigSnapshot> &admitted = {}) const;
     QList<ConfigDraftPresentation> draftPresentations();
+    Q_DECL_HIDDEN QList<ConfigDraftPresentation>
+    draftPresentationsFor(const std::shared_ptr<const ConfigSnapshot> &admitted,
+                          const ConfigSnapshot *delta);
+    ConfigCandidate
+    resolveCandidate(const ConfigLayers &base, const ConfigEditBatch &batch,
+                     const QMap<QString, ConfigRecordListPolicySpec> &policies,
+                     const QMap<QString, ConfigRecordListMetadata> &metadata,
+                     const std::function<QString(const ConfigInput &)> &admission = {}) const;
+    mutable quint64 m_candidateResolutions = 0;
+    QVariantList candidateKey(const QList<ConfigPath> &paths) const;
     QMap<ConfigPath, QVariant>
     draftCandidate(const ConfigLayers &base, const QList<ConfigPath> &paths,
                    const QMap<ConfigPath, std::optional<QVariant>> &edits, QString &error) const;
     struct DraftCapture {
         std::shared_ptr<const ConfigDraftRequest> request;
+        ConfigEditBatch batch;
         std::shared_ptr<const ConfigLayers> frozen;
         QMap<ConfigPath, QVariant> frozenValues, liveValues;
+        ConfigObservation frozenObservation;
+        ConfigReadSnapshot frozenRead, liveRead;
+        QVariantList liveKey;
     };
     QMap<QString, DraftCapture> m_draftCaptures;
     QList<ConfigDraftPresentation> m_draftPackets;
     void overlayCommand(const ConfigCommand &command);
+    void overlayCandidate(const ConfigCommand &command);
     void overlayAcquire(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
     void overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
     void overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransaction> &transaction);
@@ -332,6 +365,8 @@ private:
     quint64 m_prefix = 0;
     QSet<quint64> m_settledInputs;
     quint64 m_generation = 0;
+    quint64 m_deliveryGeneration = 0;
+    QMap<QString, quint64> m_readOrders;
     QMap<ConfigPath, quint64> m_pathGenerations;
     QMap<ConfigPath, quint64> m_pathInputs;
     QMap<ConfigPath, quint64> m_pathIntents;

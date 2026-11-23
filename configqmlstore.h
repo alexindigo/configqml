@@ -4,6 +4,8 @@
 #include "configstore.h"
 #include "configdraft.h"
 #include "configoverlayeditor.h"
+#include "configqmlreadprojection.h"
+#include "configqmlhandle.h"
 #include <QJSValue>
 #include <QQmlParserStatus>
 #include <QAbstractItemModel>
@@ -11,6 +13,7 @@
 
 namespace configqml {
 class ConfigQmlOverlay;
+class ConfigQmlHandle;
 class ConfigQmlStore : public QObject, public QQmlParserStatus {
     Q_OBJECT
     QML_NAMED_ELEMENT(ConfigStore)
@@ -35,6 +38,9 @@ class ConfigQmlStore : public QObject, public QQmlParserStatus {
     Q_PROPERTY(bool busy READ busy NOTIFY draftStateChanged BINDABLE bindableBusy)
     Q_PROPERTY(QString editorId READ editorId CONSTANT)
     Q_PROPERTY(QObject *preview READ preview CONSTANT)
+    Q_PROPERTY(configqml::ConfigQmlReadProjection *readProjection READ readProjection CONSTANT)
+    Q_PROPERTY(configqml::ConfigQmlHandle *root READ root NOTIFY statusChanged)
+    Q_PROPERTY(configqml::ConfigQmlHandle *runtimeRoot READ runtimeRoot NOTIFY statusChanged)
 public:
     enum Status { Loading, Ready, Error, Closing, Closed };
     Q_ENUM(Status)
@@ -118,6 +124,10 @@ public:
     Q_INVOKABLE QString retryGroup(const QString &token, const QJSValue &callback = {});
     Q_INVOKABLE QString releaseGroup(const QString &token, const QJSValue &callback = {});
     Q_INVOKABLE QVariantMap groupInfo(const QString &token) const;
+    Q_INVOKABLE QString abandonApply(const QJSValue &callback = {});
+    ConfigQmlReadProjection *readProjection();
+    ConfigQmlHandle *root();
+    ConfigQmlHandle *runtimeRoot();
 signals:
     void schemaChanged();
     void valuesChanged();
@@ -136,6 +146,9 @@ signals:
 
 private:
     friend class ConfigQmlOverlay;
+    friend struct ConfigQmlStoreTestAccess;
+    friend class ConfigNamespaceValue;
+    QVariant readValue(const ConfigPath &path, bool presentation) const;
     ConfigStore::Callback callback(const QJSValue &function);
     QJSEngine *scriptEngine() const;
     void reject(const ConfigPath &path, const QString &code);
@@ -146,6 +159,7 @@ private:
     void registerNotifications(ConfigChangePublisher *publisher);
     void prepareState();
     QJSValue resultMap(const ConfigResult &result) const;
+    QJSValue resultMap(const ConfigResult &result, const ConfigObservation &observation) const;
     QList<ConfigPath> selectedPaths(const QVariantList &paths, bool *ok);
     void initializeHandle(ConfigStore *core, const ConfigPath &prefix, bool writable,
                           ConfigDraft *draft = nullptr, bool preview = false);

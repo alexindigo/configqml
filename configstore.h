@@ -4,6 +4,7 @@
 #include "configjsonbackend.h"
 #include "configlistmodel.h"
 #include "configrecordlistpolicy.h"
+#include "configobservation.h"
 #include <QObject>
 #include <QPointer>
 #include <QThread>
@@ -19,9 +20,15 @@ class ConfigWorkerOwner;
 struct ConfigWorkerPacket;
 struct ConfigApplyAttempt;
 class ConfigStoreTestAccess;
+struct ConfigCommand;
 class ConfigDraft;
 class ConfigStoreHandle;
 class ConfigOverlayEditor;
+class ConfigReadProjection;
+class ConfigReadProjectionState;
+class ConfigHandle;
+class ConfigHandleState;
+struct ConfigCompletion;
 struct ConfigOverlayOptions;
 struct ConfigOverlayPresentation;
 struct ConfigOverlayEndpoint;
@@ -114,6 +121,9 @@ public:
     ConfigGroupInfo groupInfo(const QString &token) const;
     quint64 openOverlay(const ConfigOverlayOptions &options, QObject *context = nullptr,
                         Callback callback = {});
+    ConfigReadProjection *readProjection();
+    ConfigHandle *root();        // Live user-layer handle graph.
+    ConfigHandle *runtimeRoot(); // Live runtime-layer handle graph; no disk route.
 signals:
     void statusChanged();
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
@@ -130,6 +140,10 @@ signals:
     void overlayOpened(quint64 requestId, configqml::ConfigOverlayEditor *editor);
 
 private:
+    friend class ConfigReadProjection;
+    friend class ConfigReadProjectionState;
+    friend class ConfigHandleState;
+    friend class ConfigPublicationScope;
     friend class ConfigQmlStore;
     std::unique_ptr<ConfigChangePublisher> m_changes;
     friend class ConfigWorker;
@@ -153,6 +167,15 @@ private:
                               const QString &target, QObject *context, Callback callback,
                               ConfigDescriptor::Format format = ConfigDescriptor::Format::Native,
                               const ConfigAdmission *admission = nullptr);
+    Q_DECL_HIDDEN QList<ConfigDiagnostic> checkWrite(ConfigInput::Kind kind, const ConfigPath &path,
+                                                     const QString &target,
+                                                     const ConfigValueResult &checked) const;
+    Q_DECL_HIDDEN ConfigRequestHandle queueWrite(ConfigCommand command, const ConfigPath &path,
+                                                 QList<ConfigDiagnostic> errors, QObject *context,
+                                                 Callback callback);
+    Q_DECL_HIDDEN ConfigRequestHandle
+    writeEdits(const QMap<ConfigPath, std::optional<QVariant>> &edits, bool runtime,
+               QObject *context, Callback callback);
     quint64 request(const QString &operation, QObject *context, Callback callback,
                     const QList<ConfigPath> &selection = {});
     quint64 registerRequest(QObject *context, Callback callback);
@@ -161,6 +184,7 @@ private:
     QMap<QString, quint64> retainedGenerations() const;
     void receive(const ConfigWorkerPacket &packet);
     void receiveResult(const ConfigResult &result);
+    void receiveCompletion(const ConfigCompletion &completion);
     void deliver();
     void finishThread();
     struct Pending {
@@ -207,7 +231,7 @@ private:
     quint64 m_sequence = 0;
     quint64 m_nextCompletion = 1;
     QMap<quint64, Pending> m_pending;
-    QMap<quint64, ConfigResult> m_results;
+    QMap<quint64, ConfigCompletion> m_results;
     QList<ConfigInput> m_inputs;
     QList<ConfigResult> m_failures;
     QMap<ConfigPath, std::shared_ptr<ConfigListModel>> m_models;

@@ -134,3 +134,51 @@ run(${clean} ${preload} "QML_IMPORT_PATH=${qmldir}:@_qt_qml@" QT_QPA_PLATFORM=of
 if(NOT last_output MATCHES "CONFIGQML_QML_OK: DP-1,HDMI-A-1")
     message(FATAL_ERROR "QML example did not observe the saved outputs")
 endif()
+
+# Run the same generated-handle consumers as the standalone qualification,
+# using the paths resolved for this actual layout (including pinned absolute
+# destinations). Keep the existing examples and their checks above unchanged.
+set(handles_source "@CMAKE_CURRENT_SOURCE_DIR@/tests/generic_primitives/installed")
+set(handles_build "${root}/generic-handles")
+run(${clean} "@CMAKE_COMMAND@" -S "${handles_source}" -B "${handles_build}"
+    ${_configqml_test_generator} "-DQt6_DIR=@Qt6_DIR@" "-Dconfigqml_DIR=${cmakedir}"
+    "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+    "-DCMAKE_CXX_FLAGS=@CMAKE_CXX_FLAGS@" "-DCMAKE_EXE_LINKER_FLAGS=@CMAKE_EXE_LINKER_FLAGS@")
+run("@CMAKE_COMMAND@" --build "${handles_build}" ${_configqml_test_config} --parallel 2
+    --target installed-handles-native installed-handles-plugin)
+set(handles_bin "${handles_build}${_configqml_test_runtime_suffix}")
+run(${clean} ldd "${handles_bin}/installed-handles-native")
+string(FIND "${last_output}" "${libdir}/@CMAKE_SHARED_LIBRARY_PREFIX@configqml_core" native_origin)
+if(native_origin LESS 0 OR last_output MATCHES "libQt6(Qml|Gui|Quick)|not found")
+    message(FATAL_ERROR "Handle native consumer escaped Core-only installed linkage")
+endif()
+run(${clean} QT_QPA_PLATFORM=offscreen "${handles_bin}/installed-handles-native")
+if(NOT last_output MATCHES "GENERIC_INSTALLED_HANDLES_NATIVE_OK maxVisible=3")
+    message(FATAL_ERROR "Native handle consumer did not observe the saved selection")
+endif()
+run(${clean} ldd "${handles_bin}/installed-handles-plugin")
+if(last_output MATCHES "libconfigqml|not found")
+    message(FATAL_ERROR "QtQml-only handle consumer unexpectedly links ConfigQml")
+endif()
+run(${clean} QT_QPA_PLATFORM=offscreen "${handles_bin}/installed-handles-plugin"
+    "${qmldir}" "${handles_source}/handles.qml")
+if(NOT last_output MATCHES "GENERIC_INSTALLED_HANDLES_QML_OK maxVisible=3")
+    message(FATAL_ERROR "QtQml-only handle consumer did not observe the saved selection")
+endif()
+string(REGEX MATCHALL "OLD_QML_LOADER [^\n]+" mapped "${last_output}")
+set(plugin_seen FALSE)
+foreach(line IN LISTS mapped)
+    if(line MATCHES "libconfigqmlplugin")
+        set(expected "${module}/@CMAKE_SHARED_MODULE_PREFIX@configqmlplugin")
+        set(plugin_seen TRUE)
+    else()
+        set(expected "${libdir}/@CMAKE_SHARED_LIBRARY_PREFIX@configqml")
+    endif()
+    string(FIND "${line}" " ${expected}" mapped_origin)
+    if(mapped_origin LESS 0)
+        message(FATAL_ERROR "QtQml-only handle consumer loaded outside installed layout: ${line}")
+    endif()
+endforeach()
+if(NOT plugin_seen)
+    message(FATAL_ERROR "QtQml-only handle consumer did not trace the installed plugin")
+endif()

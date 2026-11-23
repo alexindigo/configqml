@@ -6,6 +6,7 @@
 namespace configqml {
 class ConfigStoreHandle;
 class ConfigDraftState;
+class ConfigHandle;
 struct ConfigApplyWitness;
 // Detached editor. Its values are not an optimistic store layer.
 class ConfigDraft : public QObject {
@@ -33,6 +34,14 @@ public:
                        ConfigStore::Callback callback = {});
     quint64 apply(QObject *context = nullptr, ConfigStore::Callback callback = {});
     bool discard();
+    // Abandons this draft's failed admitted Apply: only that Apply's pending
+    // change leaves the store, readers observe the saved values again, staged
+    // edits stay staged and no file is written. Refused with apply-not-pending
+    // when no failed admitted Apply remains (succeeded or already abandoned).
+    quint64 abandonApply(QObject *context = nullptr, ConfigStore::Callback callback = {});
+    ConfigReadProjection *readProjection();
+    ConfigReadProjection *previewProjection();
+    ConfigHandle *root();
 signals:
     void valuesChanged(const QList<configqml::ConfigPath> &paths);
     void stateChanged();
@@ -40,12 +49,21 @@ signals:
     void previewScopesClosed();
 
 private:
+    friend class ConfigReadProjection;
+    friend class ConfigReadProjectionState;
     friend class ConfigDraftState;
     friend class ConfigQmlStore;
     friend class ConfigStore;
     std::unique_ptr<ConfigChangePublisher> m_changes, m_previewChanges;
     bool prepareChanges(const QList<ConfigPath> &paths);
     friend class ConfigStoreHandle;
+    friend class ConfigHandleState;
+    Q_DECL_HIDDEN ConfigOperation stageValues(const QMap<ConfigPath, QVariant> &values);
+    quint64 applySelection(const std::optional<QList<ConfigPath>> &selection, QObject *context,
+                           ConfigStore::Callback callback, bool retained);
+    bool discardSelection(const QList<ConfigPath> &selection);
+    bool canDiscard(const QList<ConfigPath> *selection) const;
+    void rebase(const QList<ConfigPath> &selection);
     void publishPreview();
     void closePreviewScopes();
     void refresh();

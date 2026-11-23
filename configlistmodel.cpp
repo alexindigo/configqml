@@ -4,6 +4,7 @@
 #include "configconsumer_p.h"
 #include <QThread>
 #include <QElapsedTimer>
+#include "configworktiming_p.h"
 
 namespace configqml {
 ConfigNode ConfigNode::fromValue(const ConfigSchema &schema, const ConfigPath &path,
@@ -117,12 +118,24 @@ bool ConfigListModel::apply(const ConfigModelPlan &plan, QObject *owner) {
     QPointer<QObject> ownerGuard(owner);
     QElapsedTimer timer;
     timer.start();
+    const auto *callerWork = ConfigWorkTiming::get(owner);
+    const auto workFrame = callerWork && !callerWork->frames.isEmpty()
+                               ? callerWork->frames.last()
+                               : std::shared_ptr<ConfigWorkFrame>{};
     qint64 notifications = 0;
     auto notify = [&](auto function) {
+        std::optional<ConfigThreadWorkTimer> workTimer;
+        if (workFrame)
+            workTimer.emplace();
         QElapsedTimer elapsed;
         elapsed.start();
         const bool alive = guard.invoke(function);
         notifications += elapsed.nsecsElapsed();
+        if (workFrame) {
+            const auto sample = workTimer->finish();
+            workFrame->notifications += sample;
+            workFrame->samples.append(sample);
+        }
         return alive;
     };
     m_applying = true;

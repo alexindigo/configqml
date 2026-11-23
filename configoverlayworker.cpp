@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "configworker_p.h"
 #include <QUuid>
+#include <QCryptographicHash>
 
 namespace configqml {
 namespace {
@@ -51,10 +52,26 @@ ConfigOverlayPresentation presentation(const QString &id, const ConfigOverlayCap
         } else
             p.values[path] = {};
     }
+    ConfigReadSnapshotData data;
+    data.schema = p.schema;
+    data.selection = p.schema.leaves();
+    data.observation = capture.observation;
+    auto admitted = std::make_shared<ConfigSnapshot>();
+    admitted->values = p.values;
+    data.admitted = admitted;
+    data.targetPresence.emplace();
+    for (const auto &path : p.schema.leaves())
+        if (valueAt(capture.overrides, path))
+            data.targetPresence->insert(path);
+    p.read.snapshot = ConfigObservationAccess::snapshot(std::move(data));
+    p.read.order = capture.order;
+    p.read.coveredSequence = p.coveredSequence;
     return p;
 }
 } // namespace
 QList<ConfigPath> ConfigWorker::commandPaths(const ConfigCommand &command) const {
+    if (command.read && command.read->overlayId.isEmpty())
+        return command.read->selection.leaves;
     if (command.draft)
         return command.draft->paths;
     if (command.preview)
@@ -111,7 +128,13 @@ bool ConfigWorker::overlayBlocked(const ConfigCommand &command) const {
             for (const auto &path : paths)
                 if (overlaps(path, selected))
                     return true;
-    // A bypass may never overtake an earlier command touching the same path.
+    // A bypass may never overtake independent earlier work touching the same
+    // path. A lease must, however, pass the complete queue dependency chain of
+    // an admission reservation: an earlier save can wait for that admission,
+    // with later disjoint inputs waiting behind the save. Source preflight can
+    // widen this lease to their paths (including a root legacy source). Waiting
+    // behind those indirectly reserved inputs would make admission wait on itself.
+    QList<ConfigPath> awaitingAdmission;
     for (const auto &earlier : m_queue) {
         if (&earlier == &command)
             break;
@@ -121,8 +144,14 @@ bool ConfigWorker::overlayBlocked(const ConfigCommand &command) const {
             for (const auto &transaction : m_overlayTransactions)
                 for (const auto &path : selected)
                     reserved |= overlaps(path, transaction->selection.ownerPath);
-        if (reserved)
-            continue; // Earlier work is itself awaiting an asynchronous admission.
+        if (leaseCommand)
+            for (const auto &waiting : awaitingAdmission)
+                for (const auto &path : selected)
+                    reserved |= overlaps(path, waiting);
+        if (reserved) {
+            awaitingAdmission.append(selected);
+            continue; // This command cannot run until an admission completes.
+        }
         for (const auto &a : selected)
             for (const auto &b : paths)
                 if (overlaps(a, b))
@@ -229,6 +258,8 @@ void ConfigWorker::overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransac
             }
         }
     } else {
+        if (s.mode == ConfigOverlayMode::Editor)
+            c.ownerLayers = std::make_shared<const ConfigLayers>(*m_layers);
         const auto descriptor = m_options.schema.descriptor(s.ownerPath);
         const auto state = m_previous.information.value(s.ownerPath);
         c.ownerFence = state;
@@ -275,6 +306,19 @@ void ConfigWorker::overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransac
                 const auto actual = identityDescriptor->validate(*identity);
                 if (!expected.ok() || !actual.ok() || actual.value != expected.value)
                     t->error = "overlay-identity";
+                else {
+                    QVariantList address;
+                    for (const auto &selector : c.rawEntryPath)
+                        address.append(QVariantMap{{"kind", int(selector.kind)},
+                                                   {"key", selector.key},
+                                                   {"index", qlonglong(selector.index)}});
+                    c.targetIdentity = QCryptographicHash::hash(
+                        encodeMemoryValue({{"ownerPath", s.ownerPath},
+                                           {"address", address},
+                                           {"identity", actual.value},
+                                           {"overrideKey", s.overrideKey}}),
+                        QCryptographicHash::Sha256);
+                }
                 const auto map = record->toMap();
                 if (map.contains(s.overrideKey) &&
                     map.value(s.overrideKey).metaType().id() != QMetaType::QVariantMap)
@@ -285,6 +329,21 @@ void ConfigWorker::overlayAcquireImpl(const std::shared_ptr<ConfigOverlayTransac
         }
     }
     ++t->acquired;
+    auto dependencies = ConfigObservationAccess::dependencies(c.observation);
+    ConfigObservationDependency dependency;
+    dependency.owner = m_endpoint;
+    dependency.incarnation = m_endpoint->order;
+    dependency.delivery = m_deliveryGeneration;
+    dependency.paths = main ? QList<ConfigPath>{s.ownerPath} : c.baseFences.keys();
+    if (main)
+        dependency.targetIdentity = c.targetIdentity;
+    if (!main && !s.previewId.isEmpty()) {
+        dependency.previewId = s.previewId;
+        dependency.previewLifetime = s.previewLifetime;
+        dependency.previewEpoch = m_draftPreviews.value(s.previewId)->epoch;
+    }
+    dependencies.append(dependency);
+    c.observation = ConfigObservationAccess::observation(std::move(dependencies));
     if (m_holdOverlayLeases)
         m_overlayPaused[t->token] = t;
     else
@@ -319,9 +378,11 @@ void ConfigWorker::overlayCommand(const ConfigCommand &command) {
     t->requestId = command.requestId;
     t->operation = command.operation;
     t->edits = command.overlayEdits;
+    t->read = command.read;
     t->captured.selection = t->selection;
     if (command.operation == "openOverlay" && t->editorId.isEmpty())
         t->editorId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    t->captured.order = ++m_readOrders[t->editorId];
     m_overlayTransactions[t->token] = t;
     m_overlayCommands[t->token] = command;
     if (!command.conversionError.isEmpty())
@@ -398,6 +459,7 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
     const bool liveWrite = t->operation == "overlayWrite";
     const bool refresh = t->operation == "overlayRefresh";
     const bool discard = t->operation == "overlayDiscard";
+    const bool synchronize = t->operation == "overlaySynchronize";
     const auto expected = command.applyAttempt ? command.applyAttempt->expected : nullptr;
     const bool retry = bool(expected);
     const auto recovery = retry ? applyCapture(command) : nullptr;
@@ -421,9 +483,29 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
     if (t->original && t->selection.mode != ConfigOverlayMode::Editor &&
         t->error == "overlay-selection")
         t->error = "overlay-identity";
+    t->captured.observation = ConfigObservationAccess::withLogicalSelection(
+        t->captured.observation, t->captured.schema.leaves());
     auto p = presentation(t->editorId, t->captured);
     if (t->error.isEmpty())
         t->error = p.error;
+    if (synchronize && t->error.isEmpty() &&
+        !ConfigObservationAccess::covers(t->captured.observation, t->read->after))
+        t->error = "read-observation";
+    if (synchronize && !t->error.isEmpty()) {
+        ConfigWorkerPacket packet;
+        ConfigReadCapture capture;
+        capture.projectionId = t->read->projectionId;
+        capture.requestId = t->read->requestId;
+        capture.error = t->error;
+        packet.reads.append(capture);
+        release(t);
+        post(packet);
+        return;
+    }
+    if (synchronize) {
+        p.read.projectionId = t->read->projectionId;
+        p.read.requestId = t->read->requestId;
+    }
     if (refresh) {
         result = m_overlayReceipts.take(t->editorId);
         result.evidence.append(t->preflightEvidence);
@@ -511,37 +593,24 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         return;
     }
     const auto &source = liveWrite ? t->captured : *t->original;
-    const auto difference =
-        t->operation == "overlayReset"
-            ? QVariantMap{}
-            : overlayDifference(source.schema, source.baseValues, t->edits, source.overrides);
-    auto record = overlayAt(t->captured.ownerValue, t->captured.rawEntryPath)->toMap();
-    if (difference.isEmpty())
-        record.remove(t->selection.overrideKey);
-    else
-        record[t->selection.overrideKey] = difference;
-    const auto replacement =
-        overlayReplace(t->captured.ownerValue, t->captured.rawEntryPath, record);
-    auto checked = replacement ? m_options.schema.validate(t->selection.ownerPath, *replacement)
-                               : ConfigValueResult{};
     QString error = quarantined(t->selection.ownerPath);
     auto input = *command.input;
-    input.edits[t->selection.ownerPath] = checked.value;
-    if (!replacement || !checked.ok())
-        error =
-            checked.errors.isEmpty() ? QString("overlay-selection") : checked.errors.first().code;
-    if (error.isEmpty() && m_options.admission) {
-        auto leaf = input;
-        leaf.kind = ConfigInput::Kind::User;
-        leaf.path = t->selection.ownerPath;
-        leaf.value = checked.value;
-        error = m_options.admission(leaf);
-    }
+    auto batch = overlayBatch(m_options.schema, source, t->captured, t->edits,
+                              t->operation == "overlayReset");
+    batch.sequence = input.sequence;
+    input.edits = batch.layerEdits();
     const auto before = *m_layers;
+    ConfigCandidate candidate;
     if (error.isEmpty()) {
-        const auto admitted = m_layers->applyEdits(input.edits);
-        if (!admitted.accepted)
-            error = admitted.errors.isEmpty() ? QString("admission") : admitted.errors.first().code;
+        const auto admission = [this, input](const ConfigInput &checked) {
+            auto leaf = input;
+            leaf.kind = checked.kind;
+            leaf.path = checked.path;
+            leaf.value = checked.value;
+            return m_options.admission ? m_options.admission(leaf) : QString();
+        };
+        candidate = resolveCandidate(*m_layers, batch, m_listPolicies, m_listMetadata, admission);
+        error = candidate.error;
     }
     coverInput(command);
     release(t); // The read leases end after conditional admission, before filesystem publication.
@@ -564,6 +633,7 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
         post(publish(result));
         return;
     }
+    *m_layers = std::move(*candidate.layers);
     acceptIntent(input);
     recordPersistent(input, before);
     command.input = input;
@@ -587,7 +657,7 @@ void ConfigWorker::overlayContinueImpl(const std::shared_ptr<ConfigOverlayTransa
     }
     // Advance only the own causal owner base; the frozen plugin base is unchanged.
     t->captured.ownerIngress = m_endpoint->revision(t->selection.ownerPath);
-    post(publish());
+    publishBeforeCompletion(command.requestId);
     t->captured.ownerFence = m_previous.information.value(t->selection.ownerPath);
     m_overlayCaptures[t->editorId] = t->captured;
     rememberApply(command, {t->selection.ownerPath}, input.edits);
@@ -601,6 +671,77 @@ void ConfigWorker::overlayControl(const std::function<void(ConfigWorker &)> &mes
     } catch (...) {
         fail("worker-exception");
     }
+}
+void ConfigWorker::overlayCandidate(const ConfigCommand &command) {
+    ConfigWorkerPacket packet;
+    ConfigReadCapture read;
+    read.projectionId = command.read->projectionId;
+    read.editEpoch = command.read->editEpoch;
+    read.order = ++m_readOrders[command.editorId];
+    const auto capture = m_overlayCaptures.constFind(command.editorId);
+    if (capture == m_overlayCaptures.cend() || !capture->ownerLayers ||
+        !command.read->selection.lifetime || !*command.read->selection.lifetime) {
+        read.error = "overlay-owner";
+        packet.reads.append(read);
+        post(packet);
+        return;
+    }
+    const auto &source = *capture;
+    const auto batch = overlayBatch(m_options.schema, source, source, command.overlayEdits);
+    read.error = batch.error;
+    ConfigCandidate candidate;
+    if (read.error.isEmpty()) {
+        candidate = resolveCandidate(*source.ownerLayers, batch, m_listPolicies, m_listMetadata);
+        read.error = candidate.error;
+    }
+    if (read.error.isEmpty()) {
+        const auto owner = candidate.layers->unmaskedValue(source.selection.ownerPath);
+        const auto record = owner ? overlayAt(*owner, source.rawEntryPath) : std::nullopt;
+        if (!record)
+            read.error = "overlay-selection";
+        else {
+            const auto overrides = record->toMap().value(source.selection.overrideKey).toMap();
+            const auto merged = overlayMerge(source.baseValues, overrides).toMap();
+            auto dependencies = ConfigObservationAccess::dependencies(source.observation);
+            for (auto &dependency : dependencies)
+                if (dependency.incarnation == m_endpoint->order) {
+                    dependency.previewId = command.editorId + ":candidate";
+                    dependency.previewLifetime = command.read->selection.lifetime;
+                    dependency.previewEpoch = command.read->editEpoch;
+                }
+            ConfigReadSnapshotData data;
+            data.schema = source.schema;
+            data.selection = source.schema.leaves();
+            data.observation = ConfigObservationAccess::observation(dependencies);
+            for (const auto &path : data.selection) {
+                const auto value = valueAt(merged, path);
+                const auto checked =
+                    value ? source.schema.validate(path, *value) : ConfigValueResult{};
+                if (value && !checked.ok()) {
+                    read.error = checked.errors.first().code;
+                    break;
+                }
+                ConfigSelectedStateData state;
+                state.valid = true;
+                state.effective = checked.value;
+                state.targetPresent = bool(valueAt(source.overrides, path));
+                const auto edit = command.overlayEdits.constFind(path);
+                if (edit != command.overlayEdits.cend()) {
+                    state.pending = edit.value() ? ConfigSelectedState::Pending::Set
+                                                 : ConfigSelectedState::Pending::Remove;
+                    state.authored = edit.value().value_or(QVariant());
+                }
+                state.candidateAvailable = true;
+                state.candidate = checked.value;
+                state.observation = data.observation;
+                data.states[path] = ConfigObservationAccess::state(std::move(state));
+            }
+            if (read.error.isEmpty())
+                read.snapshot = ConfigObservationAccess::snapshot(std::move(data));
+        }
+    }
+    packet.reads.append(read);
+    post(packet);
 }
 void ConfigWorker::overlayScopeClosed(const std::shared_ptr<std::atomic_bool> &lifetime) {
     for (auto it = m_draftPreviews.begin(); it != m_draftPreviews.end();)
@@ -709,6 +850,7 @@ QString ConfigWorker::overlayPlacementToken(const QString &id, const ConfigOverl
     return id + ':' + QString::number(previous.revision);
 }
 void ConfigWorker::overlayDetach(const QString &id) {
+    m_readOrders.remove(id);
     m_applyCaptures.remove("overlay:" + id);
     m_overlayPlacements.remove(id);
     m_overlayDelivered.remove(id);

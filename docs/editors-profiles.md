@@ -67,6 +67,20 @@ draft edit admits only that delta. Successful Retry clears dirty state and close
 preview scopes normally; a repeated failure retains both edits and failure history.
 Store reads stay read-after-write throughout.
 
+The admitted change can instead be abandoned explicitly: native
+`draft->abandonApply(context, callback)`, QML `draft.abandonApply(callback)`.
+It is identified by this draft's admission witness, not by key. Only that
+Apply's still-pending intent (including a Retry's admitted additions) leaves the
+store; the remaining pending intent, newer intent on the same leaves and other
+writers are replayed unchanged over the confirmed disk state, and no file is
+written. Readers, bindings and read projections observe the saved values before
+the result (`abandoned`) is delivered, exactly once. The draft's staged edits
+remain staged and rebase onto the restored values; Discard drops them, Apply
+admits them afresh. The old witness can never be retried. With no failed admitted
+Apply (it succeeded, was already abandoned or never ran) the result is `failed`
+with `apply-not-pending` and nothing changes. Closing or destroying an editor
+still never abandons on its own.
+
 The worker freshly checks selected sources, including raw facts below pending
 value masking. A real foreign selected-path change or another accepted writer
 (even equal intent) still conflicts; unrelated source errors do not block this

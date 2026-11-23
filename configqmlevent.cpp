@@ -69,6 +69,17 @@ QJSValue qmlResultEvent(QJSEngine *engine, const ConfigResult &result,
         return qmlResultField(result, diagnostics, key);
     });
 }
+QJSValue qmlResultEvent(QJSEngine *engine, const ConfigResult &result,
+                        const ConfigDiagnosticBuilder &diagnostics,
+                        const ConfigObservation &observation) {
+    auto keys = qmlResultKeys();
+    keys.append("observation");
+    return qmlEvent(engine, keys,
+                    [result, diagnostics, observation](const QString &key) -> QVariant {
+                        return key == "observation" ? QVariant::fromValue(observation)
+                                                    : qmlResultField(result, diagnostics, key);
+                    });
+}
 QJSValue qmlErrorEvent(QJSEngine *engine, const ConfigError &error) {
     return qmlEvent(engine, {"code", "sourceId", "phase", "file", "path", "line", "evidence"},
                     [error](const QString &key) -> QVariant {

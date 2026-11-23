@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 #include "configoverlayeditor.h"
+#include "configobservation_p.h"
 #include <QMutex>
 #include <atomic>
 
@@ -40,6 +41,8 @@ struct ConfigOverlayPresentation {
     bool dirtyKnown = false, dirty = false;
     ConfigPath ownerPath;
     bool conflicted = false, refreshed = false;
+    ConfigReadCapture read;
+    quint64 deliveryGeneration = 0;
 };
 struct ConfigOverlayCapture {
     ConfigOverlaySelection selection;
@@ -52,6 +55,10 @@ struct ConfigOverlayCapture {
     ConfigPathState ownerFence;
     QMap<ConfigPath, quint64> baseIngress;
     quint64 ownerIngress = 0;
+    ConfigObservation observation;
+    quint64 order = 0;
+    std::shared_ptr<const ConfigLayers> ownerLayers;
+    QByteArray targetIdentity;
 };
 struct ConfigOverlayPlacement {
     QVariant ownerValue;
@@ -76,6 +83,7 @@ struct ConfigOverlayTransaction {
     QList<std::shared_ptr<ConfigOverlayEndpoint>> order;
     qsizetype acquired = 0;
     std::atomic_bool cancelled{false};
+    std::shared_ptr<const ConfigReadRequest> read;
 };
 struct ConfigOverlaySubscription {
     std::weak_ptr<ConfigOverlayEndpoint> endpoint;
@@ -97,6 +105,10 @@ QVariantMap overlayDifference(const ConfigSchema &schema, const QVariantMap &bas
 QVariantMap overlayDifference(const ConfigSchema &schema, const QVariantMap &base,
                               const QMap<ConfigPath, std::optional<QVariant>> &edits,
                               const QVariantMap &original);
+ConfigEditBatch overlayBatch(const ConfigSchema &ownerSchema, const ConfigOverlayCapture &base,
+                             const ConfigOverlayCapture &destination,
+                             const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                             bool resetAll = false);
 std::optional<QVariant> overlayAt(const QVariant &value, const QList<ConfigValueSelector> &path);
 std::optional<QVariant> overlayReplace(const QVariant &value,
                                        const QList<ConfigValueSelector> &path,

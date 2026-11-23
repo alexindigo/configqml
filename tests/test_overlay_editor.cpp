@@ -134,6 +134,240 @@ bool pendingBackend(ConfigStore &store) {
 class OverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void shardedMainEffectCompletion_data() {
+        QTest::addColumn<bool>("ownerFirst");
+        QTest::addColumn<bool>("refuseRestore");
+        QTest::newRow("settings-first") << true << false;
+        QTest::newRow("plugin-first") << false << false;
+        QTest::newRow("settings-first-refusal") << true << true;
+        QTest::newRow("plugin-first-refusal") << false << true;
+    }
+    void shardedMainEffectCompletion() {
+        QFETCH(bool, ownerFirst);
+        QFETCH(bool, refuseRestore);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto legacyFile = dir.filePath("settings.json");
+        const auto barFile = dir.filePath("bar.json");
+        const auto idleFile = dir.filePath("idle.json");
+        const auto hooksFile = dir.filePath("hooks.json");
+        compat::put(legacyFile, "{}");
+        compat::put(barFile,
+                    "{\"widgets\":{\"left\":[{\"id\":\"x\",\"instanceSettings\":{\"volume\":2,"
+                    "\"opaque\":\"selected\"}},"
+                    "{\"id\":\"x\",\"instanceSettings\":{\"volume\":6,\"opaque\":\"sibling\"}},"
+                    "{\"id\":\"x\",\"instanceSettings\":{\"opaque\":\"inherited\"}}]}}");
+        compat::put(idleFile, "{\"customCommands\":\"[]\",\"opaque\":false}");
+        compat::put(hooksFile, "{\"screenLock\":\"\",\"screenUnlock\":\"\",\"opaque\":0}");
+        auto row = D::leaf(T::Record, QVariantMap{{"id", QString()}});
+        row.fields = {{"id", D::leaf(T::String, QString())}};
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema = ConfigSchema(
+            D::group({{"bar", D::group({{"widgets", D::group({{"left", D::list(row, {})}})}})},
+                      {"idle", D::group({{"customCommands", D::leaf(T::String, "[]")}})},
+                      {"hooks", D::group({{"screenLock", D::leaf(T::String, "")},
+                                          {"screenUnlock", D::leaf(T::String, "")}})}}));
+        options.layers = {{"legacy",
+                           ConfigLayerKind::File,
+                           ConfigAdmissionPolicy::FieldFallback,
+                           {{"legacy", {}, {}}},
+                           false},
+                          {"user",
+                           ConfigLayerKind::File,
+                           ConfigAdmissionPolicy::FieldFallback,
+                           {{"bar", {"bar"}, {}}, {"idle", {"idle"}, {}}, {"hooks", {"hooks"}, {}}},
+                           true}};
+        options.jsonFiles = {{"legacy", "legacy", legacyFile},
+                             {"user", "bar", barFile},
+                             {"user", "idle", idleFile},
+                             {"user", "hooks", hooksFile}};
+        auto refuse = std::make_shared<std::atomic_bool>(false);
+        options.admission = [refuse](const ConfigInput &input) {
+            return *refuse && input.path == ConfigPath({"bar", "widgets", "left"})
+                       ? QString("restore-refused")
+                       : QString();
+        };
+        std::unique_ptr<ConfigStore> mainOwner, baseOwner;
+        if (ownerFirst) {
+            mainOwner = std::make_unique<ConfigStore>(options);
+            baseOwner = std::make_unique<ConfigStore>(baseOptions());
+        } else {
+            baseOwner = std::make_unique<ConfigStore>(baseOptions());
+            mainOwner = std::make_unique<ConfigStore>(options);
+        }
+        auto &main = *mainOwner;
+        auto &base = *baseOwner;
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        const ConfigPath ownerPath{"bar", "widgets", "left"};
+        auto selected = selection(main, base.scope({"settings"}), ConfigOverlayMode::Live);
+        selected.ownerPath = ownerPath;
+        QList<ConfigOverlayEditor *> contexts;
+        for (int i = 0; i < 3; ++i) {
+            selected.entryPath = {{ConfigValueSelector::Kind::Index, {}, i}};
+            selected.ownerGeneration = main.info(ownerPath).publicationGeneration;
+            contexts.append(open(main, selected));
+        }
+        selected.entryPath = {{ConfigValueSelector::Kind::Index, {}, 0}};
+        selected.mode = ConfigOverlayMode::Editor;
+        auto *page = open(main, selected);
+        QVERIFY(page->setValue({"volume"}, 4).accepted);
+        QCOMPARE(compat::request(main, [&] { return page->apply(); }).status, QString("saved"));
+        page->detach();
+        delete page;
+        auto *runtime = contexts.first();
+        QVERIFY(runtime->setValue({"volume"}, 0).accepted);
+        QCOMPARE(compat::request(main, [&] { return main.saveSelected({ownerPath}); }).status,
+                 QString("saved"));
+
+        QList<quint64> invoked, signalled, callbacks;
+        connect(&main, &ConfigStore::completed, this,
+                [&](const ConfigResult &result) { signalled.append(result.requestId); });
+        const auto complete = [&](const ConfigResult &result) {
+            callbacks.append(result.requestId);
+        };
+        const auto hooks = [&](bool enabled) {
+            invoked.append(
+                main.setUser({"idle", "customCommands"}, enabled ? "[1]" : "[]", this, complete)
+                    .requestId);
+            invoked.append(
+                main.setUser({"hooks", "screenLock"}, enabled ? "kill" : "", this, complete)
+                    .requestId);
+            invoked.append(
+                main.setUser({"hooks", "screenUnlock"}, enabled ? "kill" : "", this, complete)
+                    .requestId);
+            invoked.append(main.save(this, complete));
+        };
+        hooks(false);
+        QTRY_COMPARE(callbacks.size(), 4);
+        *refuse = refuseRestore;
+        // The restore is queued while the preceding full save/effect is in flight.
+        // Holding ingress makes the queued suffix deterministic, not time-based.
+        ConfigStoreTestAccess::run(main, [](auto &w) { w.holdInputs(true); });
+        const auto restoredWrite = runtime->setValue({"volume"}, 1).requestId;
+        invoked.append(restoredWrite);
+        invoked.append(main.saveSelected({ownerPath}, this, complete));
+        hooks(true);
+        ConfigStoreTestAccess::run(main, [](auto &w) { w.holdInputs(false); });
+        auto expectedCallbacks = invoked;
+        expectedCallbacks.removeAll(restoredWrite);
+        QTRY_COMPARE_WITH_TIMEOUT(callbacks.size(), expectedCallbacks.size(), 3000);
+        QCOMPARE(signalled, invoked);
+        QCOMPARE(callbacks, expectedCallbacks);
+        const auto bar = ConfigJsonCodec().decode(compat::bytes(barFile), "bar").raw;
+        auto expectedBar =
+            ConfigJsonCodec()
+                .decode("{\"widgets\":{\"left\":[{\"id\":\"x\",\"instanceSettings\":{\"volume\":4,"
+                        "\"opaque\":\"selected\"}},"
+                        "{\"id\":\"x\",\"instanceSettings\":{\"volume\":6,\"opaque\":\"sibling\"}},"
+                        "{\"id\":\"x\",\"instanceSettings\":{\"opaque\":\"inherited\"}}]}}",
+                        "bar")
+                .raw;
+        auto rows = expectedBar.value("widgets").toMap().value("left").toList();
+        auto first = rows[0].toMap();
+        auto overrides = first.value("instanceSettings").toMap();
+        if (refuseRestore)
+            overrides["volume"] =
+                ConfigJsonCodec().decode("{\"volume\":0}", "bar").raw.value("volume");
+        else
+            overrides.remove("volume");
+        first["instanceSettings"] = overrides;
+        rows[0] = first;
+        expectedBar["widgets"] = QVariantMap{{"left", rows}};
+        QCOMPARE(bar, expectedBar);
+        QCOMPARE(ConfigJsonCodec().decode(compat::bytes(idleFile), "idle").raw,
+                 (QVariantMap{{"customCommands", "[1]"}, {"opaque", false}}));
+        const auto hooksRaw = ConfigJsonCodec().decode(compat::bytes(hooksFile), "hooks").raw;
+        QCOMPARE(hooksRaw.value("screenLock").toString(), QString("kill"));
+        QCOMPARE(hooksRaw.value("screenUnlock").toString(), QString("kill"));
+        QCOMPARE(hooksRaw.value("opaque").value<ConfigNumber>().token(), QString("0"));
+        QCOMPARE(compat::bytes(legacyFile), QByteArray("{}"));
+        QCOMPARE(runtime->value({"volume"}).toInt(), refuseRestore ? 0 : 1);
+        QCOMPARE(contexts[1]->value({"volume"}).toInt(), 6);
+        QCOMPARE(contexts[2]->value({"volume"}).toInt(), 1);
+        QCOMPARE(main.failures().size(), refuseRestore ? 1 : 0);
+        if (refuseRestore)
+            QCOMPARE(main.failures().first().error.code, QString("restore-refused"));
+        QCOMPARE(compat::request(main, [&] { return main.close(); }).status,
+                 QString("nothing_to_save"));
+    }
+    void concurrentLiveSelectedCompletion_data() {
+        QTest::addColumn<bool>("ownerFirst");
+        QTest::addColumn<QString>("schedule");
+        for (bool ownerFirst : {false, true})
+            for (const auto &schedule : {"ordinary", "held-base", "held-owner", "held-inputs"})
+                QTest::newRow(qPrintable(QString("%1-%2").arg(ownerFirst).arg(schedule)))
+                    << ownerFirst << QString(schedule);
+    }
+    void concurrentLiveSelectedCompletion() {
+        QFETCH(bool, ownerFirst);
+        QFETCH(QString, schedule);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto file = dir.filePath("main.json");
+        compat::put(file, "{\"rows\":[{\"id\":\"x\",\"instanceSettings\":{\"volume\":2,"
+                          "\"opaque\":{\"keep\":false}}}],\"other\":0}");
+        std::unique_ptr<ConfigStore> mainOwner, baseOwner;
+        if (ownerFirst) {
+            mainOwner = std::make_unique<ConfigStore>(mainOptions(file));
+            baseOwner = std::make_unique<ConfigStore>(baseOptions());
+        } else {
+            baseOwner = std::make_unique<ConfigStore>(baseOptions());
+            mainOwner = std::make_unique<ConfigStore>(mainOptions(file));
+        }
+        auto &main = *mainOwner;
+        auto &base = *baseOwner;
+        QTRY_COMPARE(main.status(), ConfigStore::Status::Ready);
+        QTRY_COMPARE(base.status(), ConfigStore::Status::Ready);
+        auto *live = open(main, selection(main, base.scope({"settings"}), ConfigOverlayMode::Live));
+        QVERIFY(live->setValue({"volume"}, 0).accepted);
+        QCOMPARE(compat::request(main, [&] { return main.saveSelected({{"rows"}}); }).status,
+                 QString("saved"));
+        // Independent exact readers create the same automatic follow-up captures
+        // as separate page/runtime consumers without sharing a presentation owner.
+        open(main, selection(main, base.scope({"settings"}), ConfigOverlayMode::View));
+        if (schedule == "held-base")
+            ConfigStoreTestAccess::run(base, [](auto &w) { w.holdOverlayLeases(true); });
+        if (schedule == "held-owner")
+            ConfigStoreTestAccess::run(main, [](auto &w) { w.holdOverlayLeases(true); });
+        if (schedule == "held-inputs")
+            ConfigStoreTestAccess::run(main, [](auto &w) { w.holdInputs(true); });
+        QList<quint64> invoked, signalled, callbacks;
+        connect(&main, &ConfigStore::completed, this,
+                [&](const ConfigResult &result) { signalled.append(result.requestId); });
+        const auto complete = [&](const ConfigResult &result) {
+            callbacks.append(result.requestId);
+        };
+        for (int i = 1; i <= 3; ++i)
+            invoked.append(main.setUser({"other"}, i, this, complete).requestId);
+        invoked.append(main.save(this, complete));
+        const auto writeId = live->setValue({"volume"}, 1).requestId;
+        invoked.append(writeId);
+        invoked.append(main.saveSelected({{"rows"}}, this, complete));
+        auto callbackIds = invoked;
+        callbackIds.removeAll(writeId);
+        if (schedule == "held-base") {
+            QTRY_VERIFY(held(base) > 0);
+            ConfigStoreTestAccess::run(base, [](auto &w) { w.holdOverlayLeases(false); });
+        }
+        if (schedule == "held-owner") {
+            QTRY_VERIFY(held(main) > 0);
+            ConfigStoreTestAccess::run(main, [](auto &w) { w.holdOverlayLeases(false); });
+        }
+        if (schedule == "held-inputs")
+            ConfigStoreTestAccess::run(main, [](auto &w) { w.holdInputs(false); });
+        QTRY_COMPARE_WITH_TIMEOUT(callbacks.size(), callbackIds.size(), 3000);
+        QCOMPARE(signalled, invoked);
+        QCOMPARE(callbacks, callbackIds);
+        const auto raw = ConfigJsonCodec().decode(compat::bytes(file), "main").raw;
+        QCOMPARE(raw.value("other").value<ConfigNumber>().token(), QString("3"));
+        const auto overrides =
+            raw.value("rows").toList()[0].toMap().value("instanceSettings").toMap();
+        QVERIFY(!overrides.contains("volume"));
+        QCOMPARE(overrides.value("opaque").toMap().value("keep").toBool(), false);
+        QCOMPARE(live->value({"volume"}).toInt(), 1);
+    }
     void unrelatedGroupDoesNotFailScopedOverlay_data() {
         QTest::addColumn<QString>("operation");
         QTest::addColumn<bool>("stopped");

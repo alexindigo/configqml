@@ -171,6 +171,31 @@ QList<QPair<QString, ConfigDiagnostic>> ConfigLayers::takeProjectionDiagnostics(
     return diagnostics;
 }
 namespace {
+using EffectiveLeaf = QMap<ConfigPath, QVariant>::const_iterator;
+QVariantMap assembleNamespaces(EffectiveLeaf &leaf, const EffectiveLeaf &end,
+                               const ConfigPath &prefix) {
+    QVariantMap result;
+    while (leaf != end && startsWith(leaf.key(), prefix)) {
+        const auto key = leaf.key().at(prefix.size());
+        if (leaf.key().size() == prefix.size() + 1) {
+            // An atomic Record/Map/List is a value, never a namespace to merge.
+            result.insert(key, leaf.value());
+            ++leaf;
+        } else {
+            const auto nested = assembleNamespaces(leaf, end, prefix + ConfigPath{key});
+            result.insert(key, nested);
+        }
+    }
+    return result;
+}
+QMap<ConfigPath, QVariant> defaultLeaves(const ConfigSchema &schema) {
+    QMap<ConfigPath, QVariant> values;
+    const auto defaults = schema.defaults();
+    for (const auto &path : schema.leaves())
+        if (const auto value = valueAt(defaults, path))
+            values.insert(path, *value);
+    return values;
+}
 QVariantMap sourceOverlay(const ConfigDescriptor &descriptor, QVariantMap lower,
                           const QVariantMap &raw) {
     for (auto it = raw.cbegin(); it != raw.cend(); ++it) {
@@ -187,10 +212,13 @@ QVariantMap sourceOverlay(const ConfigDescriptor &descriptor, QVariantMap lower,
 QList<ConfigDiagnostic> ConfigLayers::projectSources(const QList<LayerState> *previous,
                                                      bool local) {
     QList<ConfigDiagnostic> failures;
-    auto lower = m_schema.defaults();
+    // Preceding-layer values are transform inputs, not an admission side effect.
+    // No transform means no lower tree; each consuming layer assembles it once.
+    auto lowerLeaves =
+        m_projections.isEmpty() ? QMap<ConfigPath, QVariant>{} : defaultLeaves(m_schema);
     for (qsizetype layerIndex = 0; layerIndex < m_layers.size(); ++layerIndex) {
         auto &layer = m_layers[layerIndex];
-        const auto lowerBefore = lower;
+        std::optional<QVariantMap> lowerBefore;
         QList<ConfigProjectionEffectsEvent> layerEvents;
         QList<QPair<QString, ConfigDiagnostic>> layerWarnings;
         bool rejected = false;
@@ -225,6 +253,10 @@ QList<ConfigDiagnostic> ConfigLayers::projectSources(const QList<LayerState> *pr
             if (!selected || (!original.exists && !original.localIntent))
                 admit(layer, state, original, true);
             else {
+                if (!lowerBefore) {
+                    auto leaf = lowerLeaves.cbegin();
+                    lowerBefore = assembleNamespaces(leaf, lowerLeaves.cend(), {});
+                }
                 ConfigProjectionInput input;
                 input.raw = original.raw;
                 const auto prior = input.raw.take("_configqmlVersion");
@@ -250,7 +282,7 @@ QList<ConfigDiagnostic> ConfigLayers::projectSources(const QList<LayerState> *pr
                 input.defaults =
                     valueAt(m_schema.defaults(), original.prefix).value_or(QVariantMap{}).toMap();
                 input.lowerValues =
-                    valueAt(lowerBefore, original.prefix).value_or(QVariantMap{}).toMap();
+                    valueAt(*lowerBefore, original.prefix).value_or(QVariantMap{}).toMap();
                 input.values = sourceOverlay(*m_schema.descriptor(original.prefix),
                                              input.lowerValues, input.raw);
                 input.compatibilityRaw = input.raw;
@@ -365,11 +397,11 @@ QList<ConfigDiagnostic> ConfigLayers::projectSources(const QList<LayerState> *pr
             }
             m_projectionDiagnostics.append(layerWarnings);
         }
-        lower = lowerBefore;
-        for (const auto &state : layer.sources)
-            if (participates(state))
-                for (auto it = state.admitted.cbegin(); it != state.admitted.cend(); ++it)
-                    putValue(lower, it.key(), it->value);
+        if (!m_projections.isEmpty())
+            for (const auto &state : layer.sources)
+                if (participates(state))
+                    for (auto it = state.admitted.cbegin(); it != state.admitted.cend(); ++it)
+                        lowerLeaves.insert(it.key(), it->value);
     }
     return failures;
 }
@@ -554,16 +586,50 @@ ConfigOperation ConfigLayers::replaceAllSources(const QMap<QString, QList<Config
     return result;
 }
 
-QVariantMap ConfigLayers::effective() const {
+QMap<ConfigPath, QVariant> ConfigLayers::effectiveLeaves(const QSet<ConfigPath> *selection,
+                                                         QMap<ConfigPath, QString> *masks) const {
     if (!valid())
         return {};
-    auto out = m_schema.defaults();
-    for (const auto &layer : m_layers)
+    QMap<ConfigPath, QVariant> values;
+    if (!selection)
+        values = defaultLeaves(m_schema);
+    else {
+        const auto defaults = m_schema.defaults();
+        for (const auto &path : *selection)
+            if (const auto value = valueAt(defaults, path))
+                values.insert(path, *value);
+    }
+    qsizetype writable = -1;
+    if (masks) {
+        masks->clear();
+        for (qsizetype i = 0; i < m_layers.size(); ++i)
+            if (m_layers[i].descriptor.writable)
+                writable = i;
+    }
+    // Full namespace reads and selected candidates share this one precedence
+    // owner. Masks are optional selected facts, not full provenance materialization.
+    for (qsizetype i = 0; i < m_layers.size(); ++i) {
+        const auto &layer = m_layers[i];
         for (const auto &source : layer.sources)
             if (participates(source))
-                for (auto it = source.admitted.cbegin(); it != source.admitted.cend(); ++it)
-                    putValue(out, it.key(), it.value().value);
-    return out;
+                for (auto it = source.admitted.cbegin(); it != source.admitted.cend(); ++it) {
+                    if (selection && !selection->contains(it.key()))
+                        continue;
+                    values.insert(it.key(), it.value().value);
+                    if (masks)
+                        masks->insert(it.key(), writable >= 0 && i > writable ? layer.descriptor.id
+                                                                              : QString());
+                }
+    }
+    return values;
+}
+QVariantMap ConfigLayers::effective() const {
+    // Capture precedence by declared leaf, then construct each namespace once.
+    // Repeated putValue on a shared nested map would detach/copy that namespace
+    // for every leaf, making every candidate and publication quadratic in width.
+    const auto values = effectiveLeaves();
+    auto leaf = values.cbegin();
+    return assembleNamespaces(leaf, values.cend(), {});
 }
 std::optional<QVariant> ConfigLayers::value(const ConfigPath &path) const {
     if (!valid() || !m_schema.descriptor(path))
@@ -815,6 +881,11 @@ ConfigWriteResult ConfigLayers::setUser(const ConfigPath &path, const QVariant &
     return write(ownPath(path), value, false);
 }
 ConfigWriteResult ConfigLayers::applyEdits(const QMap<ConfigPath, std::optional<QVariant>> &edits) {
+    return applyTargetEdits(edits, false);
+}
+ConfigWriteResult
+ConfigLayers::applyTargetEdits(const QMap<ConfigPath, std::optional<QVariant>> &edits,
+                               bool runtime) {
     auto candidate = *this;
     candidate.m_deferProjections = true;
     QString writable;
@@ -823,7 +894,8 @@ ConfigWriteResult ConfigLayers::applyEdits(const QMap<ConfigPath, std::optional<
             writable = layer.descriptor.id;
     ConfigWriteResult result;
     for (auto it = edits.cbegin(); it != edits.cend(); ++it) {
-        result = it.value() ? candidate.setUser(it.key(), *it.value())
+        result = it.value() ? candidate.write(ownPath(it.key()), *it.value(), runtime)
+                 : runtime  ? candidate.clearRuntime(it.key())
                             : candidate.reset(it.key(), writable);
         if (!result.accepted)
             return result;
