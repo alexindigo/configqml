@@ -11,6 +11,11 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QProcess>
+#include <QSemaphore>
+#include <QTimer>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include "eventwait.h"
 #include <cstdio>
 
 using namespace configqml;
@@ -20,6 +25,63 @@ using T = D::Type;
 class GenericPrimitivesTest : public QObject {
     Q_OBJECT
 private slots:
+    void sharedRequestWaitsForActualOutcome() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const auto file = directory.filePath("user.json");
+        compat::put(file, "{\"n\":0,\"opaque\":\"kept\"}");
+        ConfigStoreOptions options;
+        options.autoSave = false;
+        options.schema = ConfigSchema(D::group({{"n", D::leaf(T::SafeInteger, 0)}}));
+        options.layers = {{"user",
+                           ConfigLayerKind::File,
+                           ConfigAdmissionPolicy::FieldFallback,
+                           {{"user", {}, {}}},
+                           true}};
+        options.jsonFiles = {{"user", "user", file}};
+        const auto armed = std::make_shared<std::atomic_bool>(false);
+        const auto held = std::make_shared<QSemaphore>();
+        const auto release = std::make_shared<QSemaphore>();
+        options.fileFault = [armed, held, release, file](const QString &phase,
+                                                         const QString &path) {
+            if (phase == "file-sync" && path == file && armed->exchange(false)) {
+                qInfo("REQUEST_OUTCOME_HELD actual-file-sync");
+                held->release();
+                release->acquire();
+            }
+            return QString();
+        };
+        ConfigStore store(options);
+        QVERIFY(test::awaitEvent(&store, &ConfigStore::statusChanged,
+                                 [&] { return store.status() != ConfigStore::Status::Loading; }));
+        QCOMPARE(store.status(), ConfigStore::Status::Ready);
+        QVERIFY(store.setUser({"n"}, 1).accepted);
+        QSignalSpy finished(&store, &ConfigStore::completed);
+        armed->store(true);
+        // Deliberately exceed the old fixture timer while its real fsync stays
+        // held. This is a controlled release, not a new completion deadline.
+        QTimer::singleShot(11500, &store, [held, release] {
+            if (!held->tryAcquire())
+                qFatal("request outcome fixture did not hold actual sync");
+            release->release();
+        });
+        const auto saved = compat::request(store, [&] { return store.save(); });
+        QCOMPARE(saved.status, QString("saved"));
+        QCOMPARE(saved.publicationState, QString("known"));
+        int matches = 0;
+        for (const auto &row : finished)
+            matches += row.first().value<ConfigResult>().requestId == saved.requestId;
+        QCOMPARE(matches, 1);
+        QCOMPARE(QJsonDocument::fromJson(compat::bytes(file)).object(),
+                 (QJsonObject{{"n", 1}, {"opaque", "kept"}}));
+        options.fileFault = {};
+        ConfigStore cold(options);
+        QVERIFY(test::awaitEvent(&cold, &ConfigStore::statusChanged,
+                                 [&] { return cold.status() != ConfigStore::Status::Loading; }));
+        QCOMPARE(cold.status(), ConfigStore::Status::Ready);
+        QCOMPARE(cold.value({"n"}).toInt(), 1);
+        qInfo("REQUEST_OUTCOME_COMPLETE saved=1 receipts=1 cold=1 opaque=kept");
+    }
     void selectedCandidateFactsMatchLayerOracle() {
         auto absent = D::leaf(T::String, QVariant());
         absent.optional = true;

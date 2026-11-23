@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 #include "configstore.h"
+#include "eventwait.h"
 #include <QFile>
 #include <QEventLoop>
 #include <QTimer>
@@ -29,10 +30,12 @@ inline configqml::ConfigResult request(configqml::ConfigStore &store,
                                                      loop.quit();
                                                  }
                                              });
-    QTimer::singleShot(10000, &loop, &QEventLoop::quit);
     id = dispatch();
-    loop.exec();
+    const bool observed = configqml::test::awaitEvent(&store, &configqml::ConfigStore::completed,
+                                                      [&] { return result.requestId != 0; });
     QObject::disconnect(connection);
+    if (!observed)
+        qFatal("request owner destroyed");
     if (!result.requestId)
         qFatal("request timeout");
     return result;
