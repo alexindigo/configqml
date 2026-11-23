@@ -51,6 +51,13 @@ ConfigSelection ConfigSelection::capture(const ConfigSchema &schema, const QList
     selection.schema = schema;
     selection.schemaIdentity = schema.m_identity;
     selection.target = target;
+    const auto leaves = schema.leaves();
+    // The schema owns the canonical, distinct leaf paths. A request for that
+    // exact allowed selection does not need another normalization or path copy.
+    if (schema.valid() && !leaves.isEmpty() && allowed == leaves && paths == leaves) {
+        selection.leaves = leaves;
+        return selection;
+    }
     QSet<ConfigPath> seen, included, allowedAncestors;
     // Index the allowed boundary once. Looking up every requested leaf against
     // every allowed leaf makes a complete selected capture quadratic in width.
@@ -78,7 +85,7 @@ ConfigSelection ConfigSelection::capture(const ConfigSchema &schema, const QList
                     break;
                 }
     }
-    for (const auto &leaf : schema.leaves())
+    for (const auto &leaf : leaves)
         if (included.contains(leaf))
             selection.leaves.append(leaf);
     if (selection.leaves.isEmpty())
