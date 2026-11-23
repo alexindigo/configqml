@@ -15,8 +15,19 @@ namespace {
 thread_local quint64 individualWrites = 0;
 thread_local quint64 prefixScans = 0;
 thread_local quint64 provenanceQueries = 0;
+thread_local quint64 valueQueries = 0;
 } // namespace
 namespace configqml {
+std::optional<QVariant> valueAt(const QVariantMap &tree, const ConfigPath &path) {
+    using F = std::optional<QVariant> (*)(const QVariantMap &, const ConfigPath &);
+    // Exact exported boundary verified with nm; no private test-driver layout.
+    static auto real = reinterpret_cast<F>(
+        dlsym(RTLD_NEXT, "_ZN9configqml7valueAtERK4QMapI7QString8QVariantERK5QListIS1_E"));
+    if (!real)
+        qFatal("missing actual valueAt boundary");
+    ++valueQueries;
+    return real(tree, path);
+}
 ConfigInfo ConfigLayers::info(const ConfigPath &path) const {
     using F = ConfigInfo (*)(const ConfigLayers *, const ConfigPath &);
     static auto real = reinterpret_cast<F>(dlsym(RTLD_NEXT, CONFIGQML_INFO_SYMBOL));
@@ -46,6 +57,23 @@ using namespace configqml;
 class LayerStructureTest : public QObject {
     Q_OBJECT
 private slots:
+    void noProjectionDoesNotAssembleLower_data() { oneNamespaceAssembly_data(); }
+    void noProjectionDoesNotAssembleLower() {
+        QFETCH(int, leaves);
+        using D = ConfigDescriptor;
+        QMap<QString, D> fields;
+        for (int i = 0; i < leaves; ++i)
+            fields["field" + QString::number(i)] = D::leaf(D::Type::SafeInteger, 1);
+        const ConfigSchema schema(D::group({{"group", D::group(fields)}}));
+        valueQueries = 0;
+        const ConfigLayers layers(schema, {});
+        const auto queries = valueQueries;
+        QVERIFY(layers.valid());
+        QCOMPARE(layers.value({"group", "field0"})->toInt(), 1);
+        QCOMPARE(layers.effective(), schema.defaults());
+        qInfo() << "UNUSED_PROJECTION_LOWER leaves=" << leaves << "value_queries=" << queries;
+        QCOMPARE(queries, quint64(0));
+    }
     void draftControlReusesAdmittedCut_data() { oneNamespaceAssembly_data(); }
     void draftControlReusesAdmittedCut() {
         QFETCH(int, leaves);

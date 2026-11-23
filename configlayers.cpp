@@ -212,11 +212,13 @@ QVariantMap sourceOverlay(const ConfigDescriptor &descriptor, QVariantMap lower,
 QList<ConfigDiagnostic> ConfigLayers::projectSources(const QList<LayerState> *previous,
                                                      bool local) {
     QList<ConfigDiagnostic> failures;
-    auto lower = m_schema.defaults();
-    auto lowerLeaves = defaultLeaves(m_schema);
+    // Preceding-layer values are transform inputs, not an admission side effect.
+    // No transform means no lower tree; each consuming layer assembles it once.
+    auto lowerLeaves =
+        m_projections.isEmpty() ? QMap<ConfigPath, QVariant>{} : defaultLeaves(m_schema);
     for (qsizetype layerIndex = 0; layerIndex < m_layers.size(); ++layerIndex) {
         auto &layer = m_layers[layerIndex];
-        const auto lowerBefore = lower;
+        std::optional<QVariantMap> lowerBefore;
         QList<ConfigProjectionEffectsEvent> layerEvents;
         QList<QPair<QString, ConfigDiagnostic>> layerWarnings;
         bool rejected = false;
@@ -251,6 +253,10 @@ QList<ConfigDiagnostic> ConfigLayers::projectSources(const QList<LayerState> *pr
             if (!selected || (!original.exists && !original.localIntent))
                 admit(layer, state, original, true);
             else {
+                if (!lowerBefore) {
+                    auto leaf = lowerLeaves.cbegin();
+                    lowerBefore = assembleNamespaces(leaf, lowerLeaves.cend(), {});
+                }
                 ConfigProjectionInput input;
                 input.raw = original.raw;
                 const auto prior = input.raw.take("_configqmlVersion");
@@ -276,7 +282,7 @@ QList<ConfigDiagnostic> ConfigLayers::projectSources(const QList<LayerState> *pr
                 input.defaults =
                     valueAt(m_schema.defaults(), original.prefix).value_or(QVariantMap{}).toMap();
                 input.lowerValues =
-                    valueAt(lowerBefore, original.prefix).value_or(QVariantMap{}).toMap();
+                    valueAt(*lowerBefore, original.prefix).value_or(QVariantMap{}).toMap();
                 input.values = sourceOverlay(*m_schema.descriptor(original.prefix),
                                              input.lowerValues, input.raw);
                 input.compatibilityRaw = input.raw;
@@ -391,12 +397,11 @@ QList<ConfigDiagnostic> ConfigLayers::projectSources(const QList<LayerState> *pr
             }
             m_projectionDiagnostics.append(layerWarnings);
         }
-        for (const auto &state : layer.sources)
-            if (participates(state))
-                for (auto it = state.admitted.cbegin(); it != state.admitted.cend(); ++it)
-                    lowerLeaves.insert(it.key(), it->value);
-        auto leaf = lowerLeaves.cbegin();
-        lower = assembleNamespaces(leaf, lowerLeaves.cend(), {});
+        if (!m_projections.isEmpty())
+            for (const auto &state : layer.sources)
+                if (participates(state))
+                    for (auto it = state.admitted.cbegin(); it != state.admitted.cend(); ++it)
+                        lowerLeaves.insert(it.key(), it->value);
     }
     return failures;
 }

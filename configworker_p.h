@@ -226,6 +226,9 @@ private:
     readSnapshot(const QList<ConfigPath> &paths,
                  const std::shared_ptr<const ConfigSnapshot> &admitted = {}) const;
     QList<ConfigDraftPresentation> draftPresentations();
+    Q_DECL_HIDDEN QList<ConfigDraftPresentation>
+    draftPresentationsFor(const std::shared_ptr<const ConfigSnapshot> &admitted,
+                          const ConfigSnapshot *delta);
     ConfigCandidate
     resolveCandidate(const ConfigLayers &base, const ConfigEditBatch &batch,
                      const QMap<QString, ConfigRecordListPolicySpec> &policies,
@@ -238,11 +241,11 @@ private:
                    const QMap<ConfigPath, std::optional<QVariant>> &edits, QString &error) const;
     struct DraftCapture {
         std::shared_ptr<const ConfigDraftRequest> request;
+        ConfigEditBatch batch;
         std::shared_ptr<const ConfigLayers> frozen;
         QMap<ConfigPath, QVariant> frozenValues, liveValues;
         ConfigObservation frozenObservation;
-        ConfigReadSnapshot frozenRead;
-        QMap<ConfigPath, ConfigCandidateFact> liveFacts;
+        ConfigReadSnapshot frozenRead, liveRead;
         QVariantList liveKey;
     };
     QMap<QString, DraftCapture> m_draftCaptures;

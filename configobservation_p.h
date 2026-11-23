@@ -34,6 +34,7 @@ struct ConfigReadSnapshotData {
     QList<ConfigPath> selection;
     ConfigPath prefix;
     std::optional<QSet<ConfigPath>> targetPresence;
+    bool admittedCandidate = false;
     QMap<ConfigPath, ConfigSelectedState> states;
     ConfigObservation observation;
 };
@@ -100,6 +101,12 @@ public:
     static ConfigReadSnapshot candidate(const ConfigCandidate &candidate,
                                         const ConfigSchema &schema,
                                         const ConfigObservation &observation);
+    static ConfigReadSnapshot admittedCandidate(const ConfigReadSnapshot &snapshot,
+                                                QSet<ConfigPath> targetPresence,
+                                                const ConfigObservation &observation);
+    static ConfigSelectedStateData selectedStateData(const ConfigReadSnapshotData &snapshot,
+                                                     const ConfigPath &absolute);
+    static bool sameCandidateFacts(const ConfigReadSnapshot &left, const ConfigReadSnapshot &right);
     static ConfigReadSnapshot pending(const ConfigReadSnapshot &snapshot,
                                       const QMap<ConfigPath, std::optional<QVariant>> &edits);
 };

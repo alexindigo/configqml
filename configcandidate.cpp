@@ -208,4 +208,12 @@ QMap<ConfigPath, QVariant> candidatePresentation(const ConfigCandidate &candidat
             it->edited && it->pending == ConfigEdit::Kind::Set ? it->authored : it->effective;
     return values;
 }
+QSet<ConfigPath> candidateTargetPresence(const ConfigLayers &layers, const QList<ConfigPath> &paths,
+                                         bool runtime) {
+    QSet<ConfigPath> present;
+    for (const auto &path : paths)
+        if (ConfigLayerEditAccess::targetPresent(layers, path, runtime))
+            present.insert(path);
+    return present;
+}
 } // namespace configqml

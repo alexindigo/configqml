@@ -50,12 +50,11 @@ old = b"""QVariantMap ConfigLayers::effective() const {
     return out;
 }
 """
-lower = b"""        for (const auto &state : layer.sources)
-            if (participates(state))
-                for (auto it = state.admitted.cbegin(); it != state.admitted.cend(); ++it)
-                    lowerLeaves.insert(it.key(), it->value);
-        auto leaf = lowerLeaves.cbegin();
-        lower = assembleNamespaces(leaf, lowerLeaves.cend(), {});"""
+lower = b"""        if (!m_projections.isEmpty())
+            for (const auto &state : layer.sources)
+                if (participates(state))
+                    for (auto it = state.admitted.cbegin(); it != state.admitted.cend(); ++it)
+                        lowerLeaves.insert(it.key(), it->value);"""
 old_lower = b"""        lower = lowerBefore;
         for (const auto &state : layer.sources)
             if (participates(state))
@@ -63,16 +62,32 @@ old_lower = b"""        lower = lowerBefore;
                     putValue(lower, it.key(), it->value);"""
 if original.count(lower) != 1:
     raise RuntimeError("nonunique projection lower-tree implementation")
+projection = original.replace(lower, old_lower)
+for current, old_boundary in [
+    (b"""    auto lowerLeaves =
+        m_projections.isEmpty() ? QMap<ConfigPath, QVariant>{} : defaultLeaves(m_schema);""",
+     b"    auto lower = m_schema.defaults();"),
+    (b"        std::optional<QVariantMap> lowerBefore;", b"        const auto lowerBefore = lower;"),
+    (b"""                if (!lowerBefore) {
+                    auto leaf = lowerLeaves.cbegin();
+                    lowerBefore = assembleNamespaces(leaf, lowerLeaves.cend(), {});
+                }
+""", b""),
+    (b"valueAt(*lowerBefore, original.prefix)", b"valueAt(lowerBefore, original.prefix)"),
+]:
+    if projection.count(current) != 1:
+        raise RuntimeError("nonunique projection assembly boundary")
+    projection = projection.replace(current, old_boundary)
 try:
     for name, mutation, marker in [
         ("effective", original[:begin] + old + original[finish:], "individual_writes= 512"),
-        ("projection", original.replace(lower, old_lower), "individual_writes= 1024"),
+        ("projection", projection, "individual_writes= 1024"),
     ]:
         path.write_bytes(mutation)
         run(output, name + "-mutated-build", ["cmake", "--build", build, "--parallel", "2",
             "--target", "configqml_core"], env=env)
         text = run(output, name + "-mutated", [fixture / "layer-structure"], env=env, expected=4)
-        require_marker(text, "19 passed, 4 failed, 0 skipped")
+        require_marker(text, "23 passed, 4 failed, 0 skipped")
         require_marker(text, marker)
 finally:
     path.write_bytes(original)
@@ -81,7 +96,7 @@ finally:
     run(output, "restored-build", ["cmake", "--build", build, "--parallel", "2",
         "--target", "configqml_core"], env=env)
 text = run(output, "restored", [fixture / "layer-structure"], env=env)
-require_marker(text, "23 passed, 0 failed, 0 skipped")
+require_marker(text, "27 passed, 0 failed, 0 skipped")
 require_marker(text, "individual_writes= 0")
 write_json(output / "result.json", {"source_sha256": before, "restored_sha256": digest(path),
     "old_reconstruction_rejected": True, "typed_atomic_and_opaque_trees_preserved": True})

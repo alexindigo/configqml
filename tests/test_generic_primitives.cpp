@@ -165,6 +165,26 @@ private slots:
                                 continue;
                             const auto effective = oracle.effective();
                             QCOMPARE(candidate.facts.size(), selection.leaves.size());
+                            ConfigReadSnapshot admittedCandidate;
+                            if (!edited && target == ConfigSelection::Target::UserLayer) {
+                                auto admitted = std::make_shared<ConfigSnapshot>();
+                                for (const auto &path : selection.leaves) {
+                                    admitted->values[path] =
+                                        valueAt(effective, path).value_or(QVariant());
+                                    admitted->information[path].provenance = oracle.info(path);
+                                }
+                                ConfigReadSnapshotData data;
+                                data.schema = schema;
+                                data.admitted = admitted;
+                                data.selection = selection.leaves;
+                                admittedCandidate = ConfigObservationAccess::admittedCandidate(
+                                    ConfigObservationAccess::snapshot(std::move(data)),
+                                    candidateTargetPresence(base, selection.leaves), {});
+                                QVERIFY(admittedCandidate.valid());
+                                QVERIFY(ConfigObservationAccess::sameCandidateFacts(
+                                    admittedCandidate,
+                                    ConfigObservationAccess::candidate(candidate, schema, {})));
+                            }
                             for (const auto &path : selection.leaves) {
                                 const auto fact = candidate.facts.value(path);
                                 QCOMPARE(fact.effective,
@@ -189,6 +209,15 @@ private slots:
                                          source && bool(valueAt(source->raw,
                                                                 path.mid(source->prefix.size()))));
                                 QCOMPARE(fact.edited, edits.contains(path));
+                                if (admittedCandidate.valid()) {
+                                    const auto captured = admittedCandidate.selectedState(path);
+                                    QVERIFY(captured.valid());
+                                    QVERIFY(captured.candidateAvailable());
+                                    QCOMPARE(captured.value(), fact.effective);
+                                    QCOMPARE(captured.candidateValue(), fact.effective);
+                                    QCOMPARE(captured.targetPresent(), fact.targetPresent);
+                                    QCOMPARE(captured.maskedBy(), fact.maskedBy);
+                                }
                                 ++comparisons;
                             }
                         }

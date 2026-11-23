@@ -514,9 +514,9 @@ ConfigWorkerPacket ConfigWorker::publishPacket(const std::optional<ConfigResult>
     m_previous.generation = m_generation;
     m_previous.inputPrefix = m_prefix;
     checkApplyCaptures();
-    packet.drafts = draftPresentations();
-    overlayNotify();
     packet.admitted = std::make_shared<const ConfigSnapshot>(m_previous);
+    packet.drafts = draftPresentationsFor(packet.admitted, &packet.snapshot);
+    overlayNotify();
     if (!result || result->operation != "reload" || result->status != "failed")
         packet.readSnapshot = readSnapshot(m_options.schema.leaves(), packet.admitted);
     if (result && result->status != "failed") {

@@ -267,6 +267,35 @@ ConfigWorker::resolveCandidate(const ConfigLayers &base, const ConfigEditBatch &
     ++m_candidateResolutions;
     return configqml::resolveCandidate(base, batch, policies, metadata, admission);
 }
+namespace {
+QSet<ConfigPath> admittedTargetPresence(const ConfigLayers &layers, const ConfigSnapshot &admitted,
+                                        const QList<ConfigPath> &paths) {
+    QSet<ConfigPath> present;
+    for (const auto &path : paths) {
+        const auto it = admitted.information.constFind(path);
+        if (it == admitted.information.cend())
+            continue;
+        const auto &info = it->provenance;
+        for (const auto &contribution : info.contributions) {
+            if (contribution.layerId != info.route.layerId ||
+                contribution.sourceId != info.route.sourceId)
+                continue;
+            // Public provenance gates rawPresent on exists; the candidate's
+            // target membership describes the raw map even for an absent source.
+            if (contribution.rawPresent) {
+                present.insert(path);
+            } else if (!contribution.sourceExists) {
+                const auto source = layers.source(info.route.layerId, info.route.sourceId);
+                if (source && valueAt(source->raw, path.mid(info.route.prefix.size())))
+                    present.insert(path);
+            }
+            break;
+        }
+    }
+    return present;
+}
+} // namespace
+
 QVariantList ConfigWorker::candidateKey(const QList<ConfigPath> &paths) const {
     QVariantList key;
     for (const auto &layer : m_layers->m_layers)
@@ -315,7 +344,7 @@ void ConfigWorker::resolveDraft(const ConfigCommand &command) {
     const auto frozenObservation =
         previous.frozen ? previous.frozenObservation : readSnapshot(request->paths).observation();
     ConfigDraftPresentation p;
-    QMap<ConfigPath, ConfigCandidateFact> liveFacts;
+    ConfigEditBatch batch;
     p.request = request;
     p.requestId = command.requestId;
     if (error.isEmpty()) {
@@ -324,43 +353,60 @@ void ConfigWorker::resolveDraft(const ConfigCommand &command) {
                                      ConfigSelection::Target::UserLayer, "draft-selection");
         selection.owner = m_endpoint;
         selection.lifetime = request->lifetime;
-        const auto batch = ConfigEditBatch::capture(selection, request->edits);
-        const auto frozen = resolveCandidate(*base, batch, m_listPolicies, m_listMetadata);
-        const auto liveCandidate =
-            previous.frozen ? resolveCandidate(*m_layers, batch, m_listPolicies, m_listMetadata)
-                            : ConfigCandidate{};
-        const auto &live = previous.frozen ? liveCandidate : frozen;
-        error = !frozen.valid() ? frozen.error : live.error;
-        if (error.isEmpty()) {
-            p.frozen = candidatePresentation(frozen);
-            p.live = candidatePresentation(live);
-            liveFacts = live.facts;
-            const auto observation = [&](const ConfigObservation &base, bool preview) {
-                auto dependencies = ConfigObservationAccess::dependencies(base);
-                dependencies.first().previewId =
-                    preview && !request->previewId.isEmpty() ? request->previewId : request->id;
-                dependencies.first().previewLifetime = preview && request->previewLifetime
-                                                           ? request->previewLifetime
-                                                           : request->lifetime;
-                dependencies.first().previewEpoch =
-                    preview && request->previewLifetime ? request->previewEpoch : request->epoch;
-                return ConfigObservationAccess::observation(dependencies);
-            };
-            p.frozenRead = ConfigObservationAccess::candidate(
-                frozen, m_options.schema, observation(frozenObservation, false));
-            p.liveRead = ConfigObservationAccess::candidate(
-                live, m_options.schema,
-                observation(readSnapshot(request->paths).observation(), true));
+        batch = ConfigEditBatch::capture(selection, request->edits);
+        const auto observation = [&](const ConfigObservation &base, bool preview) {
+            auto dependencies = ConfigObservationAccess::dependencies(base);
+            dependencies.first().previewId =
+                preview && !request->previewId.isEmpty() ? request->previewId : request->id;
+            dependencies.first().previewLifetime =
+                preview && request->previewLifetime ? request->previewLifetime : request->lifetime;
+            dependencies.first().previewEpoch =
+                preview && request->previewLifetime ? request->previewEpoch : request->epoch;
+            return ConfigObservationAccess::observation(dependencies);
+        };
+        if (batch.error.isEmpty() && batch.operations.isEmpty() && !previous.frozen) {
+            // Initial capture/Discard freezes the same admitted cut, not a
+            // second empty merge. Subsequent frozen edits still use their base.
+            const auto admitted = readSnapshot(request->paths);
+            const auto presence = admittedTargetPresence(*m_layers, m_previous, request->paths);
+            p.frozenRead = ConfigObservationAccess::admittedCandidate(
+                admitted, presence, observation(frozenObservation, false));
+            p.liveRead = ConfigObservationAccess::admittedCandidate(
+                admitted, presence, observation(admitted.observation(), true));
+            if (request->paths == m_options.schema.leaves())
+                p.frozen = m_previous.values;
+            else
+                for (const auto &path : request->paths)
+                    p.frozen.insert(path, m_previous.values.value(path));
+            p.live = p.frozen;
+        } else {
+            const auto frozen = resolveCandidate(*base, batch, m_listPolicies, m_listMetadata);
+            const auto liveCandidate =
+                previous.frozen ? resolveCandidate(*m_layers, batch, m_listPolicies, m_listMetadata)
+                                : ConfigCandidate{};
+            const auto &live = previous.frozen ? liveCandidate : frozen;
+            error = !frozen.valid() ? frozen.error : live.error;
+            if (error.isEmpty()) {
+                p.frozen = candidatePresentation(frozen);
+                p.live = candidatePresentation(live);
+                p.frozenRead = ConfigObservationAccess::candidate(
+                    frozen, m_options.schema, observation(frozenObservation, false));
+                p.liveRead = ConfigObservationAccess::candidate(
+                    live, m_options.schema,
+                    observation(readSnapshot(request->paths).observation(), true));
+            }
         }
     }
     p.error = error;
     result.status = error.isEmpty() ? "staged" : "failed";
     if (!error.isEmpty())
         result.error = {error, {}, command.operation};
-    else
-        m_draftCaptures[request->id] = {
-            request,           base,         p.frozen,  p.live,
-            frozenObservation, p.frozenRead, liveFacts, candidateKey(request->paths)};
+    else {
+        const auto key = batch.operations.isEmpty() ? QVariantList{} : candidateKey(request->paths);
+        m_draftCaptures[request->id] = {request,      batch,      base,
+                                        p.frozen,     p.live,     frozenObservation,
+                                        p.frozenRead, p.liveRead, key};
+    }
     m_draftPackets.append(p);
     // Candidate evaluation is side-effect-free at the admitted store. Reuse that
     // cut for control delivery instead of recomputing its unrelated provenance.
@@ -371,6 +417,11 @@ void ConfigWorker::resolveDraft(const ConfigCommand &command) {
     post(packet);
 }
 QList<ConfigDraftPresentation> ConfigWorker::draftPresentations() {
+    return draftPresentationsFor(std::make_shared<const ConfigSnapshot>(m_previous), nullptr);
+}
+QList<ConfigDraftPresentation>
+ConfigWorker::draftPresentationsFor(const std::shared_ptr<const ConfigSnapshot> &admitted,
+                                    const ConfigSnapshot *delta) {
     auto packets = std::exchange(m_draftPackets, {});
     for (auto it = m_draftCaptures.begin(); it != m_draftCaptures.end();) {
         if (!*it->request->lifetime) {
@@ -384,40 +435,66 @@ QList<ConfigDraftPresentation> ConfigWorker::draftPresentations() {
             ++it;
             continue;
         }
-        const auto key = candidateKey(it->request->paths);
-        if (key == it->liveKey) {
-            ++it;
-            continue; // A publication/control cursor is not a candidate invalidation.
+        const auto &paths = it->request->paths;
+        const bool empty = it->batch.operations.isEmpty();
+        if (empty) {
+            // With no counterfactual edits, only changed admitted facts can
+            // invalidate this selection. A delivery cursor is not a change.
+            if (delta && std::none_of(paths.cbegin(), paths.cend(), [&](const auto &path) {
+                    return delta->information.contains(path);
+                })) {
+                ++it;
+                continue;
+            }
+        } else {
+            auto key = candidateKey(paths);
+            if (key == it->liveKey) {
+                ++it;
+                continue;
+            }
+            it->liveKey = std::move(key);
         }
-        it->liveKey = key;
-        auto selection =
-            ConfigSelection::capture(m_options.schema, it->request->paths, it->request->paths,
-                                     ConfigSelection::Target::UserLayer, "draft-selection");
-        const auto candidate =
-            resolveCandidate(*m_layers, ConfigEditBatch::capture(selection, it->request->edits),
-                             m_listPolicies, m_listMetadata);
-        const auto error = candidate.error;
-        const auto live = candidatePresentation(candidate);
-        if (!error.isEmpty() || candidate.facts != it->liveFacts) {
+        const auto selected = readSnapshot(paths, admitted);
+        auto dependencies = ConfigObservationAccess::dependencies(selected.observation());
+        auto &dependency = dependencies.first();
+        dependency.previewId =
+            it->request->previewId.isEmpty() ? it->request->id : it->request->previewId;
+        dependency.previewLifetime =
+            it->request->previewLifetime ? it->request->previewLifetime : it->request->lifetime;
+        dependency.previewEpoch =
+            it->request->previewLifetime ? it->request->previewEpoch : it->request->epoch;
+        const auto observation = ConfigObservationAccess::observation(dependencies);
+        ConfigReadSnapshot liveRead;
+        QMap<ConfigPath, QVariant> live;
+        QString error;
+        if (empty) {
+            // This publication already owns the complete admitted values and
+            // current list metadata. Empty live edits observe that exact cut.
+            liveRead = ConfigObservationAccess::admittedCandidate(
+                selected, admittedTargetPresence(*m_layers, *admitted, paths), observation);
+            if (it->request->paths == m_options.schema.leaves())
+                live = admitted->values;
+            else
+                for (const auto &path : it->request->paths)
+                    live.insert(path, admitted->values.value(path));
+        } else {
+            const auto candidate =
+                resolveCandidate(*m_layers, it->batch, m_listPolicies, m_listMetadata);
+            error = candidate.error;
+            live = candidatePresentation(candidate);
+            liveRead = ConfigObservationAccess::candidate(candidate, m_options.schema, observation);
+        }
+        if (!error.isEmpty() ||
+            !ConfigObservationAccess::sameCandidateFacts(liveRead, it->liveRead)) {
             it->liveValues = live;
-            it->liveFacts = candidate.facts;
+            it->liveRead = liveRead;
             ConfigDraftPresentation presentation;
             presentation.request = it->request;
             presentation.error = error;
             presentation.frozen = it->frozenValues;
             presentation.live = live;
             presentation.frozenRead = it->frozenRead;
-            auto dependencies = ConfigObservationAccess::dependencies(
-                readSnapshot(it->request->paths).observation());
-            auto &dependency = dependencies.first();
-            dependency.previewId =
-                it->request->previewId.isEmpty() ? it->request->id : it->request->previewId;
-            dependency.previewLifetime =
-                it->request->previewLifetime ? it->request->previewLifetime : it->request->lifetime;
-            dependency.previewEpoch =
-                it->request->previewLifetime ? it->request->previewEpoch : it->request->epoch;
-            presentation.liveRead = ConfigObservationAccess::candidate(
-                candidate, m_options.schema, ConfigObservationAccess::observation(dependencies));
+            presentation.liveRead = liveRead;
             packets.append(presentation);
         }
         ++it;

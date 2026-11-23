@@ -34,4 +34,6 @@ ConfigCandidate resolveCandidate(const ConfigLayers &base, const ConfigEditBatch
                                  const QMap<QString, ConfigRecordListMetadata> &metadata,
                                  const std::function<QString(const ConfigInput &)> &admission = {});
 QMap<ConfigPath, QVariant> candidatePresentation(const ConfigCandidate &candidate);
+QSet<ConfigPath> candidateTargetPresence(const ConfigLayers &layers, const QList<ConfigPath> &paths,
+                                         bool runtime = false);
 } // namespace configqml

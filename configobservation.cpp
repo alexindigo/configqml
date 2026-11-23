@@ -44,28 +44,37 @@ QList<ConfigPath> ConfigReadSnapshot::paths() const {
 ConfigSelectedState ConfigReadSnapshot::selectedState(const ConfigPath &path) const {
     if (!d || !d->selection.contains(d->prefix + path))
         return {};
-    const auto absolute = d->prefix + path;
-    if (d->states.contains(absolute)) {
-        auto state = *d->states.value(absolute).d;
-        state.observation = d->observation;
-        return ConfigObservationAccess::state(std::move(state));
+    return ConfigObservationAccess::state(
+        ConfigObservationAccess::selectedStateData(*d, d->prefix + path));
+}
+ConfigSelectedStateData
+ConfigObservationAccess::selectedStateData(const ConfigReadSnapshotData &snapshot,
+                                           const ConfigPath &absolute) {
+    const auto captured = snapshot.states.constFind(absolute);
+    if (captured != snapshot.states.cend()) {
+        auto state = *captured->d;
+        state.observation = snapshot.observation;
+        return state;
     }
-    if (!d->admitted)
+    if (!snapshot.admitted)
         return {};
     ConfigSelectedStateData state;
     state.valid = true;
-    state.effective = d->admitted->values.value(absolute);
-    const auto info = d->admitted->information.value(absolute).provenance;
+    state.effective = snapshot.admitted->values.value(absolute);
+    const auto info = snapshot.admitted->information.value(absolute).provenance;
     state.maskedBy = info.maskedBy;
-    if (d->targetPresence)
-        state.targetPresent = d->targetPresence->contains(absolute);
+    if (snapshot.targetPresence)
+        state.targetPresent = snapshot.targetPresence->contains(absolute);
     else
         for (const auto &contribution : info.contributions)
             if (contribution.layerId == info.route.layerId &&
                 contribution.sourceId == info.route.sourceId)
                 state.targetPresent = contribution.rawPresent;
-    state.observation = d->observation;
-    return ConfigObservationAccess::state(std::move(state));
+    state.candidateAvailable = snapshot.admittedCandidate;
+    if (snapshot.admittedCandidate)
+        state.candidate = state.effective;
+    state.observation = snapshot.observation;
+    return state;
 }
 ConfigObservation ConfigReadSnapshot::observation() const {
     return d ? d->observation : ConfigObservation();
@@ -226,6 +235,33 @@ ConfigReadSnapshot ConfigObservationAccess::candidate(const ConfigCandidate &can
         data.states[it.key()] = ConfigObservationAccess::state(std::move(state));
     }
     return ConfigObservationAccess::snapshot(std::move(data));
+}
+ConfigReadSnapshot
+ConfigObservationAccess::admittedCandidate(const ConfigReadSnapshot &snapshot,
+                                           QSet<ConfigPath> targetPresence,
+                                           const ConfigObservation &observation) {
+    if (!snapshot.d || !snapshot.d->admitted)
+        return {};
+    auto data = *snapshot.d;
+    data.admittedCandidate = true;
+    data.targetPresence = std::move(targetPresence);
+    data.observation = observation;
+    return ConfigObservationAccess::snapshot(std::move(data));
+}
+bool ConfigObservationAccess::sameCandidateFacts(const ConfigReadSnapshot &left,
+                                                 const ConfigReadSnapshot &right) {
+    if (!left.d || !right.d || left.d->selection != right.d->selection)
+        return false;
+    for (const auto &path : left.d->selection) {
+        const auto a = selectedStateData(*left.d, path);
+        const auto b = selectedStateData(*right.d, path);
+        if (a.valid != b.valid || a.effective != b.effective ||
+            a.targetPresent != b.targetPresent || a.maskedBy != b.maskedBy ||
+            a.pending != b.pending || a.authored != b.authored ||
+            a.candidateAvailable != b.candidateAvailable || a.candidate != b.candidate)
+            return false;
+    }
+    return true;
 }
 ConfigReadSnapshot ConfigObservationAccess::select(const ConfigReadSnapshot &snapshot,
                                                    const QList<ConfigPath> &paths,

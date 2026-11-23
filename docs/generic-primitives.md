@@ -256,12 +256,29 @@ draft facts without rebuilding unchanged store provenance, values or model plans
 Real store/source/metadata changes still use complete state publication. No-op
 control delivery is not a content invalidation or a second state cache.
 
+Draft captures retain their immutable validated P2 batch. Empty initial/Discard
+captures and empty live previews share the publication's exact admitted cut;
+ordinary value, raw-target-presence, mask and record-list metadata changes reach
+that preview without another selection validation or candidate merge. A private
+immutable snapshot flag exposes candidate facts lazily from the admitted data,
+not by recapturing in a getter. Frozen reads remain frozen; edited candidates
+still resolve the complete batch against their explicit frozen/current context.
+Empty live previews invalidate only on changes to their selected publication
+facts; edited previews retain the source dependency identity. Snapshots capture
+immutable facts, never a newer counter substituted for their read cut.
+
 Candidate selected facts are captured directly from that layer cut: declared
 defaults, participating admitted contributions, writable-layer masks and the
 original target's raw presence. They do not construct full per-source provenance
 or rebuild an unselected namespace to obtain a selected value. Full provenance
 remains available through `info`; record-list metadata projection still runs on
 the selected checked result. No second cache or getter evaluation is introduced.
+
+Source admission does not assemble unused transform inputs. Preceding-layer
+leaf facts exist only when source transforms are configured; a consuming layer
+assembles its complete preceding namespace once on its first actual transform.
+Same-layer sources still see the same preceding cut, and rejection rollback and
+effects ordering are unchanged.
 
 Target presence describes the selected target's raw contribution, not the winning
 layer or an inferred user route. A runtime candidate does not report its own

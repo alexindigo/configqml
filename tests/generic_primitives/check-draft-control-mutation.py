@@ -50,7 +50,7 @@ finally:
     run(output, "restored-build", ["cmake", "--build", build, "--parallel", "2",
         "--target", "configqml_core"], env=env)
 require_marker(run(output, "restored", [fixture / "layer-structure"], env=env),
-    "23 passed, 0 failed, 0 skipped")
+    "27 passed, 0 failed, 0 skipped")
 write_json(output / "result.json", {"source_sha256": before, "restored_sha256": digest(path),
     "full_publication_on_control_rejected": True})
 print("DRAFT_CONTROL_MUTATION_OK")
