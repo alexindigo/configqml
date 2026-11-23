@@ -233,11 +233,8 @@ void ConfigHandleState::wire() {
     // handles only; unmaterialized leaves cost nothing.
     auto *projection = ownerProjection();
     if (projection) {
-        QObject::connect(projection, &ConfigReadProjection::stateChanged, q, [this] {
-            if (kind == ConfigHandle::Kind::Staged)
-                refresh({}, true);
-            metadata();
-        });
+        QObject::connect(projection, &ConfigReadProjection::stateChanged, q,
+                         [this] { refreshMetadata(kind == ConfigHandle::Kind::Staged); });
         QObject::connect(projection, &ConfigReadProjection::completed, q,
                          [this](const ConfigReadResult &result) {
                              const QString next = result.status() == "observed" ? QString("ok")
@@ -249,10 +246,7 @@ void ConfigHandleState::wire() {
                          });
     }
     if (store)
-        QObject::connect(store, &ConfigStore::statusChanged, q, [this] {
-            refresh({}, true);
-            metadata();
-        });
+        QObject::connect(store, &ConfigStore::statusChanged, q, [this] { refreshMetadata(); });
     switch (owner) {
     case Owner::Store:
         QObject::connect(store, &ConfigStore::valuesChanged, q,
@@ -266,10 +260,7 @@ void ConfigHandleState::wire() {
                                  absolute.append(scope ? scope->m_prefix + path : path);
                              refresh(absolute, false);
                          });
-        QObject::connect(scope, &ConfigStoreHandle::detached, q, [this] {
-            refresh({}, true);
-            metadata();
-        });
+        QObject::connect(scope, &ConfigStoreHandle::detached, q, [this] { refreshMetadata(); });
         break;
     case Owner::Draft:
         QObject::connect(draft, &ConfigDraft::valuesChanged, q,
@@ -279,18 +270,14 @@ void ConfigHandleState::wire() {
     case Owner::Preview:
         QObject::connect(draft, &ConfigDraft::previewValuesChanged, q,
                          [this](const QList<ConfigPath> &paths) { refresh(paths, false); });
-        QObject::connect(draft, &ConfigDraft::previewScopesClosed, q, [this] {
-            refresh({}, true);
-            metadata();
-        });
+        QObject::connect(draft, &ConfigDraft::previewScopesClosed, q,
+                         [this] { refreshMetadata(); });
         break;
     case Owner::Overlay:
         QObject::connect(overlay, &ConfigOverlayEditor::valuesChanged, q,
                          [this](const QList<ConfigPath> &paths) { refresh(paths, false); });
-        QObject::connect(overlay, &ConfigOverlayEditor::stateChanged, q, [this] {
-            refresh({}, true);
-            metadata();
-        });
+        QObject::connect(overlay, &ConfigOverlayEditor::stateChanged, q,
+                         [this] { refreshMetadata(); });
         break;
     }
 }
@@ -488,6 +475,11 @@ void ConfigHandleState::metadata() {
     for (const auto &handle : handles)
         if (handle && !guard.invoke([&] { emit handle->stateChanged(); }))
             return;
+}
+void ConfigHandleState::refreshMetadata(bool values) {
+    ConfigConsumerGuard guard(q);
+    if (!values || guard.invoke([&] { refresh({}, true); }))
+        metadata();
 }
 ConfigPendingReply *ConfigHandleState::refuse(const QString &code, const QString &phase) const {
     return ConfigPendingReplyState::refuse(code, phase);

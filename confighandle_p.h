@@ -95,6 +95,7 @@ private:
     void prime();
     void refresh(const QList<ConfigPath> &paths, bool all);
     void metadata();
+    void refreshMetadata(bool values = true);
     ConfigPendingReply *start(ConfigReplyWriter writer, bool barrier,
                               const ConfigObservation &after, const ConfigHandleOptions &options,
                               ConfigHandle *opened = nullptr,
