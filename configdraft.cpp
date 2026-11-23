@@ -395,12 +395,20 @@ void ConfigDraft::rebase(const QList<ConfigPath> &selection) {
     }
     prepareStoreChange();
 }
-bool ConfigDraft::discardSelection(const QList<ConfigPath> &selection) {
+bool ConfigDraft::canDiscard(const QList<ConfigPath> *selection) const {
     if (!valid() || m_busy)
         return false;
+    // Only Apply and Abandon can consume an admitted Retry witness.
+    if (!selection)
+        return !m_admitted;
     for (auto it = m_admittedEdits.cbegin(); it != m_admittedEdits.cend(); ++it)
-        if (selection.contains(it.key()))
-            return false; // An admitted Retry witness is never discarded here.
+        if (selection->contains(it.key()))
+            return false;
+    return true;
+}
+bool ConfigDraft::discardSelection(const QList<ConfigPath> &selection) {
+    if (!canDiscard(&selection))
+        return false;
     const ConfigPublicationScope publication(m_store);
     for (const auto &path : selection)
         m_edits.remove(path);
@@ -415,13 +423,11 @@ bool ConfigDraft::discardSelection(const QList<ConfigPath> &selection) {
     return true;
 }
 bool ConfigDraft::discard() {
-    if (!valid() || m_busy)
+    if (!canDiscard(nullptr))
         return false;
     const ConfigPublicationScope publication(m_store);
     closePreviewScopes();
     ConfigDraftState::get(this)->reset();
-    m_admitted.reset();
-    m_admittedEdits.clear();
     m_edits.clear();
     m_conflicted = false;
     refresh();

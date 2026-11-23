@@ -62,6 +62,7 @@ private:
     quint64 applySelection(const std::optional<QList<ConfigPath>> &selection, QObject *context,
                            ConfigStore::Callback callback, bool retained);
     bool discardSelection(const QList<ConfigPath> &selection);
+    bool canDiscard(const QList<ConfigPath> *selection) const;
     void rebase(const QList<ConfigPath> &selection);
     void publishPreview();
     void closePreviewScopes();
