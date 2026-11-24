@@ -193,7 +193,8 @@ private slots:
         element.optional = true;
         QVERIFY(!ConfigSchema(D::group({{"x", D::list(element, {})}})).valid());
         auto list = D::list(D::leaf(T::Integer, 0), {1});
-        list.choices = {QVariantList{1}};
+        // Box the list as one choice instead of assigning its elements to choices.
+        list.choices = {QVariant::fromValue(QVariantList{1})};
         ConfigSchema constrained(D::group({{"x", list}}));
         QVERIFY(constrained.valid());
         QVERIFY(constrained.validate({"x"}, decodeJsonValue("[1e0]").value).ok());
@@ -204,7 +205,7 @@ private slots:
                 object.element = {D::leaf(T::Integer, 0)};
             else
                 object.fields = {{"n", D::leaf(T::Integer, 0)}};
-            object.choices = {QVariantMap{{"n", 1}}};
+            object.choices = {QVariant::fromValue(QVariantMap{{"n", 1}})};
             ConfigSchema schema(D::group({{"x", object}}));
             QVERIFY(schema.valid());
             QVERIFY(schema.validate({"x"}, decodeJsonValue("{\"n\":1e0}").value).ok());
@@ -228,7 +229,7 @@ private slots:
     }
     void namespaceConstraints() {
         auto group = D::group({{"n", D::leaf(T::Integer, 0)}});
-        group.choices = {QVariantMap{{"n", 0}}};
+        group.choices = {QVariant::fromValue(QVariantMap{{"n", 0}})};
         QVERIFY(!ConfigSchema(group).valid());
         QVERIFY(!ConfigSchema(D::group({{"nested", group}})).valid());
     }
