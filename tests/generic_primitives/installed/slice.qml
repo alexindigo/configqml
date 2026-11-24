@@ -39,8 +39,9 @@ QtObject {
             draft = store.draft([["settings"]]);
             draft.values.settings.count = 12;
             draft.stageReset([["settings"]], function(staged) {
-                const count = draft.readProjection.state(["settings", "count"]);
-                const hidden = draft.readProjection.state(["settings", "hidden"]);
+                const projection = ConfigPrimitives.forStore(draft).readProjection;
+                const count = projection.state(["settings", "count"]);
+                const hidden = projection.state(["settings", "hidden"]);
                 if (!check(staged.status === "staged" && count.pending === "remove"
                     && count.targetPresent && count.candidateAvailable && count.value === 3
                     && hidden.value === 2 && bound === 4, "cancellable Reset")) return;
@@ -49,7 +50,7 @@ QtObject {
                     if (!check(again.status === "staged", "second Reset")) return;
                     draft.apply(function(write) {
                         if (!check(write.status === "saved", "Apply")) return;
-                        scope.readProjection.synchronize(write.observation, function(read) {
+                        ConfigPrimitives.forStore(scope).readProjection.synchronize(write.observation, function(read) {
                             retained = read;
                             if (!check(read.status === "observed" && bound === 3
                                 && scope.values.count === 3 && read.snapshot.state(["count"]).value === 3,

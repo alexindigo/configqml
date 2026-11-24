@@ -36,12 +36,13 @@ QtObject {
         });
     }
     function abandon(): void {
-        draft.abandonApply(function (result) {
+        const primitives = ConfigPrimitives.forStore(draft);
+        primitives.abandonApply(function (result) {
             ++callbacks;
             abandonStatus = result.status;
             boundAtCallback = bound;
-            snapshotAtCallback = store.readProjection.state(["settings", "n"]).value;
-            draft.abandonApply(function (again) {
+            snapshotAtCallback = ConfigPrimitives.forStore(store).readProjection.state(["settings", "n"]).value;
+            primitives.abandonApply(function (again) {
                 secondStatus = again.status;
                 secondCode = again.error ? again.error.code : "";
                 finished = true;

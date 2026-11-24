@@ -1,4 +1,4 @@
-"""Exact, reviewed vague-linkage exceptions; not a general weak-symbol filter.
+"""Exact, reviewed incidental-export exceptions; not a general symbol filter.
 
 Approved in the generic-primitives plan's addendum-01-weak-exports.md.
 """
@@ -54,37 +54,53 @@ ALLOWLIST = {
         "Qt shared-data detach template for the route map; an independent using TU emits its own weak copy",
 }
 
+# ConfigQml 0.5.5 orchestrator review; see docs/weak-exports.md for proofs.
+SCOPED_ALLOWLIST = {
+    "_ZNK4QMapI5QListI7QStringESt10shared_ptrIN9configqml15ConfigListModelEEE5valueERKS2_RKS6_":
+        ("core", "W", "Qt QMap value template; an independent using TU emits its own weak copy"),
+    "_ZSt19piecewise_construct":
+        ("qml", "R", "C++17 inline variable from <utility>; an independent using TU emits its own definition"),
+}
+REVIEWED_NAMES = ALLOWLIST.keys() | SCOPED_ALLOWLIST.keys()
+
 
 def symbols(text):
     return {parts[0]: parts[1] for line in text.splitlines() if len(parts := line.split()) >= 2}
 
 
-def classify_losses(before, after, imports):
+def classify_losses(library, before, after, imports):
     allowed, rejected = {}, {}
     for name in sorted(set(before) - set(after)):
-        # An exact entry is necessary, never sufficient. Data/vtables/typeinfo
-        # are not eligible even if a later edit accidentally adds their names.
-        if (name not in ALLOWLIST or before[name] != "W"
-                or name.startswith(("_ZTV", "_ZTI", "_ZTS", "_ZTT"))
-                or name in imports):
-            rejected[name] = before[name]
+        kind = before[name]
+        if name in SCOPED_ALLOWLIST:
+            expected_library, expected_kind, detail = SCOPED_ALLOWLIST[name]
+            reason = detail if (library, kind) == (expected_library, expected_kind) else None
         else:
-            allowed[name] = {"kind": before[name], "reason": ALLOWLIST[name]}
+            reason = ALLOWLIST.get(name) if kind == "W" else None
+        if (reason is None or name.startswith(("_ZTV", "_ZTI", "_ZTS", "_ZTT"))
+                or name in imports):
+            rejected[name] = kind
+        else:
+            allowed[name] = {"kind": kind, "reason": reason}
     return allowed, rejected
 
 
 def verify_no_imports(imports):
-    imported = sorted(set(imports) & ALLOWLIST.keys())
+    imported = sorted(set(imports) & REVIEWED_NAMES)
     if imported:
-        raise RuntimeError("consumer imports reviewed weak export: " + ", ".join(imported))
+        raise RuntimeError("consumer imports reviewed incidental export: " + ", ".join(imported))
 
 
 def control_checks():
-    for sample in ALLOWLIST:
-        assert classify_losses({sample: "W"}, {}, set())[0]
-        for kind in ("T", "D", "B", "R", "V"):
-            assert classify_losses({sample: kind}, {}, set())[1]
-        assert classify_losses({sample: "W"}, {}, {sample})[1]
+    for sample in REVIEWED_NAMES:
+        library, expected_kind, _ = SCOPED_ALLOWLIST.get(sample, ("core", "W", None))
+        assert classify_losses(library, {sample: expected_kind}, {}, set())[0]
+        if sample in SCOPED_ALLOWLIST:
+            for wrong_library in {"core", "qml", "plugin"} - {library}:
+                assert classify_losses(wrong_library, {sample: expected_kind}, {}, set())[1]
+        for kind in {"T", "D", "B", "R", "V", "W", "u"} - {expected_kind}:
+            assert classify_losses(library, {sample: kind}, {}, set())[1]
+        assert classify_losses(library, {sample: expected_kind}, {}, {sample})[1]
         try:
             verify_no_imports({sample})
         except RuntimeError:
@@ -93,7 +109,7 @@ def control_checks():
             raise RuntimeError("consumer-import negative control was accepted")
     for name in ("_ZTVN9configqml11ConfigStoreE", "_ZTIN9configqml11ConfigStoreE",
                  "_ZTSN9configqml11ConfigStoreE", "_Zunlisted_weak"):
-        assert classify_losses({name: "W"}, {}, set())[1]
+        assert classify_losses("core", {name: "W"}, {}, set())[1]
 
 
 def elf_binary(path):
@@ -130,7 +146,7 @@ def audit_consumers(output, paths, roots, env, run, digest, write_json):
         current = {name.split("@", 1)[0] for name in symbols(text)}
         imported.update(current)
         dynamic = run(output, f"consumer-{index}-dynamic", ["readelf", "-d", path], env=env)
-        matches = sorted(current & ALLOWLIST.keys())
+        matches = sorted(current & REVIEWED_NAMES)
         report.append({"path": str(path), "sha256": before, "reviewed_imports": matches,
                        "links_configqml": "[libconfigqml" in dynamic})
         if digest(path) != before:
@@ -138,7 +154,7 @@ def audit_consumers(output, paths, roots, env, run, digest, write_json):
     write_json(output / "consumer-imports.json", {
         "roots": [str(root) for root in roots], "binaries": report,
         "unreadable_inventory_paths": sorted(unreadable),
-        "reviewed_names": sorted(ALLOWLIST),
+        "reviewed_names": sorted(REVIEWED_NAMES),
     })
     verify_no_imports(imported)
     return imported

@@ -1,10 +1,26 @@
-# Reviewed weak exports
+# Reviewed incidental exports
 
 The compatibility runner's exact allowlist is not a blanket weak-symbol filter.
-Every accepted missing definition must be `W` in the frozen baseline and absent
-from all examined consumers' undefined dynamic imports. Strong definitions and
-public vtables/typeinfo remain protected. Every allowlisted name is tested against
-strong-symbol substitution and consumer-import negative controls.
+Every accepted missing definition must have its reviewed ELF kind in the frozen
+baseline and be absent from all examined consumers' undefined dynamic imports.
+The original entries accept only `W`; the 0.5.5 entries below also require the
+exact named DSO. Other data exports and public vtables/typeinfo remain protected.
+
+## ConfigQml 0.5.5 review, 2026-11-23
+
+The originating orchestrator approved these two exact exceptions in reply to
+`checkpoint-hotfix-055-4.md`, using the same evidence controls as
+`decision-weak-pair-18.md`. Both gates reject consumer imports, a different DSO,
+or a different ELF kind for either name.
+
+| Exact mangled name | Demangled form | Frozen v0.5.3 origin | Independent definition |
+|---|---|---|---|
+| `_ZNK4QMapI5QListI7QStringESt10shared_ptrIN9configqml15ConfigListModelEEE5valueERKS2_RKS6_` | `QMap<QList<QString>, std::shared_ptr<configqml::ConfigListModel>>::value(QList<QString> const&, std::shared_ptr<configqml::ConfigListModel> const&) const` | `core`, `W`, plain CMake Release | An independent TU takes the member's address with the same GCC 16.2.1 Release flags, links only Qt Core and emits `W`. A forward declaration suffices. |
+| `_ZSt19piecewise_construct` | `std::piecewise_construct` | `qml`, `R`, matched Arch makepkg/LTO | An independent C++17 TU takes the inline variable's address after including `<utility>`, links without ConfigQml and emits `R` with GCC and LTO. |
+
+The initial audits examined 1,350 ELFs in the plain lane and 3,845 in the
+makepkg lane, with neither import observed. The release evidence retains the
+rerun audits and compiler probes (`abi-qmap-control.log`, `abi-symbol-control.log`).
 
 ## Additional review, 2026-11-22
 

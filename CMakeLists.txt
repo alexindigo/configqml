@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(configqml VERSION 0.5.4 DESCRIPTION "Layered configuration for Qt" LANGUAGES CXX)
+project(configqml VERSION 0.5.5 DESCRIPTION "Layered configuration for Qt" LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -75,7 +75,7 @@ if(CONFIGQML_BUILD_QML)
         configqmlevent_p.h configqmlevent.cpp)
     target_sources(configqml PRIVATE configqmlreadprojection.h configqmlreadprojection.cpp
         configqmlpendingreply.h configqmlpendingreply.cpp
-        configqmlhandle.h configqmlhandle.cpp)
+        configqmlhandle.h configqmlhandle.cpp configqmlprimitives.h configqmlprimitives.cpp)
     add_library(configqml::configqml ALIAS configqml)
     target_link_libraries(configqml PUBLIC configqml::core Qt6::Qml PRIVATE Qt6::CorePrivate)
     target_include_directories(configqml PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -211,6 +211,15 @@ if(BUILD_TESTING)
             QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
             HANDLES_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_generic_handles.qml")
         add_test(NAME qml_generic_primitives_handles COMMAND test_qml_generic_primitives_handles)
+        add_executable(test_qml_legacy_scope tests/test_qml_legacy_scope.cpp)
+        target_link_libraries(test_qml_legacy_scope PRIVATE configqml::configqml Qt6::Test Qt6::Quick)
+        add_dependencies(test_qml_legacy_scope configqmlplugin)
+        target_compile_definitions(test_qml_legacy_scope PRIVATE
+            QML_IMPORT_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
+            LEGACY_SCOPE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/qml_scope/legacy-owner-scope.qml"
+            LEGACY_SCOPE_MEMBERS="${CMAKE_CURRENT_SOURCE_DIR}/tests/qml_scope/reviewed-members.txt")
+        add_test(NAME qml_legacy_scope COMMAND test_qml_legacy_scope)
+        set_tests_properties(qml_legacy_scope PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QSG_RHI_BACKEND=software")
         add_test(NAME generic_primitives_qml_lint COMMAND $<TARGET_FILE:Qt6::qmllint>
             ${_configqml_qmllint_args} -I ${CMAKE_CURRENT_BINARY_DIR}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_generic_primitives.qml

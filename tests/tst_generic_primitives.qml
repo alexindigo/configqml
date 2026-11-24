@@ -23,7 +23,8 @@ QtObject {
     property int pendingCount: 0
     readonly property int boundCount: runtime && runtime.ready ? runtime.values.count : -1
     readonly property bool ready: base.ready && owner.ready
-    readonly property var earlyRead: owner.readProjection
+    readonly property var earlyRead: ConfigPrimitives.forStore(owner).readProjection
+    readonly property var runtimeRead: ConfigPrimitives.forOverlay(runtime)?.readProjection ?? null
     signal setupFinished()
     signal writerFinished()
     signal readFinished()
@@ -51,7 +52,7 @@ QtObject {
         sources: [JsonFileSource { sourceId: "owner"; path: root.directory + "/owner.json"; writable: true }]
     }
     property Connections readSignals: Connections {
-        target: root.runtime ? root.runtime.readProjection : null
+        target: root.runtimeRead
         function onCompleted(result: var): void {
             ++root.nativeCompletions;
             if (result.status === "observed" && result.pending.length === 0
@@ -67,7 +68,7 @@ QtObject {
             differencePolicy: "top_level_omit_equal"};
     }
     function setup(): void {
-        if (earlyRead !== owner.readProjection) {
+        if (earlyRead !== ConfigPrimitives.forStore(owner).readProjection) {
             failure = "read projection identity changed";
             setupFinished();
             return;
@@ -115,14 +116,14 @@ QtObject {
             if (read.status === "observed") captured = read.snapshot.state(["count"]).value;
             readFinished();
         };
-        if (withToken) runtime.readProjection.synchronize(receipt.observation, complete);
-        else runtime.readProjection.synchronize(complete);
+        if (withToken) runtimeRead.synchronize(receipt.observation, complete);
+        else runtimeRead.synchronize(complete);
     }
     function newerInput(): void { runtime.values.count = 7; }
     function closeEditor(): void { editor.detach(); }
     function rejectsForged(): bool {
         try {
-            runtime.readProjection.synchronize({delivery: "999999"}, function() {});
+            runtimeRead.synchronize({delivery: "999999"}, function() {});
         } catch (error) {
             return String(error).indexOf("read-observation") !== -1;
         }
