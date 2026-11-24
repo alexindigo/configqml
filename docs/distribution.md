@@ -1,6 +1,6 @@
 # Installation and compatibility
 
-configqml 0.5.4 targets C++17 and Qt 6.12 on Linux. The initial verified platform
+configqml 0.5.5 targets C++17 and Qt 6.12 on Linux. The initial verified platform
 is x86_64 Arch Linux. Before 1.0 the API/ABI may change; rebuild consumers when
 upgrading. CMake package version matching uses SameMinorVersion. Before 1.0 each
 minor release has its own SONAME `so.0.<minor>`; consumers rebuild on minor bumps.
@@ -11,10 +11,10 @@ claim that the library has reached stable version 1.0.
 ## Installed targets
 
 ```cmake
-find_package(configqml 0.5.4 REQUIRED COMPONENTS Core)
+find_package(configqml 0.5.5 REQUIRED COMPONENTS Core)
 target_link_libraries(headless PRIVATE configqml::core)
 # For native QML integration instead:
-find_package(configqml 0.5.4 REQUIRED COMPONENTS Qml)
+find_package(configqml 0.5.5 REQUIRED COMPONENTS Qml)
 target_link_libraries(declarative PRIVATE configqml::configqml)
 ```
 

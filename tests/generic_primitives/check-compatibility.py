@@ -65,7 +65,7 @@ def check_lane(baseline, source, prefix, output, consumers=(), roots=()):
             ["nm", "-D", "--defined-only", "--format=posix", library], env=env))
         if set(before) != set(old["symbols"]):
             raise RuntimeError("baseline symbol inventory changed")
-        accepted, rejected = classify_losses(before, installed["libraries"][name]["symbols"], imports)
+        accepted, rejected = classify_losses(name, before, installed["libraries"][name]["symbols"], imports)
         if accepted:
             allowed[name] = accepted
         if rejected:

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-11-23
+
+### Fixed
+
+- ConfigQml 0.5.4 added members to existing QML types that could shadow an
+  enclosing `id`, such as `root`, in consumer bindings. This broke settings
+  initialization in the standalone Atmosphera lock screen. Upgrade to 0.5.5;
+  existing applications do not need to rename their IDs.
+- QML consumers of the new 0.5.4 API now use `ConfigPrimitives.forStore(owner)`
+  for a store, scope, draft or preview, or `ConfigPrimitives.forOverlay(owner)`
+  for the editor/view returned by `openOverlay`. Access `root`, `runtimeRoot`,
+  `readProjection` and `abandonApply` on the adapter for the corresponding owner.
+  Generated handles and the native C++ API are unchanged.
+
 ## [0.5.4] - 2026-11-23
 
 ### Added

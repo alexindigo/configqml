@@ -44,7 +44,7 @@ QtObject {
     function run(): void {
         if (started) return;
         started = true;
-        clock = store.root.scopes.plugins.scopes.clock;
+        clock = ConfigPrimitives.forStore(store).root.scopes.plugins.scopes.clock;
         if (!check(clock.fields.format.valid && !clock.fields.format.present, "optional field")) return;
         if (!check(clock.capabilities.indexOf("edit") >= 0, "capabilities")) return;
         then(clock.fields.maxVisible.set(5), "live set", function () {

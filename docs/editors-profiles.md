@@ -68,7 +68,8 @@ preview scopes normally; a repeated failure retains both edits and failure histo
 Store reads stay read-after-write throughout.
 
 The admitted change can instead be abandoned explicitly: native
-`draft->abandonApply(context, callback)`, QML `draft.abandonApply(callback)`.
+`draft->abandonApply(context, callback)`, QML
+`ConfigPrimitives.forStore(draft).abandonApply(callback)`.
 It is identified by this draft's admission witness, not by key. Only that
 Apply's still-pending intent (including a Retry's admitted additions) leaves the
 store; the remaining pending intent, newer intent on the same leaves and other

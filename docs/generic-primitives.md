@@ -26,8 +26,14 @@ Every owner exposes a stable `root` handle generated from its schema: a store's
 root is live (user layer), `runtimeRoot` is live on the runtime layer (no disk
 route), a draft or overlay editor's root is staged, and a read-only scope, overlay
 view or draft preview is read-only. Native owners provide nonvirtual `root()`
-(and `ConfigStore::runtimeRoot()`); QML owners provide `root` (and `runtimeRoot`)
-properties. A new setting or plugin needs a schema, not new library methods.
+(and `ConfigStore::runtimeRoot()`). QML uses `ConfigPrimitives.forStore(owner)`
+for stores, scopes, drafts and preview scopes, or `ConfigPrimitives.forOverlay(owner)`
+for the editor/view returned by `openOverlay`. These functions return a stable,
+owner-lifetime adapter (or `null` for a missing or invalid owner). Use `.root`
+on either adapter and `.runtimeRoot` on the live store adapter. The handle graph
+and verbs are the same as in 0.5.4. New members live on the adapters rather than
+legacy QML objects so they cannot shadow the consumer's enclosing IDs.
+A new setting or plugin needs a schema, not new library methods.
 
 | # | Access | Meaning |
 |---|---|---|
@@ -69,7 +75,7 @@ with `read-observation` in phase `selection` and nothing is written.
 | 5 | `discard()` | `unsupported-operation` (never rollback) | Drops only selected unadmitted edits and rebases them | `unsupported-operation` |
 | 6 | `observe(after)` = `whenCurrent(after)` | Capture covering the token; omitted token: fresh barrier | Only an already covered token, else `unsupported-operation` | Capture covering the token |
 | 7 | `edit()` | Opens a staged handle over the same selection (store and scope roots) | `unsupported-operation` | `unsupported-operation` |
-| 8 | `abandon()` | `unsupported-operation` | Draft sessions: abandons the session's failed admitted Apply (same owner as `draft.abandonApply`); `apply-not-pending` when none remains | `unsupported-operation` |
+| 8 | `abandon()` | `unsupported-operation` | Draft sessions: abandons the session's failed admitted Apply (same owner as `ConfigPrimitives.forStore(draft).abandonApply`); `apply-not-pending` when none remains | `unsupported-operation` |
 
 A batch validates completely before anything is staged or admitted; omitted
 fields are not edited; duplicates and paths outside the selection are refused.
@@ -136,7 +142,7 @@ intent. A reentrant operation follows the whole original batch.
 
 Native store, scoped handle and overlay owners expose `readProjection()`.
 A draft exposes frozen `readProjection()` and separate live `previewProjection()`.
-QML owners expose a stable read-only `readProjection` object. Native
+The QML adapters above expose a stable read-only `readProjection` object. Native
 `selectedState(path)` and QML `state(path)` use the owner's existing namespace:
 native draft paths remain absolute, scoped handle paths are relative, and overlay
 paths are relative to the overlay schema.
@@ -179,7 +185,7 @@ The QML compatibility form is:
 ```qml
 editor.apply(function(write) {
     if (write.status === "failed" || write.refreshState !== "current") return;
-    runtime.readProjection.synchronize(write.observation, function(read) {
+    ConfigPrimitives.forStore(runtime).readProjection.synchronize(write.observation, function(read) {
         if (read.status !== "observed") return;
         const policy = read.snapshot;
         // policy.state(["count"]).value is the acknowledged immutable fact.

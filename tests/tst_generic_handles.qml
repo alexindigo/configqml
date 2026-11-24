@@ -19,14 +19,16 @@ QtObject {
     property bool instanceInherited: false
     readonly property bool ready: base.ready && owner.ready
     // Sketch 1: automatic binding, no per-field registration.
-    readonly property var general: base.root ? base.root.scopes.general : null
+    readonly property var baseRoot: ConfigPrimitives.forStore(base)?.root ?? null
+    readonly property var runtimeHandle: ConfigPrimitives.forOverlay(runtime)?.root ?? null
+    readonly property var overlayHandle: ConfigPrimitives.forOverlay(editor)?.root ?? null
+    readonly property var general: baseRoot ? baseRoot.scopes.general : null
     readonly property real scale: general ? general.fields.scaleRatio.value : -1
     readonly property bool labelPresent: general ? general.fields.label.present : false
     readonly property real editedScale: edit ? edit.fields.scaleRatio.value : -1
-    readonly property int runtimeCount: runtime && runtime.root
-                                        ? runtime.root.fields.count.value : -1
+    readonly property int runtimeCount: runtimeHandle ? runtimeHandle.fields.count.value : -1
     // Sketch 5: sparse instance override with inherited display.
-    readonly property var field: editor && editor.root ? editor.root.fields.count : null
+    readonly property var field: overlayHandle ? overlayHandle.fields.count : null
     readonly property var displayed: field ? field.value : undefined
     readonly property bool inherited: field ? (field.state.pending === "remove"
         || (!field.state.targetPresent && field.state.pending === "none")) : false
@@ -93,7 +95,14 @@ QtObject {
             runtime = opened.editor;
             owner.openOverlay(overlayOptions("editor"), function (result) {
                 if (result.status !== "opened") fail("editor open");
-                else editor = result.editor;
+                else {
+                    editor = result.editor;
+                    const view = ConfigPrimitives.forOverlay(editor);
+                    if (editor.root !== undefined || editor.readProjection !== undefined
+                            || !view || view !== ConfigPrimitives.forOverlay(editor)
+                            || !view.root || !view.readProjection)
+                        fail("overlay lexical surface or adapter identity");
+                }
                 finished("overlays");
             });
         });
@@ -115,10 +124,10 @@ QtObject {
     function applyEdit(): void { done(edit.apply({observe: [general]}), "applyEdit"); }
     // Sketch 3: runtime-fresh Apply; consume the acknowledged snapshot only.
     function applyAutoTile(value: int): void {
-        const set = editor.root.fields.count.set(value);
+        const set = overlayHandle.fields.count.set(value);
         set.finished.connect(function () {
             if (set.isError) { fail("autotile set:" + set.error.code); finished("autoTile"); return; }
-            const reply = editor.root.apply({observe: [runtime.root]});
+            const reply = overlayHandle.apply({observe: [runtimeHandle]});
             autoTileReply = reply;
             reply.finished.connect(function () {
                 if (reply.isError) { fail("autotile:" + reply.error.phase + ":" + reply.error.code); finished("autoTile"); return; }
@@ -134,15 +143,15 @@ QtObject {
     }
     // Sketch 4: scoped save excludes pending work in a sibling.
     function saveBarOnly(): void {
-        base.root.scopes.general.fields.scaleRatio.set(9);
-        base.root.scopes.bar.fields.position.set("left");
-        done(base.root.scopes.bar.apply(), "saveBar");
+        baseRoot.scopes.general.fields.scaleRatio.set(9);
+        baseRoot.scopes.bar.fields.position.set("left");
+        done(baseRoot.scopes.bar.apply(), "saveBar");
     }
     // Sketch 5: sparse override; removal is not a default set.
     function choose(value: int): void { done(field.set(value), "choose"); }
     function inheritAgain(): void { done(field.unset(), "inherit"); }
     function applyInstance(): void {
-        const reply = editor.root.apply({observe: [runtime.root]});
+        const reply = overlayHandle.apply({observe: [runtimeHandle]});
         reply.finished.connect(function () {
             if (reply.isError) fail("instance:" + reply.error.phase + ":" + reply.error.code);
             instanceDisplayed = displayed === undefined ? -1 : displayed;
@@ -151,14 +160,14 @@ QtObject {
         });
     }
     function forgedToken(): void {
-        const reply = runtime.root.observe({delivery: "999"});
+        const reply = runtimeHandle.observe({delivery: "999"});
         reply.finished.connect(function () {
             if (!reply.isError || reply.error.code !== "read-observation") fail("forged token accepted");
             finished("forged");
         });
     }
     function readOnlyRefusal(): void {
-        const reply = base.scope(["bar"], false).root.fields.position.set("x");
+        const reply = ConfigPrimitives.forStore(base.scope(["bar"], false)).root.fields.position.set("x");
         reply.finished.connect(function () {
             if (!reply.isError || reply.error.code !== "unsupported-operation") fail("read-only write");
             finished("readOnly");
